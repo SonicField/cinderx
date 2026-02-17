@@ -1548,6 +1548,19 @@ PyObject* force_compile(PyObject* /* self */, PyObject* arg) {
     Py_RETURN_FALSE;
   }
 
+#if defined(__aarch64__) || defined(_M_ARM64)
+  // aarch64: generators/coroutines/async generators crash because
+  // generateResumeEntry() reassigns FP to heap memory (gen->gi_jit_data),
+  // causing saved-IP writes at [FP+offset] to corrupt the heap.
+  // Silently skip compilation - generators run in interpreter mode.
+  {
+    BorrowedRef<PyCodeObject> code{func->func_code};
+    if (code->co_flags & kCoFlagsAnyGenerator) {
+      Py_RETURN_FALSE;
+    }
+  }
+#endif
+
   if (Ci_InitFrameEvalFunc() < 0) {
     return nullptr;
   }
@@ -3444,6 +3457,19 @@ bool shouldScheduleCompile(BorrowedRef<PyFunctionObject> func) {
     return false;
   }
 
+#if defined(__aarch64__) || defined(_M_ARM64)
+  // aarch64: generators/coroutines/async generators crash because
+  // generateResumeEntry() reassigns FP to heap memory (gen->gi_jit_data),
+  // causing saved-IP writes at [FP+offset] to corrupt the heap.
+  // Deopt generators to the CPython interpreter until a proper fix lands.
+  {
+    BorrowedRef<PyCodeObject> code{func->func_code};
+    if (code->co_flags & kCoFlagsAnyGenerator) {
+      return false;
+    }
+  }
+#endif
+
   // Note: This is not the same as fetching the function's code object and
   // checking its module and qualname, as functions can be renamed after they
   // are created.  Code objects cannot.
@@ -3462,6 +3488,16 @@ bool shouldScheduleCompile(
   if (isCinderModule(module_name)) {
     return false;
   }
+
+#if defined(__aarch64__) || defined(_M_ARM64)
+  // aarch64: generators/coroutines/async generators crash because
+  // generateResumeEntry() reassigns FP to heap memory (gen->gi_jit_data),
+  // causing saved-IP writes at [FP+offset] to corrupt the heap.
+  // Deopt generators to the CPython interpreter until a proper fix lands.
+  if (code->co_flags & kCoFlagsAnyGenerator) {
+    return false;
+  }
+#endif
 
   if (auto jit_list = cinderx::getModuleState()->jitList()) {
     return jit_list->lookupCode(code) == 1 ||
