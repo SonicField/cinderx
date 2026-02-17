@@ -140,8 +140,8 @@ class TestGeneratorCallsJitFunction(unittest.TestCase):
         force_compile(gen)
 
         results = list(gen())
-        # i=0: a=0, b=0, c=0; i=1: a=1, b=2, c=4; etc.
-        expected = [0, 4, 10, 18, 28]
+        # i=0: a=0, b=0, c=0+0+0=0; i=1: a=1, b=2, c=1+2+1=4; i=2: a=2, b=4, c=2+4+2=8; etc.
+        expected = [0, 4, 8, 12, 16]
         self.assertEqual(results, expected)
 
 
