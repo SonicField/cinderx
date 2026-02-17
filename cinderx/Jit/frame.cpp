@@ -118,20 +118,21 @@ uintptr_t getIP(_PyInterpreterFrame* frame, int frame_size) {
   memcpy(&ip, saved_ip, kPointerSize);
   return ip;
 #elif defined(__aarch64__)
-  // On aarch64, the JIT prologue does:
-  //   stp x29, x30, [sp, #-16]!  ; saves FP and LR
-  //   mov x29, sp                ; sets up frame pointer
-  // In lightweight frame mode, frame_base == x29 (verified from
-  // frameHeaderSize() computation). The saved LR (return address)
-  // is at [frame_base + 8].
-  //
-  // We read it directly rather than walking the FP chain, because
-  // intermediate C frames may be compiled without frame pointers
-  // (e.g. pytest/pluggy extensions), breaking the chain walk.
+  // On aarch64, the JIT saves the return address to [SP, #8] before each
+  // BL/BLR. This slot is at frame_base - frame_size - kPointerSize
+  // (= SP + 8, since SP = FP - stack_frame_size and frame_size =
+  // stack_frame_size - kStackAlign). If no call has happened yet (slot
+  // is 0 from prologue zero-init), fall back to the saved LR from the
+  // STP at [frame_base + kPointerSize].
   uintptr_t ip;
   auto saved_ip =
-      reinterpret_cast<uintptr_t*>(frame_base + kPointerSize);
+      reinterpret_cast<uintptr_t*>(frame_base - frame_size - kPointerSize);
   memcpy(&ip, saved_ip, kPointerSize);
+  if (ip == 0) {
+    auto saved_lr =
+        reinterpret_cast<uintptr_t*>(frame_base + kPointerSize);
+    memcpy(&ip, saved_lr, kPointerSize);
+  }
   return ip;
 #else
   // Unsupported architecture.
@@ -444,6 +445,7 @@ _PyInterpreterFrame* convertInterpreterFrameFromStackToSlab(
   }
 
   jitFramePopulateFrame(frame);
+  updatePrevInstr(frame);
   jitFrameRemoveReifier(frame);
 
   memcpy(new_frame, frame, code->co_framesize * sizeof(PyObject*));

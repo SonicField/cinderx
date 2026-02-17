@@ -1937,20 +1937,35 @@ void translateCall(Environ* env, const Instruction* instr) {
   auto output = instr->output();
   auto input = instr->getInput(0);
 
+  // Save return address to [SP, #8] before BLR, matching x86 call semantics.
+  // Move call target to x16 first in case input register is x12 (scratch_0).
+  asmjit::Label after_call = as->newLabel();
+
   if (input->isReg()) {
-    as->blr(AT::getGp(input));
+    auto target = AT::getGp(input);
+    if (target.id() != arch::reg_scratch_br.id()) {
+      as->mov(arch::reg_scratch_br, target);
+    }
+    as->adr(arch::reg_scratch_0, after_call);
+    as->str(arch::reg_scratch_0, asmjit::arm::Mem(asmjit::a64::sp, 8));
+    as->blr(arch::reg_scratch_br);
   } else if (input->isImm()) {
     as->mov(arch::reg_scratch_br, input->getConstant());
+    as->adr(arch::reg_scratch_0, after_call);
+    as->str(arch::reg_scratch_0, asmjit::arm::Mem(asmjit::a64::sp, 8));
     as->blr(arch::reg_scratch_br);
   } else if (input->isStack()) {
     auto loc = input->getStackSlot().loc;
     as->ldr(
         arch::reg_scratch_br,
         arch::ptr_resolve(as, arch::fp, loc, arch::reg_scratch_0));
+    as->adr(arch::reg_scratch_0, after_call);
+    as->str(arch::reg_scratch_0, asmjit::arm::Mem(asmjit::a64::sp, 8));
     as->blr(arch::reg_scratch_br);
   } else {
     JIT_ABORT("Unsupported operand type for Call: {}", input->type());
   }
+  as->bind(after_call);
 
   if (instr->origin()) {
     asmjit::Label label = as->newLabel();

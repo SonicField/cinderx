@@ -1457,6 +1457,9 @@ int NativeGenerator::allocateHeaderAndSpillSpace(const FrameInfo& frame_info) {
       as_->sub(a64::sp, a64::sp, arch::reg_scratch_0);
     }
   }
+  // Zero-init the saved-IP slot at [SP, #8]. getIP() falls back to
+  // [FP+8] (saved LR) when this slot reads 0.
+  as_->str(a64::xzr, asmjit::arm::Mem(a64::sp, 8));
 
   // There is a difference here from x86-64, because the aarch64 stack cannot be
   // misaligned. Here we are returning the amount of space that we have added to
