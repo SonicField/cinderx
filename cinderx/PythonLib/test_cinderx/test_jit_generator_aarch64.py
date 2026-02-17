@@ -438,5 +438,54 @@ class TestGeneratorStress(unittest.TestCase):
         self.assertEqual(results, expected)
 
 
+
+class TestDeoptGuardAssertion(unittest.TestCase):
+    """Verify generators are NOT JIT-compiled on aarch64 (deopt guard)."""
+
+    @unittest.skipUnless(HAS_CINDERJIT, "requires cinderjit")
+    @unittest.skipUnless(platform.machine() in ("aarch64", "arm64"),
+                         "deopt guard is aarch64-only")
+    def test_generator_not_jit_compiled(self):
+        """force_compile on a generator must return False on aarch64."""
+        def gen():
+            yield 1
+        result = cinderjit.force_compile(gen)
+        self.assertFalse(result)
+        self.assertFalse(cinderjit.is_jit_compiled(gen))
+
+    @unittest.skipUnless(HAS_CINDERJIT, "requires cinderjit")
+    @unittest.skipUnless(platform.machine() in ("aarch64", "arm64"),
+                         "deopt guard is aarch64-only")
+    def test_coroutine_not_jit_compiled(self):
+        """force_compile on a coroutine must return False on aarch64."""
+        async def coro():
+            return 1
+        result = cinderjit.force_compile(coro)
+        self.assertFalse(result)
+        self.assertFalse(cinderjit.is_jit_compiled(coro))
+
+    @unittest.skipUnless(HAS_CINDERJIT, "requires cinderjit")
+    @unittest.skipUnless(platform.machine() in ("aarch64", "arm64"),
+                         "deopt guard is aarch64-only")
+    def test_async_generator_not_jit_compiled(self):
+        """force_compile on an async generator must return False on aarch64."""
+        async def agen():
+            yield 1
+        result = cinderjit.force_compile(agen)
+        self.assertFalse(result)
+        self.assertFalse(cinderjit.is_jit_compiled(agen))
+
+    @unittest.skipUnless(HAS_CINDERJIT, "requires cinderjit")
+    @unittest.skipUnless(platform.machine() in ("aarch64", "arm64"),
+                         "deopt guard is aarch64-only")
+    def test_normal_function_still_compiled(self):
+        """Normal (non-generator) functions must still be JIT-compiled."""
+        def normal(x):
+            return x + 1
+        cinderjit.force_compile(normal)
+        self.assertTrue(cinderjit.is_jit_compiled(normal))
+        self.assertEqual(normal(41), 42)
+
+
 if __name__ == "__main__":
     unittest.main()
