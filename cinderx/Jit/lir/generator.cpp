@@ -230,6 +230,22 @@ BasicBlock* LIRGenerator::GenerateEntryBlock() {
     env_->asm_func = bindVReg(codegen::INITIAL_FUNC_REG);
   }
 
+  // Bind argument registers in the entry block so the register allocator
+  // knows they are occupied from the start. Without this, the allocator
+  // may assign an argument register (e.g. X1) to intermediate loads
+  // (cframe/current_frame) below, clobbering function arguments before
+  // LoadArg consumes them in a successor basic block.
+  // The binds are stored in asm_arg_binds and referenced by the LoadArg
+  // lowering, which creates a def-use chain that also prevents DCE from
+  // removing these binds.
+  env_->asm_arg_binds.resize(env_->arg_locations.size(), nullptr);
+  for (size_t i = 0; i < env_->arg_locations.size(); i++) {
+    auto loc = env_->arg_locations[i];
+    if (loc != PhyLocation::REG_INVALID) {
+      env_->asm_arg_binds[i] = bindVReg(loc);
+    }
+  }
+
 #if PY_VERSION_HEX >= 0x030C0000
 
   // Load the current interpreter frame pointer from tstate.
@@ -618,8 +634,20 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
         auto instr = static_cast<const LoadArg*>(&i);
         if (instr->arg_idx() < env_->arg_locations.size() &&
             env_->arg_locations[instr->arg_idx()] != PhyLocation::REG_INVALID) {
-          bbb.appendInstr(
-              instr->output(), Instruction::kLoadArg, Imm{instr->arg_idx()});
+          // If we pre-bound this argument register in the entry block,
+          // emit a Move from the pre-bound value. This creates a def-use
+          // chain that keeps the entry block Bind alive through DCE and
+          // ensures the register allocator sees the argument register as
+          // occupied from function entry.
+          if (instr->arg_idx() < env_->asm_arg_binds.size() &&
+              env_->asm_arg_binds[instr->arg_idx()] != nullptr) {
+            bbb.appendInstr(
+                instr->output(), Instruction::kMove,
+                env_->asm_arg_binds[instr->arg_idx()]);
+          } else {
+            bbb.appendInstr(
+                instr->output(), Instruction::kLoadArg, Imm{instr->arg_idx()});
+          }
           break;
         }
         size_t reg_count = env_->arg_locations.size();

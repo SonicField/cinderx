@@ -11,7 +11,6 @@
 #define CINDER_AARCH64
 
 // This is here until we have aarch64 support everywhere.
-#define CINDER_UNSUPPORTED
 
 #else
 

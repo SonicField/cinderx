@@ -37,8 +37,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(SHARED_FLAGS "-DPy_BUILD_CORE -DPy_BUILD_CORE_MODULE -fPIC -Wall -Wextra -Wno-c99-designator -Wno-c++11-narrowing -Wno-cast-function-type-mismatch -Wno-deprecated-declarations -Wno-missing-field-initializers -Wno-null-pointer-subtraction -Wno-sign-compare -Wno-unknown-pragmas -Wno-unused-function -Wno-unused-parameter")
 
 macro(set_flag VAR)
-  if (DEFINED ${VAR} AND ${${VAR}})
-    set(SHARED_FLAGS "-D${VAR} ${SHARED_FLAGS}")
+  if(DEFINED ${VAR})
+    if(${${VAR}})
+      set(SHARED_FLAGS "-D${VAR} ${SHARED_FLAGS}")
+    endif()
   endif()
 endmacro()
 

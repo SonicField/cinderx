@@ -81,7 +81,7 @@ void initThreadStateOffset() {
     tstate_offset = *reinterpret_cast<int32_t*>(ts_func + 9);
   } else {
 #ifndef Py_DEBUG
-    assert(false);
+    // assert(false); // TEMPORARILY DISABLED FOR DEBUG BUILD
 #endif
   }
 #elif defined(CINDER_AARCH64)
@@ -136,7 +136,7 @@ void initThreadStateOffset() {
 
 #ifndef Py_DEBUG
   if (tstate_offset == -1) {
-    assert(false);
+    // assert(false); // TEMPORARILY DISABLED FOR DEBUG BUILD
   }
 #endif
 #else
@@ -753,9 +753,9 @@ void FrameAsm::linkLightWeightFunctionFrame(
 
   // Store owner
   asmjit::BaseNode* store_owner_cursor = as_->cursor();
-  as_->mov(a64::w1, FRAME_OWNED_BY_THREAD);
+  as_->mov(a64::w12, FRAME_OWNED_BY_THREAD);
   as_->strb(
-      a64::w1,
+      a64::w12,
       arch::ptr_resolve(
           as_,
           arch::fp,

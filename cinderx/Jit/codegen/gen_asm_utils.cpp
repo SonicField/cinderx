@@ -3,6 +3,7 @@
 #include "cinderx/Jit/codegen/gen_asm_utils.h"
 
 #include "cinderx/Jit/codegen/arch.h"
+#include "cinderx/Common/util.h"
 #include "cinderx/Jit/codegen/environ.h"
 
 namespace jit::codegen {
@@ -25,7 +26,20 @@ void emitCall(
 #if defined(CINDER_X86_64)
   env.as->call(label);
 #elif defined(CINDER_AARCH64)
-  env.as->bl(label);
+  // Save return address to stack before bl, matching x86 call semantics.
+  // getIP() reads from frame_base - frame_size - kPointerSize.
+  // The slot at [FP - (stack_frame_size + 8)] = [SP + 8] is within the
+  // extra kStackAlign bytes allocated by the prologue.
+  {
+    asmjit::Label after_call = env.as->newLabel();
+    int offset = -(env.stack_frame_size + kPointerSize);
+    env.as->adr(arch::reg_scratch_0, after_call);
+    env.as->str(
+        arch::reg_scratch_0,
+        arch::ptr_resolve(env.as, arch::fp, offset, arch::reg_scratch_1));
+    env.as->bl(label);
+    env.as->bind(after_call);
+  }
 #else
   CINDER_UNSUPPORTED
 #endif
@@ -41,7 +55,17 @@ void emitCall(Environ& env, uint64_t func, const jit::lir::Instruction* instr) {
   // https://github.com/asmjit/asmjit/issues/499, but as of writing is not yet
   // available.
   env.as->mov(arch::reg_scratch_br, func);
-  env.as->blr(arch::reg_scratch_br);
+  // Save return address to stack before blr, matching x86 call semantics.
+  {
+    asmjit::Label after_call = env.as->newLabel();
+    int offset = -(env.stack_frame_size + kPointerSize);
+    env.as->adr(arch::reg_scratch_0, after_call);
+    env.as->str(
+        arch::reg_scratch_0,
+        arch::ptr_resolve(env.as, arch::fp, offset, arch::reg_scratch_1));
+    env.as->blr(arch::reg_scratch_br);
+    env.as->bind(after_call);
+  }
 #else
   CINDER_UNSUPPORTED
 #endif

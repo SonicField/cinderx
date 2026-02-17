@@ -803,7 +803,15 @@ void* generateDeoptTrampoline(bool generator_mode) {
   //
   // This isn't strictly necessary but saves 128 bytes on the stack if we end
   // up resuming in the interpreter.
-  a.add(a64::sp, a64::sp, (saved_regs_slots - 2) * kPointerSize);
+  {
+    int cleanup_size = (saved_regs_slots - 2) * kPointerSize;
+    if (arm::Utils::isAddSubImm(static_cast<uint64_t>(cleanup_size))) {
+      a.add(a64::sp, a64::sp, cleanup_size);
+    } else {
+      a.mov(arch::reg_scratch_0, cleanup_size);
+      a.add(a64::sp, a64::sp, arch::reg_scratch_0);
+    }
+  }
 
   // We have to restore our scratch register manually since it's callee-saved
   // and the stage 2 trampoline used it to hold the address of this
@@ -1166,11 +1174,21 @@ void* NativeGenerator::getVectorcallEntry() {
        i < static_cast<size_t>(GetFunction()->numArgs());
        i++) {
     auto add_gp = [&]() {
+#if defined(CINDER_AARCH64)
+      // On aarch64, don't pre-assign args to ARGUMENT_REGS. The prologue
+      // loads args into these registers, but the LIR entry block may assign
+      // them to cframe/current_frame temporaries, clobbering the arg values.
+      // Instead, leave all args in the args array (kArgsReg) and let the LIR
+      // body load them from memory via kLoadArg -> kMove Ind{extra_args}.
+      (void)gp_index;
+      env_.arg_locations.emplace_back(PhyLocation::REG_INVALID);
+#else
       if (gp_index < ARGUMENT_REGS.size()) {
         env_.arg_locations.push_back(ARGUMENT_REGS[gp_index++]);
       } else {
         env_.arg_locations.emplace_back(PhyLocation::REG_INVALID);
       }
+#endif
     };
 
     if (check_index < checks.size() &&
@@ -1407,7 +1425,15 @@ int NativeGenerator::allocateHeaderAndSpillSpace(const FrameInfo& frame_info) {
 #elif defined(CINDER_AARCH64)
   int modulo = frame_info.header_and_spill_size % kStackAlign;
   int padding = modulo == 0 ? 0 : kStackAlign - modulo;
-  as_->sub(a64::sp, a64::sp, frame_info.header_and_spill_size + padding);
+  {
+    int alloc_size = frame_info.header_and_spill_size + padding;
+    if (arm::Utils::isAddSubImm(static_cast<uint64_t>(alloc_size))) {
+      as_->sub(a64::sp, a64::sp, alloc_size);
+    } else {
+      as_->mov(arch::reg_scratch_0, alloc_size);
+      as_->sub(a64::sp, a64::sp, arch::reg_scratch_0);
+    }
+  }
 
   // There is a difference here from x86-64, because the aarch64 stack cannot be
   // misaligned. Here we are returning the amount of space that we have added to
@@ -1446,8 +1472,30 @@ void NativeGenerator::saveCallerRegisters(
 
   if (frame_info.arg_buffer_size > 0) {
     JIT_CHECK(frame_info.arg_buffer_size % kStackAlign == 0, "unaligned");
-    as_->sub(a64::sp, a64::sp, frame_info.arg_buffer_size);
+    if (arm::Utils::isAddSubImm(static_cast<uint64_t>(frame_info.arg_buffer_size))) {
+      as_->sub(a64::sp, a64::sp, frame_info.arg_buffer_size);
+    } else {
+      as_->mov(arch::reg_scratch_0, frame_info.arg_buffer_size);
+      as_->sub(a64::sp, a64::sp, arch::reg_scratch_0);
+    }
   }
+  // Allocate an extra 16 bytes (kStackAlign for alignment) below the logical
+  // frame to hold the saved return address for getIP(). On x86, CALL
+  // implicitly pushes the return address below SP. On aarch64, BL/BLR stores
+  // the return address in LR, so we must explicitly save it to the stack.
+  //
+  // The ADR+STR before each BL/BLR stores the return address at
+  //   [FP - (stack_frame_size + kPointerSize)] = [SP + 8]
+  // which is within this extra allocation. The callee's STP FP, LR, [SP, -16]!
+  // writes at [SP-16] and [SP-8], which are below our SP — no overlap.
+  //
+  // CodeRuntime::frameSize() returns the LOGICAL frame size (without this
+  // extra allocation), so getIP()'s formula frame_base - frame_size - 8
+  // correctly points to the saved return address.
+  //
+  // The epilogue uses MOV SP, FP which ignores the actual SP value, so this
+  // extra allocation is automatically cleaned up.
+  as_->sub(a64::sp, a64::sp, kStackAlign);
 #else
   CINDER_UNSUPPORTED
 #endif
@@ -1460,7 +1508,12 @@ void NativeGenerator::setupFrameAndSaveCallerRegisters(
   as_->sub(x86::rsp, frame_info.header_and_spill_size);
 #elif defined(CINDER_AARCH64)
   JIT_CHECK(frame_info.header_and_spill_size % kStackAlign == 0, "unaligned");
-  as_->sub(a64::sp, a64::sp, frame_info.header_and_spill_size);
+  if (arm::Utils::isAddSubImm(static_cast<uint64_t>(frame_info.header_and_spill_size))) {
+    as_->sub(a64::sp, a64::sp, frame_info.header_and_spill_size);
+  } else {
+    as_->mov(arch::reg_scratch_0, frame_info.header_and_spill_size);
+    as_->sub(a64::sp, a64::sp, arch::reg_scratch_0);
+  }
 #else
   CINDER_UNSUPPORTED
 #endif
@@ -1681,12 +1734,17 @@ void NativeGenerator::generatePrologue(
     }
   }
   if (has_extra_args) {
+#if !defined(CINDER_AARCH64)
     // Load the location of the remaining args, the backend will deal with
     // loading them from here...
+    // On aarch64, all args are in the args array starting at kArgsReg+0,
+    // so we must NOT adjust kArgsReg. The LIR body computes offsets from
+    // kArgsReg directly: arg[i] = [kArgsReg + i*8].
     as_->add(
         kArgsPastEightReg,
         kArgsReg,
         (ARGUMENT_REGS.size() - 1) * sizeof(void*));
+#endif
   }
   env_.addAnnotation("Load arguments", load_args_cursor);
 
@@ -2136,9 +2194,19 @@ void NativeGenerator::generateEpilogue(BaseNode* epilogue_cursor) {
     JIT_CHECK(env_.last_callee_saved_reg_off % kStackAlign == 0, "unaligned");
 
     if (env_.last_callee_saved_reg_off >= 0) {
-      as_->sub(a64::sp, arch::fp, env_.last_callee_saved_reg_off);
+      if (arm::Utils::isAddSubImm(static_cast<uint64_t>(env_.last_callee_saved_reg_off))) {
+        as_->sub(a64::sp, arch::fp, env_.last_callee_saved_reg_off);
+      } else {
+        as_->mov(arch::reg_scratch_0, env_.last_callee_saved_reg_off);
+        as_->sub(a64::sp, arch::fp, arch::reg_scratch_0);
+      }
     } else {
-      as_->add(a64::sp, arch::fp, -env_.last_callee_saved_reg_off);
+      if (arm::Utils::isAddSubImm(static_cast<uint64_t>(-env_.last_callee_saved_reg_off))) {
+        as_->add(a64::sp, arch::fp, -env_.last_callee_saved_reg_off);
+      } else {
+        as_->mov(arch::reg_scratch_0, -env_.last_callee_saved_reg_off);
+        as_->add(a64::sp, arch::fp, arch::reg_scratch_0);
+      }
     }
 
     restoreCalleeSavedRegsAarch64(as_, saved_regs);

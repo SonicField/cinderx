@@ -70,6 +70,12 @@ struct Environ {
   // Location of incoming arguments
   std::vector<PhyLocation> arg_locations;
 
+
+  // Pre-bound argument register virtual registers from the entry block.
+  // Indexed by argument index. Maps to the Bind instruction in BB %0 that
+  // reserves the argument's physical register, preventing the register
+  // allocator from assigning it to other values before LoadArg consumes it.
+  std::vector<jit::lir::Instruction*> asm_arg_binds;
   struct IndirectInfo {
     explicit IndirectInfo(void** indirect_ptr) : indirect(indirect_ptr) {}
 

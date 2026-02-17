@@ -118,24 +118,23 @@ uintptr_t getIP(_PyInterpreterFrame* frame, int frame_size) {
   memcpy(&ip, saved_ip, kPointerSize);
   return ip;
 #elif defined(__aarch64__)
-  // On ARM64, `blr` stores the return address in lr (x30) rather than
-  // pushing it on the stack. The callee saves lr in its own frame at a
-  // position that depends on its prologue, so we cannot read it from a
-  // fixed offset below the JIT function's stack pointer.
+  // On ARM64, the JIT codegen explicitly saves the return address to the
+  // stack before each BL/BLR, at the same offset that x86 CALL would use:
+  //   [FP - (stack_frame_size + kPointerSize)]
   //
-  // Walk the frame pointer chain to find the frame whose saved fp equals
-  // the JIT function's fp (frame_base). That frame belongs to the
-  // immediate callee of the JIT function, and its saved lr ([fp+8]) is
-  // the return address we need.
-  auto* fp = reinterpret_cast<uintptr_t*>(__builtin_frame_address(0));
-  while (fp != nullptr) {
-    auto saved_fp = fp[0];
-    if (saved_fp == frame_base) {
-      return fp[1];
-    }
-    fp = reinterpret_cast<uintptr_t*>(saved_fp);
-  }
-  JIT_ABORT("Could not find JIT frame in frame pointer chain");
+  // This is equivalent to frame_base - frame_size - kPointerSize, since
+  // frame_base resolves to FP for on-stack lightweight frames.
+  //
+  // The prologue allocates an extra kStackAlign (16) bytes below the logical
+  // frame so this slot is within valid stack memory. The callee's STP FP, LR
+  // writes below our SP and cannot reach this slot.
+  //
+  // Same formula as x86.
+  uintptr_t ip;
+  auto saved_ip =
+      reinterpret_cast<uintptr_t*>(frame_base - frame_size - kPointerSize);
+  memcpy(&ip, saved_ip, kPointerSize);
+  return ip;
 #else
   // Unsupported architecture.
   JIT_ABORT("getIP: unsupported architecture");
