@@ -27,12 +27,11 @@ void emitCall(
   env.as->call(label);
 #elif defined(CINDER_AARCH64)
   // Save return address to stack before bl, matching x86 call semantics.
-  // getIP() reads from frame_base - frame_size - kPointerSize.
-  // The slot at [FP - (stack_frame_size + 8)] = [SP + 8] is within the
-  // extra kStackAlign bytes allocated by the prologue.
+  // Slot at [FP - (stack_frame_size - 8)] = [SP + 8], within the extra
+  // kStackAlign bytes reserved by computeFrameInfo.
   {
     asmjit::Label after_call = env.as->newLabel();
-    int offset = -(env.stack_frame_size + kPointerSize);
+    int offset = -(env.stack_frame_size - kPointerSize);
     env.as->adr(arch::reg_scratch_0, after_call);
     env.as->str(
         arch::reg_scratch_0,
@@ -58,7 +57,7 @@ void emitCall(Environ& env, uint64_t func, const jit::lir::Instruction* instr) {
   // Save return address to stack before blr, matching x86 call semantics.
   {
     asmjit::Label after_call = env.as->newLabel();
-    int offset = -(env.stack_frame_size + kPointerSize);
+    int offset = -(env.stack_frame_size - kPointerSize);
     env.as->adr(arch::reg_scratch_0, after_call);
     env.as->str(
         arch::reg_scratch_0,

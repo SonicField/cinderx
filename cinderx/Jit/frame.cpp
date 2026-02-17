@@ -118,21 +118,19 @@ uintptr_t getIP(_PyInterpreterFrame* frame, int frame_size) {
   memcpy(&ip, saved_ip, kPointerSize);
   return ip;
 #elif defined(__aarch64__)
-  // On ARM64, the JIT codegen explicitly saves the return address to the
-  // stack before each BL/BLR, at the same offset that x86 CALL would use:
-  //   [FP - (stack_frame_size + kPointerSize)]
+  // On aarch64, the JIT prologue does:
+  //   stp x29, x30, [sp, #-16]!  ; saves FP and LR
+  //   mov x29, sp                ; sets up frame pointer
+  // In lightweight frame mode, frame_base == x29 (verified from
+  // frameHeaderSize() computation). The saved LR (return address)
+  // is at [frame_base + 8].
   //
-  // This is equivalent to frame_base - frame_size - kPointerSize, since
-  // frame_base resolves to FP for on-stack lightweight frames.
-  //
-  // The prologue allocates an extra kStackAlign (16) bytes below the logical
-  // frame so this slot is within valid stack memory. The callee's STP FP, LR
-  // writes below our SP and cannot reach this slot.
-  //
-  // Same formula as x86.
+  // We read it directly rather than walking the FP chain, because
+  // intermediate C frames may be compiled without frame pointers
+  // (e.g. pytest/pluggy extensions), breaking the chain walk.
   uintptr_t ip;
   auto saved_ip =
-      reinterpret_cast<uintptr_t*>(frame_base - frame_size - kPointerSize);
+      reinterpret_cast<uintptr_t*>(frame_base + kPointerSize);
   memcpy(&ip, saved_ip, kPointerSize);
   return ip;
 #else

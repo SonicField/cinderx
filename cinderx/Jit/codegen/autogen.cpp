@@ -1937,41 +1937,17 @@ void translateCall(Environ* env, const Instruction* instr) {
   auto output = instr->output();
   auto input = instr->getInput(0);
 
-  // On aarch64, BLR does not push the return address onto the stack like
-  // x86 CALL does. We explicitly save the return address (address of the
-  // instruction after BLR) to the stack at [FP - (stack_frame_size + 8)].
-  // This allows getIP() to use the same formula on both architectures:
-  //   frame_base - frame_size - kPointerSize
-  //
-  // The prologue allocates an extra kStackAlign (16) bytes below the
-  // logical frame, so this slot at [SP + 8] is within valid stack memory.
-  auto saveReturnAddress = [&]() -> asmjit::Label {
-    asmjit::Label after_call = as->newLabel();
-    int offset = -(env->stack_frame_size + kPointerSize);
-    as->adr(arch::reg_scratch_0, after_call);
-    as->str(
-        arch::reg_scratch_0,
-        arch::ptr_resolve(as, arch::fp, offset, arch::reg_scratch_1));
-    return after_call;
-  };
-
   if (input->isReg()) {
-    auto after = saveReturnAddress();
     as->blr(AT::getGp(input));
-    as->bind(after);
   } else if (input->isImm()) {
     as->mov(arch::reg_scratch_br, input->getConstant());
-    auto after = saveReturnAddress();
     as->blr(arch::reg_scratch_br);
-    as->bind(after);
   } else if (input->isStack()) {
     auto loc = input->getStackSlot().loc;
     as->ldr(
         arch::reg_scratch_br,
         arch::ptr_resolve(as, arch::fp, loc, arch::reg_scratch_0));
-    auto after = saveReturnAddress();
     as->blr(arch::reg_scratch_br);
-    as->bind(after);
   } else {
     JIT_ABORT("Unsupported operand type for Call: {}", input->type());
   }

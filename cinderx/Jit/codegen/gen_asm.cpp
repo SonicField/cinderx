@@ -1324,7 +1324,15 @@ void* NativeGenerator::getVectorcallEntry() {
 
   JIT_DCHECK(code.codeSize() < INT_MAX, "Code size is larger than INT_MAX");
   compiled_size_ = code.codeSize();
+#if defined(CINDER_AARCH64)
+  // Store the LOGICAL frame size (physical - kStackAlign) for getIP().
+  // The physical frame includes kStackAlign extra bytes for the saved-IP
+  // slot, but getIP() uses frame_base - frame_size - kPointerSize which
+  // must point to SP + 8 (where the ADR+STR saves the return address).
+  env_.code_rt->setFrameSize(env_.stack_frame_size - kStackAlign);
+#else
   env_.code_rt->setFrameSize(env_.stack_frame_size);
+#endif
   return vectorcall_entry_;
 }
 
@@ -1401,7 +1409,22 @@ NativeGenerator::FrameInfo NativeGenerator::computeFrameInfo() {
       // env_.shadow_frames_and_spill_size.
       // Make sure we have at least one word for scratch in the epilogue.
       .header_and_spill_size =
-          std::max(env_.shadow_frames_and_spill_size, kPointerSize),
+          std::max(env_.shadow_frames_and_spill_size, kPointerSize)
+#if defined(CINDER_AARCH64)
+          // On aarch64, BL/BLR stores the return address in LR (x30), not
+          // on the stack. We reserve kStackAlign (16) extra bytes in the
+          // frame header area so the JIT codegen can explicitly save the
+          // return address before each call. This slot lives at
+          //   [FP - (stack_frame_size - kPointerSize)]
+          // which getIP() reads via frame_base - logical_frame_size - 8.
+          //
+          // CodeRuntime::setFrameSize stores logical_frame_size =
+          // stack_frame_size - kStackAlign, so getIP computes
+          //   FP - (physical - 16) - 8 = SP + 8
+          // which is within the physical frame and safe from callee clobber.
+          + kStackAlign
+#endif
+          ,
       .saved_regs = env_.changed_regs & CALLEE_SAVE_REGS,
       .arg_buffer_size = env_.max_arg_buffer_size,
   };
@@ -1479,23 +1502,6 @@ void NativeGenerator::saveCallerRegisters(
       as_->sub(a64::sp, a64::sp, arch::reg_scratch_0);
     }
   }
-  // Allocate an extra 16 bytes (kStackAlign for alignment) below the logical
-  // frame to hold the saved return address for getIP(). On x86, CALL
-  // implicitly pushes the return address below SP. On aarch64, BL/BLR stores
-  // the return address in LR, so we must explicitly save it to the stack.
-  //
-  // The ADR+STR before each BL/BLR stores the return address at
-  //   [FP - (stack_frame_size + kPointerSize)] = [SP + 8]
-  // which is within this extra allocation. The callee's STP FP, LR, [SP, -16]!
-  // writes at [SP-16] and [SP-8], which are below our SP — no overlap.
-  //
-  // CodeRuntime::frameSize() returns the LOGICAL frame size (without this
-  // extra allocation), so getIP()'s formula frame_base - frame_size - 8
-  // correctly points to the saved return address.
-  //
-  // The epilogue uses MOV SP, FP which ignores the actual SP value, so this
-  // extra allocation is automatically cleaned up.
-  as_->sub(a64::sp, a64::sp, kStackAlign);
 #else
   CINDER_UNSUPPORTED
 #endif
