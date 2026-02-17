@@ -26,13 +26,16 @@ void emitCall(
 #if defined(CINDER_X86_64)
   env.as->call(label);
 #elif defined(CINDER_AARCH64)
-  // Save return address to [SP, #8] before BL, matching x86 call semantics.
-  // Slot is within the kStackAlign extra bytes reserved by computeFrameInfo.
-  // Using SP-relative avoids ptr_resolve scratch register issues.
+  // Save return address to stack before bl, matching x86 call semantics.
+  // Slot at [FP - (stack_frame_size - 8)] = [SP + 8], within the extra
+  // kStackAlign bytes reserved by computeFrameInfo.
   {
     asmjit::Label after_call = env.as->newLabel();
     env.as->adr(arch::reg_scratch_0, after_call);
-    env.as->str(arch::reg_scratch_0, asmjit::arm::Mem(asmjit::a64::sp, 8));
+    env.as->str(
+        arch::reg_scratch_0,
+        arch::ptr_resolve(
+            env.as, arch::fp, env.saved_ip_fp_offset, arch::reg_scratch_1));
     env.as->bl(label);
     env.as->bind(after_call);
   }
@@ -51,11 +54,14 @@ void emitCall(Environ& env, uint64_t func, const jit::lir::Instruction* instr) {
   // https://github.com/asmjit/asmjit/issues/499, but as of writing is not yet
   // available.
   env.as->mov(arch::reg_scratch_br, func);
-  // Save return address to [SP, #8] before BLR.
+  // Save return address to stack before blr, matching x86 call semantics.
   {
     asmjit::Label after_call = env.as->newLabel();
     env.as->adr(arch::reg_scratch_0, after_call);
-    env.as->str(arch::reg_scratch_0, asmjit::arm::Mem(asmjit::a64::sp, 8));
+    env.as->str(
+        arch::reg_scratch_0,
+        arch::ptr_resolve(
+            env.as, arch::fp, env.saved_ip_fp_offset, arch::reg_scratch_1));
     env.as->blr(arch::reg_scratch_br);
     env.as->bind(after_call);
   }

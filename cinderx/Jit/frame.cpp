@@ -118,15 +118,13 @@ uintptr_t getIP(_PyInterpreterFrame* frame, int frame_size) {
   memcpy(&ip, saved_ip, kPointerSize);
   return ip;
 #elif defined(__aarch64__)
-  // On aarch64, the JIT saves the return address to [SP, #8] before each
-  // BL/BLR. This slot is at frame_base - frame_size - kPointerSize
-  // (= SP + 8, since SP = FP - stack_frame_size and frame_size =
-  // stack_frame_size - kStackAlign). If no call has happened yet (slot
-  // is 0 from prologue zero-init), fall back to the saved LR from the
-  // STP at [frame_base + kPointerSize].
+  // On aarch64, frame_size is actually the FP-relative offset of the
+  // saved-IP slot (savedIpFpOffset, a negative value). The slot is at
+  // frame_base + offset. If no call has happened yet (slot is 0 from
+  // prologue zero-init), fall back to saved LR at [frame_base + 8].
   uintptr_t ip;
   auto saved_ip =
-      reinterpret_cast<uintptr_t*>(frame_base - frame_size - kPointerSize);
+      reinterpret_cast<uintptr_t*>(frame_base + frame_size);
   memcpy(&ip, saved_ip, kPointerSize);
   if (ip == 0) {
     auto saved_lr =
@@ -198,7 +196,11 @@ UnitState getUnitState(_PyInterpreterFrame* frame) {
   _PyInterpreterFrame* non_inlined_sf = unit_frames[0];
   CodeRuntime* code_rt = getCodeRuntime(non_inlined_sf);
   JIT_CHECK(code_rt != nullptr, "failed to find code runtime");
+#if defined(__aarch64__)
+  uintptr_t ip = getIP(non_inlined_sf, code_rt->savedIpFpOffset());
+#else
   uintptr_t ip = getIP(non_inlined_sf, code_rt->frameSize());
+#endif
   std::optional<UnitCallStack> locs =
       code_rt->debugInfo()->getUnitCallStack(ip);
   if (locs.has_value()) {

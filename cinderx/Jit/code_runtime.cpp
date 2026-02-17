@@ -116,6 +116,16 @@ void CodeRuntime::setFrameSize(int size) {
   frame_size_ = size;
 }
 
+#if defined(__aarch64__)
+int CodeRuntime::savedIpFpOffset() const {
+  return saved_ip_fp_offset_;
+}
+
+void CodeRuntime::setSavedIpFpOffset(int offset) {
+  saved_ip_fp_offset_ = offset;
+}
+#endif
+
 DebugInfo* CodeRuntime::debugInfo() {
   return &debug_info_;
 }

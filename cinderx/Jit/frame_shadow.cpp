@@ -130,10 +130,15 @@ uintptr_t getIP(_PyShadowFrame* shadow_frame, int frame_size) {
   } else {
     frame_base = getFrameBaseFromOnStackShadowFrame(shadow_frame);
   }
-  // Read the saved IP from the stack
+  // Read the saved IP from the stack.
   uintptr_t ip;
+#if defined(__aarch64__)
+  auto saved_ip =
+      reinterpret_cast<uintptr_t*>(frame_base + frame_size);
+#else
   auto saved_ip =
       reinterpret_cast<uintptr_t*>(frame_base - frame_size - kPointerSize);
+#endif
   memcpy(&ip, saved_ip, kPointerSize);
   return ip;
 }
@@ -381,7 +386,11 @@ UnitState getUnitState(_PyShadowFrame* shadow_frame) {
   unit_state.reserve(unit_frames.size());
   _PyShadowFrame* non_inlined_sf = unit_frames[0];
   CodeRuntime* code_rt = getCodeRuntime(non_inlined_sf);
+#if defined(__aarch64__)
+  uintptr_t ip = getIP(non_inlined_sf, code_rt->savedIpFpOffset());
+#else
   uintptr_t ip = getIP(non_inlined_sf, code_rt->frameSize());
+#endif
   std::optional<UnitCallStack> locs =
       code_rt->debugInfo()->getUnitCallStack(ip);
   if (locs.has_value()) {

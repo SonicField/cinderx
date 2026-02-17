@@ -127,6 +127,10 @@ class alignas(16) CodeRuntime {
   // Get and set the total size of a stack frame for this compiled code object.
   int frameSize() const;
   void setFrameSize(int size);
+#if defined(__aarch64__)
+  int savedIpFpOffset() const;
+  void setSavedIpFpOffset(int offset);
+#endif
 
   DebugInfo* debugInfo();
 
@@ -162,6 +166,9 @@ class alignas(16) CodeRuntime {
 #endif
 
   int frame_size_{-1};
+#if defined(__aarch64__)
+  int saved_ip_fp_offset_{0};
+#endif
   DebugInfo debug_info_;
 };
 

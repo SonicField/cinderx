@@ -1297,6 +1297,24 @@ void* NativeGenerator::getVectorcallEntry() {
         *lir_func);
   }
 
+
+#if defined(CINDER_AARCH64)
+  // Pre-compute saved_ip_fp_offset before generateCode, because
+  // emitCall/translateCall in generateAssemblyBody need this offset to
+  // emit the ADR+STR saved-IP stores. generateAssemblyBody runs before
+  // computeFrameInfo, so the offset must be computed here.
+  {
+    int hdr = std::max(env_.shadow_frames_and_spill_size, kPointerSize)
+              + kStackAlign;
+    auto saved_regs = env_.changed_regs & CALLEE_SAVE_REGS;
+    int saved_regs_sz = ((saved_regs.count() + 1) / 2) * kStackAlign;
+    if ((hdr + saved_regs_sz + env_.max_arg_buffer_size) % kStackAlign) {
+      hdr += kPointerSize;
+    }
+    env_.saved_ip_fp_offset = -(hdr - 8);
+  }
+#endif
+
   lir_func_ = std::move(lir_func);
 
   try {
@@ -1329,7 +1347,8 @@ void* NativeGenerator::getVectorcallEntry() {
   // The physical frame includes kStackAlign extra bytes for the saved-IP
   // slot, but getIP() uses frame_base - frame_size - kPointerSize which
   // must point to SP + 8 (where the ADR+STR saves the return address).
-  env_.code_rt->setFrameSize(env_.stack_frame_size - kStackAlign);
+  env_.code_rt->setFrameSize(env_.stack_frame_size);
+  env_.code_rt->setSavedIpFpOffset(env_.saved_ip_fp_offset);
 #else
   env_.code_rt->setFrameSize(env_.stack_frame_size);
 #endif
@@ -1437,6 +1456,13 @@ NativeGenerator::FrameInfo NativeGenerator::computeFrameInfo() {
   env_.last_callee_saved_reg_off =
       info.header_and_spill_size + info.saved_regs_size();
   env_.stack_frame_size = info.size();
+#if defined(CINDER_AARCH64)
+  JIT_CHECK(
+      env_.saved_ip_fp_offset == -(info.header_and_spill_size - 8),
+      "saved_ip_fp_offset mismatch: pre-computed={}, computed={}",
+      env_.saved_ip_fp_offset,
+      -(info.header_and_spill_size - 8));
+#endif
   return info;
 }
 
@@ -1457,9 +1483,6 @@ int NativeGenerator::allocateHeaderAndSpillSpace(const FrameInfo& frame_info) {
       as_->sub(a64::sp, a64::sp, arch::reg_scratch_0);
     }
   }
-  // Zero-init the saved-IP slot at [SP, #8]. getIP() falls back to
-  // [FP+8] (saved LR) when this slot reads 0.
-  as_->str(a64::xzr, asmjit::arm::Mem(a64::sp, 8));
 
   // There is a difference here from x86-64, because the aarch64 stack cannot be
   // misaligned. Here we are returning the amount of space that we have added to
@@ -1505,6 +1528,12 @@ void NativeGenerator::saveCallerRegisters(
       as_->sub(a64::sp, a64::sp, arch::reg_scratch_0);
     }
   }
+  // Zero-init the saved-IP slot at FP + saved_ip_fp_offset.
+  // getIP() falls back to [FP+8] (saved LR) when this slot reads 0.
+  as_->str(
+      a64::xzr,
+      arch::ptr_resolve(
+          as_, arch::fp, env_.saved_ip_fp_offset, arch::reg_scratch_0));
 #else
   CINDER_UNSUPPORTED
 #endif

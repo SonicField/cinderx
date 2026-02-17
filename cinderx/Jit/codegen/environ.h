@@ -28,6 +28,11 @@ struct Environ {
   // functions.
   int stack_frame_size{-1};
 
+#if defined(CINDER_AARCH64)
+  // FP-relative offset of the saved-IP slot. Set by computeFrameInfo.
+  int saved_ip_fp_offset{0};
+#endif
+
   // A subset of stack_frame_size: only the shadow frames and spilled values.
   int shadow_frames_and_spill_size{0};
 
