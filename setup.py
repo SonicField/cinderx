@@ -442,6 +442,7 @@ class BuildExt(build_ext):
         set_option("ENABLE_PERF_TRAMPOLINE", meta_312)
         set_option("ENABLE_SYMBOLIZER", linux)
         set_option("ENABLE_USDT", linux)
+        set_option("ENABLE_XXCLASSLOADER", True)
 
         for name, value in options.items():
             cmake_args.append(f"-D{name}={value}")
