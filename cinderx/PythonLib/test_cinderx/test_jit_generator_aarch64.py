@@ -439,48 +439,41 @@ class TestGeneratorStress(unittest.TestCase):
 
 
 
-class TestGeneratorJITCompilation(unittest.TestCase):
-    """Verify generators ARE JIT-compiled on aarch64 (savedIP approach)."""
+class TestDeoptGuardAssertion(unittest.TestCase):
+    """Verify generators are NOT JIT-compiled on aarch64 (deopt guard)."""
 
     @unittest.skipUnless(HAS_CINDERJIT, "requires cinderjit")
     @unittest.skipUnless(platform.machine() in ("aarch64", "arm64"),
-                         "aarch64-only")
-    def test_generator_jit_compiled(self):
-        """force_compile on a generator succeeds on aarch64."""
+                         "deopt guard is aarch64-only")
+    def test_generator_not_jit_compiled(self):
+        """force_compile on a generator must return False on aarch64."""
         def gen():
             yield 1
         result = cinderjit.force_compile(gen)
-        self.assertTrue(result)
-        self.assertTrue(cinderjit.is_jit_compiled(gen))
-        self.assertEqual(list(gen()), [1])
+        self.assertFalse(result)
+        self.assertFalse(cinderjit.is_jit_compiled(gen))
 
     @unittest.skipUnless(HAS_CINDERJIT, "requires cinderjit")
     @unittest.skipUnless(platform.machine() in ("aarch64", "arm64"),
-                         "aarch64-only")
-    def test_coroutine_jit_compiled(self):
-        """force_compile on a coroutine succeeds on aarch64."""
-        import asyncio
+                         "deopt guard is aarch64-only")
+    def test_coroutine_not_jit_compiled(self):
+        """force_compile on a coroutine must return False on aarch64."""
         async def coro():
-            return 42
+            return 1
         result = cinderjit.force_compile(coro)
-        self.assertTrue(result)
-        self.assertTrue(cinderjit.is_jit_compiled(coro))
-        self.assertEqual(asyncio.run(coro()), 42)
+        self.assertFalse(result)
+        self.assertFalse(cinderjit.is_jit_compiled(coro))
 
     @unittest.skipUnless(HAS_CINDERJIT, "requires cinderjit")
     @unittest.skipUnless(platform.machine() in ("aarch64", "arm64"),
-                         "aarch64-only")
-    def test_async_generator_jit_compiled(self):
-        """force_compile on an async generator succeeds on aarch64."""
-        import asyncio
+                         "deopt guard is aarch64-only")
+    def test_async_generator_not_jit_compiled(self):
+        """force_compile on an async generator must return False on aarch64."""
         async def agen():
             yield 1
         result = cinderjit.force_compile(agen)
-        self.assertTrue(result)
-        self.assertTrue(cinderjit.is_jit_compiled(agen))
-        async def collect():
-            return [x async for x in agen()]
-        self.assertEqual(asyncio.run(collect()), [1])
+        self.assertFalse(result)
+        self.assertFalse(cinderjit.is_jit_compiled(agen))
 
     @unittest.skipUnless(HAS_CINDERJIT, "requires cinderjit")
     @unittest.skipUnless(platform.machine() in ("aarch64", "arm64"),
