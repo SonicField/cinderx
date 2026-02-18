@@ -18,6 +18,8 @@ namespace jit {
 
 namespace {
 
+static_assert(sizeof(GenDataFooter) == 80, "GenDataFooter size mismatch in generators_mm.cpp");
+
 size_t computeSlots(BorrowedRef<PyCodeObject> code, uint64_t jit_data_size) {
   // A "slot" is the size of PyObject* and we assume this just means 64 bits for
   // purposes of sizing allocation to cover JIT data.

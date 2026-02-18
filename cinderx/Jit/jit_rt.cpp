@@ -759,6 +759,18 @@ JITRT_AllocateAndLinkGenAndInterpreterFrame(
             original_frame_pointer) +
         1);
 
+#ifdef ENABLE_LIGHTWEIGHT_FRAMES
+  // Set frame header in footer for generators. The stored pointer at
+  // gen + giJITDataOffset() is safe from CPython frame init (it is beyond
+  // the localsplus range that _PyFrame_Initialize touches), so
+  // jitGenDataFooter() / jitFrameGetHeader() can resolve correctly here.
+  {
+    _PyInterpreterFrame* frame = generatorFrame(gen);
+    jit::jitFrameSetFunction(frame, func);
+    jit::jitFrameGetHeader(frame)->rtfs |= JIT_FRAME_INITIALIZED;
+  }
+#endif
+
   PyObject_GC_Track(gen);
 
   return {tstate, footer};
