@@ -494,6 +494,21 @@ int MemberDescrMutator::setAttr(PyObject* obj, PyObject* value) {
 }
 
 PyObject* MemberDescrMutator::getAttr(PyObject* obj) {
+  // Fast path: inline T_OBJECT_EX (the common __slots__ case)
+  // to avoid the overhead of PyMember_GetOne's type dispatch switch.
+  if (memberdef->type == T_OBJECT_EX) {
+    PyObject* v = *reinterpret_cast<PyObject**>(
+        reinterpret_cast<char*>(obj) + memberdef->offset);
+    if (v != nullptr) {
+      return Py_NewRef(v);
+    }
+    PyErr_Format(
+        PyExc_AttributeError,
+        "'%.50s' object has no attribute '%s'",
+        Py_TYPE(obj)->tp_name,
+        memberdef->name);
+    return nullptr;
+  }
   return PyMember_GetOne((char*)obj, memberdef);
 }
 
@@ -904,7 +919,15 @@ StoreAttrCache::invokeSlowPath(PyObject* obj, PyObject* name, PyObject* value) {
 
 PyObject*
 LoadAttrCache::invoke(LoadAttrCache* cache, PyObject* obj, PyObject* name) {
-  return cache->doInvoke(obj, name);
+  // Inline the fast path: check first cache entry directly.
+  // This avoids one layer of function call indirection.
+  PyTypeObject* tp = Py_TYPE(obj);
+  for (auto& entry : cache->entries()) {
+    if (entry.type() == tp) {
+      return entry.getAttr(obj, name);
+    }
+  }
+  return cache->invokeSlowPath(obj, name);
 }
 
 PyObject* LoadAttrCache::doInvoke(PyObject* obj, PyObject* name) {
