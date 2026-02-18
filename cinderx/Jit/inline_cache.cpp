@@ -490,6 +490,15 @@ PyObject* DataDescrMutator::getAttr(PyObject* obj) {
 }
 
 int MemberDescrMutator::setAttr(PyObject* obj, PyObject* value) {
+  // Fast path: inline T_OBJECT_EX (the common __slots__ case)
+  // to avoid the overhead of PyMember_SetOne's type dispatch switch.
+  if (memberdef->type == T_OBJECT_EX && value != nullptr) {
+    PyObject** addr = reinterpret_cast<PyObject**>(
+        reinterpret_cast<char*>(obj) + memberdef->offset);
+    Py_XDECREF(*addr);
+    *addr = Py_NewRef(value);
+    return 0;
+  }
   return PyMember_SetOne((char*)obj, memberdef, value);
 }
 
@@ -886,7 +895,15 @@ int StoreAttrCache::invoke(
     PyObject* obj,
     PyObject* name,
     PyObject* value) {
-  return cache->doInvoke(obj, name, value);
+  // Inline the fast path: check cache entries directly.
+  // This avoids one layer of function call indirection (matching LoadAttrCache).
+  PyTypeObject* tp = Py_TYPE(obj);
+  for (auto& entry : cache->entries()) {
+    if (entry.type() == tp) {
+      return entry.setAttr(obj, name, value);
+    }
+  }
+  return cache->invokeSlowPath(obj, name, value);
 }
 
 int StoreAttrCache::doInvoke(PyObject* obj, PyObject* name, PyObject* value) {
