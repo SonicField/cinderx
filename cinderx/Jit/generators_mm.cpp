@@ -9,6 +9,7 @@
 #include "cinderx/Common/log.h"
 #include "cinderx/Common/util.h"
 #include "cinderx/Jit/generators_mm.h"
+#include "cinderx/Jit/gen_data_footer.h"
 #include "cinderx/module_state.h"
 #if PY_VERSION_HEX >= 0x030E0000
 #include "internal/pycore_interpframe.h"
