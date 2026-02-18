@@ -1534,10 +1534,16 @@ void NativeGenerator::saveCallerRegisters(
   }
   // Zero-init the saved-IP slot at FP + saved_ip_fp_offset.
   // getIP() falls back to [FP+8] (saved LR) when this slot reads 0.
-  as_->str(
-      a64::xzr,
-      arch::ptr_resolve(
-          as_, arch::fp, env_.saved_ip_fp_offset, arch::reg_scratch_0));
+  // For generators, savedIP lives inside GenDataFooter (at offset +72) and
+  // is already zero-initialized by the constructor, so skip this write.
+  // Writing at saved_ip_fp_offset (a negative FP offset) would clobber the
+  // GenDataFooter** pointer in the generator object's localsplus area.
+  if (!env_.is_generator) {
+    as_->str(
+        a64::xzr,
+        arch::ptr_resolve(
+            as_, arch::fp, env_.saved_ip_fp_offset, arch::reg_scratch_0));
+  }
 #else
   CINDER_UNSUPPORTED
 #endif
@@ -2566,10 +2572,28 @@ void NativeGenerator::generateResumeEntry(const FrameInfo& frame_info) {
   // Pointer to GenDataFooter. Could be any conflict-free register.
   const auto jit_data_r = a64::x9;
 
-  // jit_data_r = gen->gi_jit_data
-  as_->ldr(
-      jit_data_r,
-      arch::ptr_resolve(as_, a64::x0, giJITDataOffset(), arch::reg_scratch_0));
+  // Compute GenDataFooter address as a compile-time constant offset from gen.
+  // The footer is at the END of the allocation:
+  //   footer = gen + gen_size - sizeof(GenDataFooter)
+  // gen_size = _PyObject_VAR_SIZE(genType, computeSlots(code, jit_data_size))
+  // This must match the allocation in JITRT_AllocateAndLinkGenAndInterpreterFrame
+  // and computeSlots() in generators_mm.cpp.
+  {
+    auto gen_type = cinderx::getModuleState()->genType();
+    Py_ssize_t python_frame_slots =
+        _PyFrame_NumSlotsForCodeObject(GetFunction()->code);
+    uint64_t spill_words = env_.shadow_frames_and_spill_size / kPointerSize;
+    size_t jit_data_size =
+        spill_words * sizeof(uint64_t) + sizeof(GenDataFooter);
+    size_t extra_slots = (jit_data_size + 7) / 8;
+    // +1 for the stored GenDataFooter* pointer slot (matches computeSlots)
+    size_t total_slots =
+        static_cast<size_t>(python_frame_slots) + 1 + extra_slots;
+    size_t gen_size = _PyObject_VAR_SIZE(gen_type, total_slots);
+    Py_ssize_t footer_offset =
+        static_cast<Py_ssize_t>(gen_size - sizeof(GenDataFooter));
+    as_->add(jit_data_r, a64::x0, footer_offset);
+  }
 
   // Store linked frame address
   size_t link_address_offset = offsetof(GenDataFooter, linkAddress);

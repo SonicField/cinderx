@@ -439,41 +439,48 @@ class TestGeneratorStress(unittest.TestCase):
 
 
 
-class TestDeoptGuardAssertion(unittest.TestCase):
-    """Verify generators are NOT JIT-compiled on aarch64 (deopt guard)."""
+class TestGeneratorJITCompilation(unittest.TestCase):
+    """Verify generators ARE JIT-compiled on aarch64 (savedIP approach)."""
 
     @unittest.skipUnless(HAS_CINDERJIT, "requires cinderjit")
     @unittest.skipUnless(platform.machine() in ("aarch64", "arm64"),
-                         "deopt guard is aarch64-only")
-    def test_generator_not_jit_compiled(self):
-        """force_compile on a generator must return False on aarch64."""
+                         "aarch64-only")
+    def test_generator_jit_compiled(self):
+        """force_compile on a generator succeeds on aarch64."""
         def gen():
             yield 1
         result = cinderjit.force_compile(gen)
-        self.assertFalse(result)
-        self.assertFalse(cinderjit.is_jit_compiled(gen))
+        self.assertTrue(result)
+        self.assertTrue(cinderjit.is_jit_compiled(gen))
+        self.assertEqual(list(gen()), [1])
 
     @unittest.skipUnless(HAS_CINDERJIT, "requires cinderjit")
     @unittest.skipUnless(platform.machine() in ("aarch64", "arm64"),
-                         "deopt guard is aarch64-only")
-    def test_coroutine_not_jit_compiled(self):
-        """force_compile on a coroutine must return False on aarch64."""
+                         "aarch64-only")
+    def test_coroutine_jit_compiled(self):
+        """force_compile on a coroutine succeeds on aarch64."""
+        import asyncio
         async def coro():
-            return 1
+            return 42
         result = cinderjit.force_compile(coro)
-        self.assertFalse(result)
-        self.assertFalse(cinderjit.is_jit_compiled(coro))
+        self.assertTrue(result)
+        self.assertTrue(cinderjit.is_jit_compiled(coro))
+        self.assertEqual(asyncio.run(coro()), 42)
 
     @unittest.skipUnless(HAS_CINDERJIT, "requires cinderjit")
     @unittest.skipUnless(platform.machine() in ("aarch64", "arm64"),
-                         "deopt guard is aarch64-only")
-    def test_async_generator_not_jit_compiled(self):
-        """force_compile on an async generator must return False on aarch64."""
+                         "aarch64-only")
+    def test_async_generator_jit_compiled(self):
+        """force_compile on an async generator succeeds on aarch64."""
+        import asyncio
         async def agen():
             yield 1
         result = cinderjit.force_compile(agen)
-        self.assertFalse(result)
-        self.assertFalse(cinderjit.is_jit_compiled(agen))
+        self.assertTrue(result)
+        self.assertTrue(cinderjit.is_jit_compiled(agen))
+        async def collect():
+            return [x async for x in agen()]
+        self.assertEqual(asyncio.run(collect()), [1])
 
     @unittest.skipUnless(HAS_CINDERJIT, "requires cinderjit")
     @unittest.skipUnless(platform.machine() in ("aarch64", "arm64"),
@@ -522,26 +529,28 @@ class TestParameterisedGeneratorDeopt(unittest.TestCase):
         results = list(gen(10))
         self.assertEqual(results, [10, 11, 12, 13, 14])
 
-    def test_parameterised_generator_not_jit_compiled(self):
-        """Parameterised generator is not JIT-compiled on aarch64."""
+    def test_parameterised_generator_jit_compiled(self):
+        """Parameterised generator is JIT-compiled on aarch64."""
         def gen(x):
             yield x
         if HAS_CINDERJIT and is_aarch64():
             force_compile(gen)
-            self.assertFalse(
+            self.assertTrue(
                 cinderjit.is_jit_compiled(gen),
-                "Parameterised generator should not be JIT-compiled on aarch64")
+                "Parameterised generator should be JIT-compiled on aarch64")
+            self.assertEqual(list(gen(99)), [99])
 
-    def test_closure_generator_not_jit_compiled(self):
-        """Closure generator is not JIT-compiled on aarch64."""
+    def test_closure_generator_jit_compiled(self):
+        """Closure generator is JIT-compiled on aarch64."""
         captured = 42
         def gen():
             yield captured
         if HAS_CINDERJIT and is_aarch64():
             force_compile(gen)
-            self.assertFalse(
+            self.assertTrue(
                 cinderjit.is_jit_compiled(gen),
-                "Closure generator should not be JIT-compiled on aarch64")
+                "Closure generator should be JIT-compiled on aarch64")
+            self.assertEqual(list(gen()), [42])
 
     def test_closure_generator_correct_results(self):
         """Closure generator produces correct results via interpreter."""

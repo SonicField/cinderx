@@ -1548,30 +1548,6 @@ PyObject* force_compile(PyObject* /* self */, PyObject* arg) {
     Py_RETURN_FALSE;
   }
 
-#if defined(__aarch64__) || defined(_M_ARM64)
-  // aarch64 generator deopt guard (Phase 4c, temporary).
-  //
-  // ROOT CAUSE: On aarch64, generateResumeEntry() reassigns FP (x29) to
-  // GenDataFooter allocated on the heap (gen->gi_jit_data). After this
-  // reassignment, the FP-relative saved-IP store (ADR x12, after_call;
-  // STR x12, [FP, #saved_ip_fp_offset]) writes into heap memory instead
-  // of the stack frame, corrupting generator state and causing
-  // SIGBUS/SIGSEGV.
-  //
-  // PROPER FIX (Phase 5c): Use SP-relative saved-IP for generators.
-  // Generators enter via JITRT_GenSend (not vectorcall), so there is no
-  // kVectorcallArgsOffset overlap at [SP,#8]. Add is_generator flag to
-  // Environ, use Mem(SP,8) in emitCall/translateCall when set.
-  //
-  // Until the proper fix lands, generators run in interpreter mode.
-  // This is safe but slower for generator-heavy workloads.
-  {
-    BorrowedRef<PyCodeObject> code{func->func_code};
-    if (code->co_flags & kCoFlagsAnyGenerator) {
-      Py_RETURN_FALSE;
-    }
-  }
-#endif
 
   if (Ci_InitFrameEvalFunc() < 0) {
     return nullptr;
@@ -3469,19 +3445,6 @@ bool shouldScheduleCompile(BorrowedRef<PyFunctionObject> func) {
     return false;
   }
 
-#if defined(__aarch64__) || defined(_M_ARM64)
-  // aarch64: generators/coroutines/async generators crash because
-  // generateResumeEntry() reassigns FP to heap memory (gen->gi_jit_data),
-  // causing saved-IP writes at [FP+offset] to corrupt the heap.
-  // Deopt generators to the CPython interpreter until a proper fix lands.
-  {
-    BorrowedRef<PyCodeObject> code{func->func_code};
-    if (code->co_flags & kCoFlagsAnyGenerator) {
-      return false;
-    }
-  }
-#endif
-
   // Note: This is not the same as fetching the function's code object and
   // checking its module and qualname, as functions can be renamed after they
   // are created.  Code objects cannot.
@@ -3500,16 +3463,6 @@ bool shouldScheduleCompile(
   if (isCinderModule(module_name)) {
     return false;
   }
-
-#if defined(__aarch64__) || defined(_M_ARM64)
-  // aarch64: generators/coroutines/async generators crash because
-  // generateResumeEntry() reassigns FP to heap memory (gen->gi_jit_data),
-  // causing saved-IP writes at [FP+offset] to corrupt the heap.
-  // Deopt generators to the CPython interpreter until a proper fix lands.
-  if (code->co_flags & kCoFlagsAnyGenerator) {
-    return false;
-  }
-#endif
 
   if (auto jit_list = cinderx::getModuleState()->jitList()) {
     return jit_list->lookupCode(code) == 1 ||
