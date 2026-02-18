@@ -146,7 +146,8 @@ for suite in "${SUITES[@]}"; do
     printf "[%d/%d] %-45s " "$SUITE_COUNT" "${#SUITES[@]}" "$suite"
 
     # Run with timeout (120s per suite) and capture output
-    OUTPUT=$(timeout 120 python3 -m unittest "test_cinderx.$suite" 2>&1) || true
+    OUTPUT=$(timeout 120 python3 -m unittest "test_cinderx.$suite" 2>&1)
+    TEST_EXIT=$?
 
     # Parse results from unittest output
     RAN_LINE=$(echo "$OUTPUT" | grep -E '^Ran [0-9]+ test' || echo "")
@@ -160,6 +161,18 @@ for suite in "${SUITES[@]}"; do
             printf "${YELLOW}SKIP${RESET} (%s)\n" "${SKIP_REASON:-module-level skip}"
             SKIPPED_SUITES+=("$suite")
             TOTAL_SKIP=$((TOTAL_SKIP + 1))
+        elif [ "$TEST_EXIT" -gt 128 ]; then
+            SIG_NUM=$((TEST_EXIT - 128))
+            PARTIAL_LINE=$(echo "$OUTPUT" | grep -oE "^[.EFsSx]+" | head -1)
+            PARTIAL_PASS=$(echo "$PARTIAL_LINE" | tr -cd "." | wc -c)
+            PARTIAL_ERR=$(echo "$PARTIAL_LINE" | tr -cd "E" | wc -c)
+            PARTIAL_FAIL=$(echo "$PARTIAL_LINE" | tr -cd "F" | wc -c)
+            printf "${RED}CRASH${RESET} (signal %d, ~%d pass, ~%d fail, ~%d error before crash)
+" "$SIG_NUM" "$PARTIAL_PASS" "$PARTIAL_FAIL" "$PARTIAL_ERR"
+            FAILED_SUITES+=("$suite")
+            TOTAL_PASS=$((TOTAL_PASS + PARTIAL_PASS))
+            TOTAL_FAIL=$((TOTAL_FAIL + PARTIAL_FAIL))
+            TOTAL_ERROR=$((TOTAL_ERROR + PARTIAL_ERR))
         else
             # Genuine error — suite did not execute
             ERR_MSG=$(echo "$OUTPUT" | grep -E '(ModuleNotFoundError|ImportError|SyntaxError|AttributeError):' | tail -1 | head -c 60)

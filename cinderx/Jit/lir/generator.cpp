@@ -1399,21 +1399,25 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
               incref_block,
               call_block);
 
-          // Incref block: INCREF, write to dst, goto done
+          // Incref block: INCREF, write to dst, branch to done
           bbb.appendBlock(incref_block);
           bbb.appendInvokeInstruction(Py_IncRef, slot_value);
           bbb.appendInstr(dst, Instruction::kMove, slot_value);
-          bbb.appendBranch(Instruction::kBranch, done_block);
+          bbb.appendBranch(Instruction::kBranch, done_block)
+              ->allocateLabelInput(done_block);
 
-          // Call block: invoke with deopt guard, goto done
-          bbb.appendBlock(call_block);
+          // Call block: invoke with deopt guard, branch to done.
+          // switchBlock avoids adding call_block as fall-through
+          // successor of incref_block.
+          bbb.switchBlock(call_block);
           bbb.appendCallInstruction(
               dst, jit::LoadAttrCache::invoke, cache, base, name);
           emitExceptionCheck(*instr, bbb);
-          bbb.appendBranch(Instruction::kBranch, done_block);
+          bbb.appendBranch(Instruction::kBranch, done_block)
+              ->allocateLabelInput(done_block);
 
           // Done block
-          bbb.appendBlock(done_block);
+          bbb.switchBlock(done_block);
         }
         break;
       }
