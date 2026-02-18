@@ -752,6 +752,10 @@ void AttributeCache::typeChanged(PyTypeObject*) {
   for (auto& entry : entries()) {
     entry.reset();
   }
+  // Reset fast-path fields so the JIT inline guard will miss
+  // and fall through to invoke() on next access.
+  fast_type_ = nullptr;
+  fast_offset_ = -1;
 }
 
 std::span<AttributeMutator> AttributeCache::entries() {
@@ -846,6 +850,16 @@ void AttributeCache::fill(
       // Data descriptor
       if (descr_type == &PyMemberDescr_Type) {
         mut->set_member_descr(type, descr);
+        // Populate fast-path fields for JIT inline slot access.
+        // The JIT reads fast_type_ and fast_offset_ directly to avoid
+        // calling invoke() on the hot path.
+        {
+          PyMemberDef* def = ((PyMemberDescrObject*)descr.get())->d_member;
+          if (def->type == T_OBJECT_EX) {
+            fast_type_ = type;
+            fast_offset_ = def->offset;
+          }
+        }
       } else {
         // If someone deletes descr_types's __set__ method, it will no longer
         // be a data descriptor, and the cache kind has to change.
@@ -948,6 +962,22 @@ LoadAttrCache::invoke(LoadAttrCache* cache, PyObject* obj, PyObject* name) {
 }
 
 PyObject* LoadAttrCache::doInvoke(PyObject* obj, PyObject* name) {
+  // Fast path: check monomorphic MemberDescr (slot) cache.
+  // fast_type_ and fast_offset_ are populated by fill() when a MemberDescr
+  // entry is detected, and reset by typeChanged().
+  PyTypeObject* ft = fast_type_;
+  if (ft != nullptr && Py_TYPE(obj) == ft) {
+    PyObject* v = *reinterpret_cast<PyObject**>(
+        reinterpret_cast<char*>(obj) + fast_offset_);
+    if (v != nullptr) {
+      return Py_NewRef(v);
+    }
+    // Slot is unset (T_OBJECT_EX with NULL value).
+    // Fall through to the polymorphic path which will raise AttributeError
+    // via MemberDescrMutator::getAttr -> PyMember_GetOne.
+  }
+
+  // Polymorphic path: scan all cache entries.
   PyTypeObject* tp = Py_TYPE(obj);
   for (auto& entry : entries()) {
     if (entry.type() == tp) {

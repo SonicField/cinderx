@@ -2779,6 +2779,57 @@ void HIRBuilder::emitJumpIf(
   }
 }
 
+namespace {
+
+// Walk the type hierarchy starting from 'base' to find a type whose
+// tp_version_tag matches 'version'. Used at JIT compile time to recover
+// the PyTypeObject* from CPython's inline cache (which only stores the
+// version tag, not the type pointer).
+//
+// Cost: O(number_of_types) but runs once per LOAD_ATTR_SLOT at JIT compile
+// time, not at runtime.
+PyTypeObject* findTypeByVersionTagImpl(
+    PyTypeObject* base,
+    uint32_t version,
+    int depth) {
+  if (depth > 50) {
+    return nullptr;
+  }
+  if (base->tp_version_tag == version) {
+    return base;
+  }
+  PyObject* subclasses =
+      PyObject_CallMethod((PyObject*)base, "__subclasses__", nullptr);
+  if (subclasses == nullptr || !PyList_Check(subclasses)) {
+    Py_XDECREF(subclasses);
+    return nullptr;
+  }
+  Py_ssize_t n = PyList_GET_SIZE(subclasses);
+  for (Py_ssize_t i = 0; i < n; i++) {
+    PyObject* sub = PyList_GET_ITEM(subclasses, i);
+    if (!PyType_Check(sub)) {
+      continue;
+    }
+    PyTypeObject* found =
+        findTypeByVersionTagImpl((PyTypeObject*)sub, version, depth + 1);
+    if (found != nullptr) {
+      Py_DECREF(subclasses);
+      return found;
+    }
+  }
+  Py_DECREF(subclasses);
+  return nullptr;
+}
+
+PyTypeObject* findTypeByVersionTag(uint32_t version) {
+  if (version == 0) {
+    return nullptr;
+  }
+  return findTypeByVersionTagImpl(&PyBaseObject_Type, version, 0);
+}
+
+} // namespace
+
 void HIRBuilder::emitDeleteAttr(
     TranslationContext& tc,
     const jit::BytecodeInstruction& bc_instr) {
@@ -2808,6 +2859,26 @@ void HIRBuilder::emitLoadAttr(
       case LOAD_ATTR_MODULE: {
         Type type = Type::fromTypeExact(&PyModule_Type);
         tc.emit<GuardType>(receiver, type, receiver, tc.frame);
+        break;
+      }
+      case LOAD_ATTR_SLOT: {
+        // Read the type version from CPython's inline cache.
+        // The cache follows the instruction word in the bytecode array.
+        // Layout: _PyAttrCache { counter, version[2], index }
+        _Py_CODEUNIT* code_units = codeUnit(code_);
+        int instr_idx = bc_instr.opcodeIndex().value();
+        const _PyAttrCache* cache =
+            reinterpret_cast<const _PyAttrCache*>(&code_units[instr_idx + 1]);
+        uint32_t type_version =
+            cache->version[0] |
+            (static_cast<uint32_t>(cache->version[1]) << 16);
+        // Find the PyTypeObject* matching this version tag by walking
+        // the type hierarchy. One-time compile-time cost.
+        PyTypeObject* slot_type = findTypeByVersionTag(type_version);
+        if (slot_type != nullptr) {
+          Type type = Type::fromTypeExact(slot_type);
+          tc.emit<GuardType>(receiver, type, receiver, tc.frame);
+        }
         break;
       }
       default:

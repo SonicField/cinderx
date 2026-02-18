@@ -153,6 +153,13 @@ class AttributeCache {
   void
   fill(BorrowedRef<PyTypeObject> type, BorrowedRef<> name, BorrowedRef<> descr);
 
+  // Fast-path fields for inline slot access in JIT-generated code.
+  // Populated by fill() when a MemberDescr entry is detected.
+  // Reset by typeChanged(). The JIT reads these directly to avoid
+  // calling invoke() on the hot path.
+  PyTypeObject* fast_type_{nullptr};
+  Py_ssize_t fast_offset_{-1};
+
   AttributeMutator entries_[0];
 };
 
@@ -195,6 +202,12 @@ class LoadAttrCache : public AttributeCache {
 
   // Returns a new reference to the value or NULL on error.
   static PyObject* invoke(LoadAttrCache* cache, PyObject* obj, PyObject* name);
+
+  // Accessors for the inline fast-path fields.
+  // The JIT generator uses these to get stable addresses that it can
+  // burn into generated code as memory operands.
+  PyTypeObject** fastTypeAddr() { return &fast_type_; }
+  Py_ssize_t* fastOffsetAddr() { return &fast_offset_; }
 
  private:
   DISALLOW_COPY_AND_ASSIGN(LoadAttrCache);

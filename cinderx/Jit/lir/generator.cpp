@@ -1344,8 +1344,77 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
         hir::Register* base = instr->GetOperand(0);
         Instruction* name = getNameFromIdx(bbb, instr);
         auto cache = getContext()->allocateLoadAttrCache();
-        bbb.appendCallInstruction(
-            dst, jit::LoadAttrCache::invoke, cache, base, name);
+
+        // Inline fast path for monomorphic slot access (MemberDescr).
+        // Exception check is handled explicitly in call_block.
+        {
+          auto call_block = bbb.allocateBlock();
+          auto done_block = bbb.allocateBlock();
+          auto type_check_block = bbb.allocateBlock();
+          auto slot_load_block = bbb.allocateBlock();
+          auto incref_block = bbb.allocateBlock();
+
+          // Load cached type from fast-path field
+          PyTypeObject** fast_type_addr = cache->fastTypeAddr();
+          Instruction* cached_type = bbb.appendInstr(
+              Instruction::kMove, OutVReg{}, MemImm{fast_type_addr});
+
+          // If NULL (cache not populated), go to call block
+          bbb.appendBranch(
+              Instruction::kCondBranch,
+              cached_type,
+              type_check_block,
+              call_block);
+
+          // Type check block
+          bbb.appendBlock(type_check_block);
+          Instruction* obj_reg = bbb.getDefInstr(base);
+          constexpr int32_t kObTypeOffset = offsetof(PyObject, ob_type);
+          Instruction* obj_type = bbb.appendInstr(
+              Instruction::kMove, OutVReg{}, Ind{obj_reg, kObTypeOffset});
+          Instruction* type_match = bbb.appendInstr(
+              Instruction::kEqual,
+              OutVReg{OperandBase::k8bit},
+              obj_type,
+              cached_type);
+          bbb.appendBranch(
+              Instruction::kCondBranch,
+              type_match,
+              slot_load_block,
+              call_block);
+
+          // Slot load block
+          bbb.appendBlock(slot_load_block);
+          Py_ssize_t* fast_offset_addr = cache->fastOffsetAddr();
+          Instruction* cached_offset = bbb.appendInstr(
+              Instruction::kMove, OutVReg{}, MemImm{fast_offset_addr});
+          Instruction* slot_addr = bbb.appendInstr(
+              Instruction::kAdd, OutVReg{OperandBase::k64bit},
+              obj_reg, cached_offset);
+          Instruction* slot_value = bbb.appendInstr(
+              Instruction::kMove, OutVReg{}, Ind{slot_addr, 0});
+          bbb.appendBranch(
+              Instruction::kCondBranch,
+              slot_value,
+              incref_block,
+              call_block);
+
+          // Incref block: INCREF, write to dst, goto done
+          bbb.appendBlock(incref_block);
+          bbb.appendInvokeInstruction(Py_IncRef, slot_value);
+          bbb.appendInstr(dst, Instruction::kMove, slot_value);
+          bbb.appendBranch(Instruction::kBranch, done_block);
+
+          // Call block: invoke with deopt guard, goto done
+          bbb.appendBlock(call_block);
+          bbb.appendCallInstruction(
+              dst, jit::LoadAttrCache::invoke, cache, base, name);
+          emitExceptionCheck(*instr, bbb);
+          bbb.appendBranch(Instruction::kBranch, done_block);
+
+          // Done block
+          bbb.appendBlock(done_block);
+        }
         break;
       }
       case Opcode::kLoadAttrSpecial: {
@@ -3555,6 +3624,7 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
         case Opcode::kRaise:
         case Opcode::kRaiseStatic:
         case Opcode::kStoreAttr:
+        case Opcode::kLoadAttrCached:
         case Opcode::kStoreAttrCached:
         case Opcode::kStoreSubscr: {
           break;
