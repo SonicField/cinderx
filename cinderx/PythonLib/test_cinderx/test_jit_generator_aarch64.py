@@ -31,12 +31,8 @@ except ImportError:
 def force_compile(func):
     """Force JIT compilation if cinderjit is available."""
     if HAS_CINDERJIT:
-        try:
-            return cinderjit.force_compile(func)
-        except RuntimeError:
-            # Some function types (e.g. async generators) cannot be specialised.
-            return False
-    return False
+        cinderjit.force_compile(func)
+    return func
 
 
 def is_aarch64():
@@ -366,11 +362,6 @@ class TestGeneratorExceptionHandling(unittest.TestCase):
         # i=4: 2
         self.assertEqual(results, [-999, -999, 0, 1, 2])
 
-    @unittest.skipIf(
-        is_aarch64(),
-        "Phase 5e: getIP() returns stale savedIP during exception propagation. "
-        "Will be fixed when savedIP is updated at exception boundaries."
-    )
     def test_traceback_from_generator(self):
         """Verify traceback through generator frames is readable."""
         def gen():
@@ -448,40 +439,48 @@ class TestGeneratorStress(unittest.TestCase):
 
 
 
-class TestDeoptGuardAssertion(unittest.TestCase):
-    """Verify generators are NOT JIT-compiled on aarch64 (deopt guard)."""
+class TestGeneratorJITCompilation(unittest.TestCase):
+    """Verify generators ARE JIT-compiled on aarch64 (savedIP approach)."""
 
     @unittest.skipUnless(HAS_CINDERJIT, "requires cinderjit")
     @unittest.skipUnless(platform.machine() in ("aarch64", "arm64"),
-                         "deopt guard is aarch64-only")
+                         "aarch64-only")
     def test_generator_jit_compiled(self):
-        """force_compile on a non-closure generator returns True on aarch64 (Phase 5e)."""
+        """force_compile on a generator succeeds on aarch64."""
         def gen():
             yield 1
         result = cinderjit.force_compile(gen)
         self.assertTrue(result)
         self.assertTrue(cinderjit.is_jit_compiled(gen))
+        self.assertEqual(list(gen()), [1])
 
     @unittest.skipUnless(HAS_CINDERJIT, "requires cinderjit")
     @unittest.skipUnless(platform.machine() in ("aarch64", "arm64"),
-                         "deopt guard is aarch64-only")
+                         "aarch64-only")
     def test_coroutine_jit_compiled(self):
-        """force_compile on a non-closure coroutine returns True on aarch64 (Phase 5e)."""
+        """force_compile on a coroutine succeeds on aarch64."""
+        import asyncio
         async def coro():
-            return 1
+            return 42
         result = cinderjit.force_compile(coro)
         self.assertTrue(result)
         self.assertTrue(cinderjit.is_jit_compiled(coro))
+        self.assertEqual(asyncio.run(coro()), 42)
 
     @unittest.skipUnless(HAS_CINDERJIT, "requires cinderjit")
     @unittest.skipUnless(platform.machine() in ("aarch64", "arm64"),
-                         "deopt guard is aarch64-only")
-    def test_async_generator_not_jit_compiled(self):
-        """force_compile on an async generator raises on aarch64 (cannot specialise)."""
+                         "aarch64-only")
+    def test_async_generator_jit_compiled(self):
+        """force_compile on an async generator succeeds on aarch64."""
+        import asyncio
         async def agen():
             yield 1
-        with self.assertRaises(RuntimeError):
-            cinderjit.force_compile(agen)
+        result = cinderjit.force_compile(agen)
+        self.assertTrue(result)
+        self.assertTrue(cinderjit.is_jit_compiled(agen))
+        async def collect():
+            return [x async for x in agen()]
+        self.assertEqual(asyncio.run(collect()), [1])
 
     @unittest.skipUnless(HAS_CINDERJIT, "requires cinderjit")
     @unittest.skipUnless(platform.machine() in ("aarch64", "arm64"),
@@ -494,6 +493,110 @@ class TestDeoptGuardAssertion(unittest.TestCase):
         self.assertTrue(cinderjit.is_jit_compiled(normal))
         self.assertEqual(normal(41), 42)
 
+
+
+class TestParameterisedGeneratorDeopt(unittest.TestCase):
+    # Tests verifying parameterised and closure generators are correctly
+    # deopted on aarch64 due to GenDataFooter pointer corruption.
+    # Phase 5-e savedIP infrastructure is in place but deopt guards prevent
+    # generators from being JIT-compiled on aarch64.
+
+    def test_parameterised_generator_single_arg(self):
+        """Generator with one parameter produces correct results."""
+        def gen(x):
+            for i in range(5):
+                yield x + i
+        force_compile(gen)
+        results = list(gen(10))
+        self.assertEqual(results, [10, 11, 12, 13, 14])
+
+    def test_parameterised_generator_multiple_args(self):
+        """Generator with multiple parameters produces correct results."""
+        def gen(a, b):
+            for i in range(5):
+                yield a + b + i
+        force_compile(gen)
+        results = list(gen(100, 200))
+        self.assertEqual(results, [300, 301, 302, 303, 304])
+
+    def test_parameterised_generator_with_jit_callee(self):
+        """Parameterised generator calling JIT function."""
+        def gen(base):
+            for i in range(5):
+                yield add3(base, i, 0)
+        force_compile(add3)
+        force_compile(gen)
+        results = list(gen(10))
+        self.assertEqual(results, [10, 11, 12, 13, 14])
+
+    def test_parameterised_generator_not_jit_compiled(self):
+        """Parameterised generator is not JIT-compiled on aarch64."""
+        def gen(x):
+            yield x
+        if HAS_CINDERJIT and is_aarch64():
+            force_compile(gen)
+            self.assertFalse(
+                cinderjit.is_jit_compiled(gen),
+                "Parameterised generator should not be JIT-compiled on aarch64")
+
+    def test_closure_generator_not_jit_compiled(self):
+        """Closure generator is not JIT-compiled on aarch64."""
+        captured = 42
+        def gen():
+            yield captured
+        if HAS_CINDERJIT and is_aarch64():
+            force_compile(gen)
+            self.assertFalse(
+                cinderjit.is_jit_compiled(gen),
+                "Closure generator should not be JIT-compiled on aarch64")
+
+    def test_closure_generator_correct_results(self):
+        """Closure generator produces correct results via interpreter."""
+        multiplier = 3
+        def gen():
+            for i in range(5):
+                yield i * multiplier
+        force_compile(gen)
+        results = list(gen())
+        self.assertEqual(results, [0, 3, 6, 9, 12])
+
+    def test_interleaved_parameterised_generators(self):
+        """Multiple parameterised generators interleaved."""
+        def gen(base):
+            for i in range(5):
+                yield add3(base, i, 0)
+        force_compile(add3)
+        force_compile(gen)
+        g1 = gen(0)
+        g2 = gen(100)
+        g3 = gen(200)
+        results = []
+        for _ in range(5):
+            results.append(next(g1))
+            results.append(next(g2))
+            results.append(next(g3))
+        expected = []
+        for i in range(5):
+            expected.extend([i, 100 + i, 200 + i])
+        self.assertEqual(results, expected)
+
+    def test_parameterised_generator_kwargs(self):
+        """Parameterised generator with keyword arguments."""
+        def gen(start=0, step=1):
+            for i in range(5):
+                yield start + i * step
+        force_compile(gen)
+        results = list(gen(start=10, step=3))
+        self.assertEqual(results, [10, 13, 16, 19, 22])
+
+    def test_parameterised_generator_starargs(self):
+        """Parameterised generator with *args."""
+        def gen(*values):
+            for v in values:
+                yield v * 2
+        force_compile(gen)
+        results = list(gen(1, 2, 3, 4, 5))
+        self.assertEqual(results, [2, 4, 6, 8, 10])
 
 if __name__ == "__main__":
     unittest.main()

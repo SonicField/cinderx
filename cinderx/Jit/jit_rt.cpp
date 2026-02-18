@@ -743,19 +743,6 @@ JITRT_AllocateAndLinkGenAndInterpreterFrame(
           reinterpret_cast<uintptr_t>(gen) + gen_size -
           sizeof(jit::GenDataFooter));
   *jitGenDataFooterPtr(gen, co) = footer;
-  {
-    jit::GenDataFooter** gdf_ptr = jitGenDataFooterPtr(gen, co);
-    fprintf(stderr, "DBG alloc: gen=%p footer=%p gdf_ptr=%p\n",
-        (void*)gen, (void*)footer, (void*)gdf_ptr);
-    fprintf(stderr, "DBG alloc: footer-gen=%ld gdf-gen=%ld footer-gdf=%ld\n",
-        (long)((char*)footer-(char*)gen),
-        (long)((char*)gdf_ptr-(char*)gen),
-        (long)((char*)footer-(char*)gdf_ptr));
-    fprintf(stderr, "DBG alloc: spill_words=%lu gen_size=%zu\n",
-        (unsigned long)spill_words, gen_size);
-    fprintf(stderr, "DBG alloc: *gdf_ptr=%p\n", (void*)*gdf_ptr);
-    fflush(stderr);
-  }
   init_and_link_interpreter_frame(
       func, co, tstate, FRAME_OWNED_BY_GENERATOR, frame, code_rt);
 
