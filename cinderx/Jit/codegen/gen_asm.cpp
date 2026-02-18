@@ -1315,6 +1315,10 @@ void* NativeGenerator::getVectorcallEntry() {
   }
 #endif
 
+#if defined(CINDER_AARCH64)
+  env_.is_generator = (GetFunction()->code->co_flags & kCoFlagsAnyGenerator) != 0;
+#endif
+
   lir_func_ = std::move(lir_func);
 
   try {

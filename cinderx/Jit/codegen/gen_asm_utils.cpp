@@ -5,6 +5,7 @@
 #include "cinderx/Jit/codegen/arch.h"
 #include "cinderx/Common/util.h"
 #include "cinderx/Jit/codegen/environ.h"
+#include "cinderx/Jit/gen_data_footer.h"
 
 namespace jit::codegen {
 
@@ -32,10 +33,16 @@ void emitCall(
   {
     asmjit::Label after_call = env.as->newLabel();
     env.as->adr(arch::reg_scratch_0, after_call);
-    env.as->str(
-        arch::reg_scratch_0,
-        arch::ptr_resolve(
-            env.as, arch::fp, env.saved_ip_fp_offset, arch::reg_scratch_1));
+    if (env.is_generator) {
+      env.as->str(arch::reg_scratch_0,
+                  asmjit::arm::Mem(asmjit::a64::x29,
+                                   offsetof(jit::GenDataFooter, savedIP)));
+    } else {
+      env.as->str(
+          arch::reg_scratch_0,
+          arch::ptr_resolve(
+              env.as, arch::fp, env.saved_ip_fp_offset, arch::reg_scratch_1));
+    }
     env.as->bl(label);
     env.as->bind(after_call);
   }
@@ -58,10 +65,16 @@ void emitCall(Environ& env, uint64_t func, const jit::lir::Instruction* instr) {
   {
     asmjit::Label after_call = env.as->newLabel();
     env.as->adr(arch::reg_scratch_0, after_call);
-    env.as->str(
-        arch::reg_scratch_0,
-        arch::ptr_resolve(
-            env.as, arch::fp, env.saved_ip_fp_offset, arch::reg_scratch_1));
+    if (env.is_generator) {
+      env.as->str(arch::reg_scratch_0,
+                  asmjit::arm::Mem(asmjit::a64::x29,
+                                   offsetof(jit::GenDataFooter, savedIP)));
+    } else {
+      env.as->str(
+          arch::reg_scratch_0,
+          arch::ptr_resolve(
+              env.as, arch::fp, env.saved_ip_fp_offset, arch::reg_scratch_1));
+    }
     env.as->blr(arch::reg_scratch_br);
     env.as->bind(after_call);
   }

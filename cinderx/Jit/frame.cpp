@@ -100,7 +100,15 @@ uintptr_t getIP(_PyInterpreterFrame* frame, int frame_size) {
     auto footer = jitGenDataFooter(gen);
     if (footer->yieldPoint == nullptr) {
       // The generator is running.
+#if defined(__aarch64__)
+      // On aarch64, we cannot walk the frame pointer chain because
+      // generators swap FP to a heap address (GenDataFooter*) which
+      // is not in the stack FP chain. Instead, read the saved IP
+      // directly from the footer struct where the JIT writer stored it.
+      return footer->savedIP;
+#else
       frame_base = footer->originalFramePointer;
+#endif
     } else {
       // The generator is suspended.
       return footer->yieldPoint->resumeTarget();

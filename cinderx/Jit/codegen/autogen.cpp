@@ -1,6 +1,7 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 
 #include "cinderx/Jit/codegen/autogen.h"
+#include "cinderx/Jit/gen_data_footer.h"
 
 #include "cinderx/Common/util.h"
 #include "cinderx/Jit/code_patcher.h"
@@ -1945,18 +1946,30 @@ void translateCall(Environ* env, const Instruction* instr) {
       as->mov(arch::reg_scratch_br, target);
     }
     as->adr(arch::reg_scratch_0, after_call);
-    as->str(
-        arch::reg_scratch_0,
-        arch::ptr_resolve(
-            as, arch::fp, env->saved_ip_fp_offset, arch::reg_scratch_1));
+    if (env->is_generator) {
+      as->str(arch::reg_scratch_0,
+              asmjit::arm::Mem(asmjit::a64::x29,
+                               offsetof(jit::GenDataFooter, savedIP)));
+    } else {
+      as->str(
+          arch::reg_scratch_0,
+          arch::ptr_resolve(
+              as, arch::fp, env->saved_ip_fp_offset, arch::reg_scratch_1));
+    }
     as->blr(arch::reg_scratch_br);
   } else if (input->isImm()) {
     as->mov(arch::reg_scratch_br, input->getConstant());
     as->adr(arch::reg_scratch_0, after_call);
-    as->str(
-        arch::reg_scratch_0,
-        arch::ptr_resolve(
-            as, arch::fp, env->saved_ip_fp_offset, arch::reg_scratch_1));
+    if (env->is_generator) {
+      as->str(arch::reg_scratch_0,
+              asmjit::arm::Mem(asmjit::a64::x29,
+                               offsetof(jit::GenDataFooter, savedIP)));
+    } else {
+      as->str(
+          arch::reg_scratch_0,
+          arch::ptr_resolve(
+              as, arch::fp, env->saved_ip_fp_offset, arch::reg_scratch_1));
+    }
     as->blr(arch::reg_scratch_br);
   } else if (input->isStack()) {
     auto loc = input->getStackSlot().loc;
@@ -1964,10 +1977,16 @@ void translateCall(Environ* env, const Instruction* instr) {
         arch::reg_scratch_br,
         arch::ptr_resolve(as, arch::fp, loc, arch::reg_scratch_0));
     as->adr(arch::reg_scratch_0, after_call);
-    as->str(
-        arch::reg_scratch_0,
-        arch::ptr_resolve(
-            as, arch::fp, env->saved_ip_fp_offset, arch::reg_scratch_1));
+    if (env->is_generator) {
+      as->str(arch::reg_scratch_0,
+              asmjit::arm::Mem(asmjit::a64::x29,
+                               offsetof(jit::GenDataFooter, savedIP)));
+    } else {
+      as->str(
+          arch::reg_scratch_0,
+          arch::ptr_resolve(
+              as, arch::fp, env->saved_ip_fp_offset, arch::reg_scratch_1));
+    }
     as->blr(arch::reg_scratch_br);
   } else {
     JIT_ABORT("Unsupported operand type for Call: {}", input->type());

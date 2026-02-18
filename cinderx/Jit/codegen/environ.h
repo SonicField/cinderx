@@ -31,6 +31,9 @@ struct Environ {
 #if defined(CINDER_AARCH64)
   // FP-relative offset of the saved-IP slot. Set by computeFrameInfo.
   int saved_ip_fp_offset{0};
+  // Whether the function being compiled is a generator/coroutine/async gen.
+  // Used to select the correct saved-IP write path on aarch64.
+  bool is_generator{false};
 #endif
 
   // A subset of stack_frame_size: only the shadow frames and spilled values.

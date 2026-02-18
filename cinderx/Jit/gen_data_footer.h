@@ -70,6 +70,15 @@ struct GenDataFooter {
   // Frame header used for tracking the current frame.
   FrameHeader frame_header;
 #endif
+
+#if defined(__aarch64__)
+  // Saved instruction pointer for running generators on aarch64.
+  // On aarch64, getIP() cannot walk the frame pointer chain to find
+  // the return address because generators swap FP to a heap address.
+  // Instead, the JIT writes the return address here before each call,
+  // and getIP() reads it directly.
+  uintptr_t savedIP{0};
+#endif
 };
 
 #if PY_VERSION_HEX >= 0x030C0000
