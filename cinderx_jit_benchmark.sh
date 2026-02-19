@@ -635,7 +635,7 @@ def bench_nbody_step(n_iter):
 def bench_spectral_norm(n_iter):
     """Spectral norm (pyperformance style)."""
     u = [1.0] * _SPECTRAL_N
-    for _ in range(10):
+    for _ in range(50):
         v = _spectral_mul_AtAv(u)
         u = _spectral_mul_AtAv(v)
     vBv = sum(u[i] * v[i] for i in range(_SPECTRAL_N))
@@ -787,6 +787,7 @@ BENCHMARKS = [
 try:
     import _cinderx
     import cinderjit
+    cinderjit.enable_specialized_opcodes()
     jit_available = True
     jit_disabled = os.environ.get("PYTHONJITDISABLE", "0") == "1"
 except ImportError:
@@ -794,6 +795,17 @@ except ImportError:
     jit_disabled = True
 
 condition = "JIT_OFF" if (not jit_available or jit_disabled) else "JIT_ON"
+
+# Warm up functions BEFORE force_compile so CPython specialises bytecodes
+# (BINARY_OP -> BINARY_OP_ADD_FLOAT etc.) and JIT reads type feedback
+if jit_available and not jit_disabled:
+    print("  Warming up functions for bytecode specialisation...", file=sys.stderr)
+    for name, func in BENCHMARKS:
+        try:
+            for _ in range(10):
+                func(100)  # Larger N_ITER to ensure inner functions get specialised
+        except Exception:
+            pass  # Some functions may fail with small N_ITER
 
 # Force-compile ALL hot functions (module-level helpers + benchmark wrappers)
 if jit_available and not jit_disabled:
@@ -867,7 +879,7 @@ for rep in $(seq 1 "$N_REPS"); do
             # Run WITH CinderX on PYTHONPATH - JIT active
             # PYTHONJITALL=1 forces eager compilation of ALL functions (including inner
             # generators, closures, recursive helpers) on first call, not just threshold-hot ones
-            PYTHONPATH="$CINDERX_PYTHONPATH" PYTHONJITALL=1 $PYTHON "$RESULTS_DIR/benchmark.py" > "$OUTPUT_FILE" 2>/dev/null
+            PYTHONPATH="$CINDERX_PYTHONPATH" $PYTHON "$RESULTS_DIR/benchmark.py" > "$OUTPUT_FILE" 2>/dev/null
         fi
 
         # Extract mean times for quick display
