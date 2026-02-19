@@ -822,6 +822,18 @@ Register* simplifyLongBinaryOp(Env& env, const LongBinaryOp* instr) {
 }
 
 Register* simplifyFloatBinaryOp(Env& env, const FloatBinaryOp* instr) {
+  // Convert FloatBinaryOp to native double arithmetic:
+  // PrimitiveUnbox(PyFloat) + DoubleBinaryOp(fadd/fsub/fmul/fdiv) + PrimitiveBox
+  // This avoids the C slot method call and heap allocation per operation.
+  if (instr->op() != BinaryOpKind::kPower &&
+      FloatBinaryOp::slotMethod(instr->op())) {
+    Register* left_unboxed = env.emit<PrimitiveUnbox>(instr->left(), TCDouble);
+    Register* right_unboxed = env.emit<PrimitiveUnbox>(instr->right(), TCDouble);
+    Register* result = env.emit<DoubleBinaryOp>(instr->op(), left_unboxed, right_unboxed);
+    return env.emit<PrimitiveBox>(result, TFloatExact, *instr->frameState());
+  }
+
+  // Constant folding (requires known values at compile time).
   // This isn't safe in the multi-threaded compilation on 3.12 because
   // we don't hold the GIL which is required for allocation.
   RETURN_MULTITHREADED_COMPILE(nullptr);
