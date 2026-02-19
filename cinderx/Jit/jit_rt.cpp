@@ -19,6 +19,12 @@
 #include "cinderx/Jit/context.h"
 #include "cinderx/Jit/frame.h"
 #include "cinderx/Jit/generators_rt.h"
+
+// Forward declarations for generator fast-path (Approach A-lite).
+// Defined in generators_rt.cpp inside namespace jit.
+namespace jit {
+PySendResult jitgen_am_send(PyObject* obj, PyObject* arg, PyObject** presult);
+} // namespace jit
 // NOLINTNEXTLINE(facebook-unused-include-check)
 #include "cinderx/Immortalize/immortalize.h"
 #include "cinderx/StaticPython/classloader.h"
@@ -2254,18 +2260,38 @@ PyObject JITRT_IterDoneSentinel = {
     nullptr};
 
 PyObject* JITRT_InvokeIterNext(PyObject* iterator) {
-  iternextfunc iternext_f = Py_TYPE(iterator)->tp_iternext;
-  if (iternext_f == nullptr) {
-    PyErr_Format(
-        PyExc_TypeError,
-        "'%.100s' object is not an iterator",
-        Py_TYPE(iterator)->tp_name);
-    return nullptr;
+  // Fast path for JIT generators: skip tp_iternext vtable lookup
+  // and jitgen_iternext wrapper, call jitgen_am_send directly.
+  // Saves 2 function calls (~8-12 instructions per yield on aarch64).
+  if (JitGen_CheckExact(iterator)) {
+    PyObject* result = nullptr;
+    PySendResult status = jit::jitgen_am_send(iterator, nullptr, &result);
+    if (status == PYGEN_RETURN) {
+      // Generator exhausted - replicate jitgen_iternext's handling
+      if (result != Py_None) {
+        _PyGen_SetStopIterationValue(result);
+      }
+      Py_CLEAR(result);
+    }
+    if (result != nullptr) {
+      return result;
+    }
+    // Fall through to StopIteration/sentinel handling below
+  } else {
+    iternextfunc iternext_f = Py_TYPE(iterator)->tp_iternext;
+    if (iternext_f == nullptr) {
+      PyErr_Format(
+          PyExc_TypeError,
+          "'%.100s' object is not an iterator",
+          Py_TYPE(iterator)->tp_name);
+      return nullptr;
+    }
+    PyObject* val = iternext_f(iterator);
+    if (val != nullptr) {
+      return val;
+    }
   }
-  PyObject* val = iternext_f(iterator);
-  if (val != nullptr) {
-    return val;
-  }
+  // Common exit: handle StopIteration or return sentinel
   if (PyErr_Occurred()) {
     if (!PyErr_ExceptionMatches(PyExc_StopIteration)) {
       return nullptr;

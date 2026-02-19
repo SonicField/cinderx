@@ -151,6 +151,8 @@ Ref<> send_core(JitGenObject* jit_gen, PyObject* arg, PyThreadState* tstate) {
   return result;
 }
 
+} // namespace (close for jitgen_am_send external linkage)
+
 // This is a cut down version of gen_send_ex2() from genobject.c which only
 // handles sending in values, and calls send_core() above to dispatch to a
 // JIT function rather than executing with the interpreter. If any of the
@@ -262,6 +264,8 @@ PyObject* jitgen_iternext(PyObject* obj) {
   }
   return result;
 }
+
+namespace { // reopen for remaining static functions
 
 // Cached methods from base generator filled in by init_jit_genobject_type().
 // These are unlikely to be performance sensitive and don't need to run
