@@ -921,13 +921,15 @@ class INSTR_CLASS(CallCFunc, (TOptObject | TCUInt64), HasOutput, Operands<>) {
 #define CallCFunc_FUNCS(X)         \
   X(Cix_PyAsyncGenValueWrapperNew) \
   X(JitCoro_GetAwaitableIter)      \
-  X(JitGen_yf)
+  X(JitGen_yf)                     \
+  X(JITRT_MatchAndClearException)
 #else
 // List of allowed functions
 #define CallCFunc_FUNCS(X)         \
   X(Cix_PyAsyncGenValueWrapperNew) \
   X(Cix_PyCoro_GetAwaitableIter)   \
-  X(Cix_PyGen_yf)
+  X(Cix_PyGen_yf)                  \
+  X(JITRT_MatchAndClearException)
 #endif
 
   enum class Func {

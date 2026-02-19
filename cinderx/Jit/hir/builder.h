@@ -133,6 +133,7 @@ class HIRBuilder {
   void emitPushNull(TranslationContext& tc);
 
   void emitBinaryOp(
+      CFG& cfg,
       TranslationContext& tc,
       const jit::BytecodeInstruction& bc_instr);
   void emitUnaryNot(TranslationContext& tc);
@@ -559,11 +560,42 @@ class HIRBuilder {
   };
   std::vector<ExceptionTableEntry> exception_table_;
 
+  // B2: blocks that need to be added to the translation queue.
+  // emitInlineExceptionMatch populates this; translate() drains it.
+  struct PendingBlock {
+    BasicBlock* block;
+    FrameState frame;
+  };
+  std::vector<PendingBlock> pending_b2_blocks_;
+
   // Parse co_exceptiontable into exception_table_
   void parseExceptionTable();
 
   // Find exception handler for a given bytecode offset
   const ExceptionTableEntry* findExceptionHandler(BCOffset off) const;
+
+  // B2: Info about a simple except pattern suitable for inlining.
+  struct SimpleExceptInfo {
+    int name_idx;           // Index into co_names for the exc type
+    PyObject* exc_type;     // Resolved exception type (borrowed ref)
+    BCOffset except_body;   // Offset of except body (after POP_TOP)
+  };
+
+  // B2: Check if handler has simple except pattern and extract info.
+  bool getSimpleExceptInfo(
+      const ExceptionTableEntry& handler,
+      SimpleExceptInfo& info) const;
+
+  // B2: Emit inline exception match for subscript inside try block.
+  void emitInlineExceptionMatch(
+      CFG& cfg,
+      TranslationContext& tc,
+      const jit::BytecodeInstruction& bc_instr,
+      const ExceptionTableEntry& handler,
+      const SimpleExceptInfo& info,
+      Register* left,
+      Register* right,
+      Register* result);
 
   const Preloader& preloader_;
 

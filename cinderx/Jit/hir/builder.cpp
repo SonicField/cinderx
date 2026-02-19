@@ -1,6 +1,7 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 
 #include "cinderx/Jit/hir/builder.h"
+#include "cinderx/Jit/jit_rt.h"
 
 #include "ceval.h"
 
@@ -517,6 +518,11 @@ HIRBuilder::BlockMap HIRBuilder::createBlocks(
   parseExceptionTable();
   for (const auto& entry : exception_table_) {
     block_starts.insert(entry.target.asIndex());
+    // B2: Also add except body start so we can branch to it.
+    SimpleExceptInfo info;
+    if (getSimpleExceptInfo(entry, info)) {
+      block_starts.insert(info.except_body.asIndex());
+    }
   }
 
   // Allocate blocks
@@ -593,6 +599,164 @@ const HIRBuilder::ExceptionTableEntry* HIRBuilder::findExceptionHandler(
     }
   }
   return nullptr;
+}
+
+bool HIRBuilder::getSimpleExceptInfo(
+    const ExceptionTableEntry& handler,
+    SimpleExceptInfo& info) const {
+  // Scan handler bytecodes for the pattern:
+  //   PUSH_EXC_INFO, LOAD_GLOBAL <type>, CHECK_EXC_MATCH,
+  //   POP_JUMP_IF_FALSE, POP_TOP
+  BytecodeInstruction bc{code_, handler.target};
+
+  if (bc.opcode() != PUSH_EXC_INFO) {
+    return false;
+  }
+  bc = bc.nextInstr();
+
+  if (bc.opcode() != LOAD_GLOBAL) {
+    return false;
+  }
+  int name_idx = loadGlobalIndex(bc.oparg());
+  bc = bc.nextInstr();
+
+  if (bc.opcode() != CHECK_EXC_MATCH) {
+    return false;
+  }
+  bc = bc.nextInstr();
+
+  if (bc.opcode() != POP_JUMP_IF_FALSE) {
+    return false;
+  }
+  bc = bc.nextInstr();
+
+  if (bc.opcode() != POP_TOP) {
+    return false;
+  }
+  BCOffset except_body = bc.nextInstrOffset();
+
+  // Resolve exception type at JIT compile time via preloader.
+  BorrowedRef<> exc_type = preloader_.global(name_idx);
+  if (exc_type == nullptr) {
+    return false;
+  }
+  if (!PyExceptionClass_Check(exc_type.get())) {
+    return false;
+  }
+
+  // Also verify the except body is simple enough to emit inline.
+  // Currently we only support: POP_EXCEPT + RETURN_CONST.
+  BytecodeInstruction body_bc{code_, except_body};
+  if (body_bc.opcode() == POP_EXCEPT) {
+    body_bc = body_bc.nextInstr();
+  }
+  if (body_bc.opcode() != RETURN_CONST) {
+    // Except body is too complex to inline. Fall back to normal BinaryOp.
+    return false;
+  }
+
+  info.name_idx = name_idx;
+  info.exc_type = exc_type;
+  info.except_body = except_body;
+  return true;
+}
+
+void HIRBuilder::emitInlineExceptionMatch(
+    CFG& cfg,
+    TranslationContext& tc,
+    const jit::BytecodeInstruction& bc_instr,
+    const ExceptionTableEntry& handler,
+    const SimpleExceptInfo& info,
+    Register* left,
+    Register* right,
+    Register* result) {
+  // Emit PyObject_GetItem via CallStatic (not BinaryOp/DeoptBase)
+  // so we can handle the error path inline instead of auto-deopting.
+  auto call = tc.emit<CallStatic>(
+      2, result, reinterpret_cast<void*>(PyObject_GetItem), TOptObject);
+  call->SetOperand(0, left);
+  call->SetOperand(1, right);
+
+  BasicBlock* ok_block = cfg.AllocateBlock();
+  BasicBlock* exc_match_block = cfg.AllocateBlock();
+
+  // Branch: non-null -> success, null -> exception path
+  tc.emit<CondBranch>(result, ok_block, exc_match_block);
+
+  // === Exception match block ===
+  // Use a SEPARATE TranslationContext so we do not corrupt tc.frame.stack.
+  {
+    TranslationContext exc_tc{exc_match_block, tc.frame};
+
+    // Decref stack items above handler depth.
+    while (static_cast<int>(exc_tc.frame.stack.size()) > handler.depth) {
+      Register* excess = exc_tc.frame.stack.pop();
+      exc_tc.emit<Decref>(excess);
+    }
+
+    // Load exception type as a constant (resolved at compile time).
+    Register* exc_type_reg = temps_.AllocateNonStack();
+    exc_tc.emit<LoadConst>(exc_type_reg, Type::fromObject(info.exc_type));
+
+    // Call JITRT_MatchAndClearException(exc_type) via CallStatic.
+    // Returns int (TCInt32): 1 = matched, 0 = no match.
+    Register* match_result = temps_.AllocateNonStack();
+    auto match_call = exc_tc.emit<CallStatic>(
+        1, match_result,
+        reinterpret_cast<void*>(JITRT_MatchAndClearException),
+        TCInt32);
+    match_call->SetOperand(0, exc_type_reg);
+
+    BasicBlock* match_block = cfg.AllocateBlock();
+    BasicBlock* deopt_block = cfg.AllocateBlock();
+    exc_tc.emit<CondBranch>(match_result, match_block, deopt_block);
+
+    // === Match block: emit except body INLINE ===
+    // Instead of jumping to a separately-translated block (which causes
+    // register allocation conflicts), emit the except body directly.
+    // For B2, the except body after POP_EXCEPT is always simple.
+    {
+      TranslationContext match_tc{match_block, exc_tc.frame};
+
+      // Scan except body bytecodes starting at info.except_body.
+      BytecodeInstruction ebc{code_, info.except_body};
+
+      // POP_EXCEPT: no-op for B2 (we never pushed exc_info in the JIT).
+      if (ebc.opcode() == POP_EXCEPT) {
+        ebc = ebc.nextInstr();
+      }
+
+      // Handle the next instruction.
+      if (ebc.opcode() == RETURN_CONST) {
+        // Most common B2 pattern: return a constant.
+        Register* ret_reg = temps_.AllocateStack();
+        Type type = Type::fromObject(
+            PyTuple_GET_ITEM(code_->co_consts, ebc.oparg()));
+        match_tc.emit<LoadConst>(ret_reg, type);
+        match_tc.emit<Return>(ret_reg, type);
+      } else {
+        // Unsupported pattern: deopt to let interpreter handle.
+        match_tc.frame.cur_instr_offs = info.except_body;
+        match_tc.emitSnapshot();
+        match_tc.emit<Deopt>();
+      }
+    }
+
+    // === Deopt block (no match -- let interpreter handle) ===
+    // Point cur_instr_offs at the original BINARY_SUBSCR instruction.
+    // The interpreter will use the exception table to find the handler
+    // and process the exception normally through PUSH_EXC_INFO etc.
+    {
+      TranslationContext deopt_tc{deopt_block, tc.frame};
+      deopt_tc.frame.cur_instr_offs = bc_instr.baseOffset();
+      deopt_tc.emitSnapshot();
+      deopt_tc.emit<Deopt>();
+    }
+  }
+
+  // === OK block (no exception, result is non-null) ===
+  tc.block = ok_block;
+  tc.emit<RefineType>(result, TObject, result);
 }
 
 BasicBlock* HIRBuilder::getBlockAtOff(BCOffset off) {
@@ -915,7 +1079,7 @@ void HIRBuilder::translate(
         case BINARY_SUBTRACT:
         case BINARY_TRUE_DIVIDE:
         case BINARY_XOR: {
-          emitBinaryOp(tc, bc_instr);
+          emitBinaryOp(irfunc.cfg, tc, bc_instr);
           break;
         }
         case INPLACE_ADD:
@@ -1219,6 +1383,10 @@ void HIRBuilder::translate(
           }
           tc.frame.stack.pop();
           break;
+        case POP_EXCEPT: {
+          // B2: no-op — we never pushed exc_info in the JIT.
+          break;
+        }
         case POP_TOP: {
           tc.frame.stack.pop();
           break;
@@ -1687,6 +1855,12 @@ void HIRBuilder::translate(
         break;
       }
     }
+    // B2: drain pending blocks from emitInlineExceptionMatch.
+    for (auto& pb : pending_b2_blocks_) {
+      queue.emplace_back(pb.block, std::move(pb.frame));
+    }
+    pending_b2_blocks_.clear();
+
     JIT_DCHECK(
         tc.block->GetTerminator() != nullptr &&
             !tc.block->GetTerminator()->IsSnapshot(),
@@ -2133,6 +2307,7 @@ void HIRBuilder::emitKwNames(
 }
 
 void HIRBuilder::emitBinaryOp(
+    CFG& cfg,
     TranslationContext& tc,
     const jit::BytecodeInstruction& bc_instr) {
   auto& stack = tc.frame.stack;
@@ -2202,6 +2377,23 @@ void HIRBuilder::emitBinaryOp(
         opcode,
         opcodeName(opcode));
     op_kind = *opt_op_kind;
+  }
+
+  // B2: For subscript inside try block with simple except pattern,
+  // emit inline exception match instead of BinaryOp (which auto-deopts).
+  if (op_kind == BinaryOpKind::kSubscript) {
+    BCOffset cur_off = bc_instr.baseOffset();
+    auto* handler = findExceptionHandler(cur_off);
+    if (handler != nullptr) {
+      SimpleExceptInfo info;
+      if (getSimpleExceptInfo(*handler, info)) {
+        emitInlineExceptionMatch(
+            cfg, tc, bc_instr, *handler, info,
+            left, right, result);
+        stack.push(result);
+        return;
+      }
+    }
   }
 
   tc.emit<BinaryOp>(result, op_kind, left, right, tc.frame);

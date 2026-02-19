@@ -2301,3 +2301,19 @@ PyObject* JITRT_InvokeIterNext(PyObject* iterator) {
   Py_INCREF(&JITRT_IterDoneSentinel);
   return &JITRT_IterDoneSentinel;
 }
+
+// B2: Match pending exception against type and clear if matched.
+int JITRT_MatchAndClearException(PyObject* exc_type) {
+  PyObject* exc = PyErr_GetRaisedException();
+  if (exc == nullptr) {
+    return 0;
+  }
+  int matched = PyErr_GivenExceptionMatches(exc, exc_type);
+  if (matched) {
+    Py_DECREF(exc);
+    return 1;
+  }
+  // Restore exception for interpreter to handle.
+  PyErr_SetRaisedException(exc);
+  return 0;
+}

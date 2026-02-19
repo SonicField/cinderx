@@ -205,6 +205,10 @@ PyObject* JITRT_Vectorcall(
     size_t nargsf,
     PyObject* kwnames);
 
+// B2: Match pending exception against type and clear if matched.
+// Returns 1 if matched (exception cleared), 0 if no match.
+int JITRT_MatchAndClearException(PyObject* exc_type);
+
 /*
  * Perform a method lookup on an object.
  */
