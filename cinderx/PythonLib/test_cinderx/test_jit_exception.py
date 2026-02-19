@@ -478,3 +478,80 @@ class DataAccessExceptionTests(unittest.TestCase):
         class C:
             value = 42
         self.assertEqual(self.mixed_call_and_attr(C(), str), "42")
+
+
+
+class InlineExceptionMatchTests(unittest.TestCase):
+    """B2 inline exception match: correctness tests for no-match deopt path.
+
+    B2 replaces BinaryOp(BINARY_SUBSCR) with CallStatic(PyObject_GetItem)
+    and branches on JITRT_MatchAndClearException result. These tests verify
+    the no-match deopt path correctly handles exception state and nested
+    try/except blocks.
+    """
+
+    @cinder_support.failUnlessJITCompiled
+    def b2_no_match_single(self, d, k):
+        try:
+            return d[k]
+        except ValueError:
+            return "wrong"
+
+    def test_b2_no_match_single_try(self):
+        """No-match on single try/except: exception propagates to caller."""
+        with self.assertRaises(KeyError):
+            self.b2_no_match_single({}, "missing")
+
+    def test_b2_no_match_exc_info_cleared(self):
+        """After catching no-match exception, sys.exc_info() is cleared."""
+        try:
+            self.b2_no_match_single({}, "missing")
+        except KeyError:
+            pass
+        self.assertEqual(sys.exc_info(), (None, None, None))
+
+    @cinder_support.failUnlessJITCompiled
+    def b2_nested(self, d, k):
+        try:
+            try:
+                return d[k]
+            except ValueError:
+                return "value_error"
+        except KeyError:
+            return "key_error"
+
+    def test_b2_no_match_nested_try(self):
+        """No-match on inner try: outer handler catches the exception."""
+        self.assertEqual(self.b2_nested({}, "missing"), "key_error")
+
+    @cinder_support.failUnlessJITCompiled
+    def b2_deeply_nested(self, d, k):
+        try:
+            try:
+                try:
+                    return d[k]
+                except ValueError:
+                    return "v"
+            except TypeError:
+                return "t"
+        except KeyError:
+            return "k"
+
+    def test_b2_no_match_deeply_nested(self):
+        """No-match through three levels of try/except."""
+        self.assertEqual(self.b2_deeply_nested({}, "missing"), "k")
+
+    @cinder_support.failUnlessJITCompiled
+    def b2_match(self, d, k):
+        try:
+            return d[k]
+        except KeyError:
+            return -1
+
+    def test_b2_match_simple(self):
+        """Match path: exception is caught inline by B2."""
+        self.assertEqual(self.b2_match({}, "x"), -1)
+
+    def test_b2_match_success_path(self):
+        """Success path: no exception, result returned normally."""
+        self.assertEqual(self.b2_match({"x": 42}, "x"), 42)
