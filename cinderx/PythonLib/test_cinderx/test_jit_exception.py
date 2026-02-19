@@ -337,3 +337,144 @@ class ExceptionHandlingTests(unittest.TestCase):
     def test_nested_finally(self) -> None:
         self.assertEqual(self.nested_finally(100), 100)
         self.assertEqual(self.nested_finally(False), 10)
+
+
+class DataAccessExceptionTests(unittest.TestCase):
+    """Tests for exceptions from data-access opcodes in try/except."""
+
+    @cinder_support.failUnlessJITCompiled
+    @failUnlessHasOpcodes(EXN_OPCODE)
+    def load_attr_except(self, obj):
+        try:
+            return obj.nonexistent_attr
+        except AttributeError:
+            return "caught"
+
+    def test_load_attr_missing_attribute(self):
+        class C:
+            pass
+        self.assertEqual(self.load_attr_except(C()), "caught")
+
+    def test_load_attr_existing_attribute(self):
+        class C:
+            nonexistent_attr = 42
+        self.assertEqual(self.load_attr_except(C()), 42)
+
+    @cinder_support.failUnlessJITCompiled
+    @failUnlessHasOpcodes(EXN_OPCODE)
+    def load_attr_none(self, obj):
+        try:
+            return obj.x
+        except AttributeError:
+            return "caught"
+
+    def test_load_attr_on_none(self):
+        self.assertEqual(self.load_attr_none(None), "caught")
+
+    @cinder_support.failUnlessJITCompiled
+    @failUnlessHasOpcodes(EXN_OPCODE)
+    def load_attr_method(self, obj):
+        try:
+            return obj.missing_method()
+        except AttributeError:
+            return "caught"
+
+    def test_load_attr_missing_method(self):
+        class C:
+            pass
+        self.assertEqual(self.load_attr_method(C()), "caught")
+
+    @cinder_support.failUnlessJITCompiled
+    @failUnlessHasOpcodes(EXN_OPCODE)
+    def subscr_except(self, container, key):
+        try:
+            return container[key]
+        except (KeyError, IndexError, TypeError):
+            return "caught"
+
+    def test_dict_missing_key(self):
+        self.assertEqual(self.subscr_except({"a": 1}, "b"), "caught")
+
+    def test_dict_existing_key(self):
+        self.assertEqual(self.subscr_except({"a": 1}, "a"), 1)
+
+    def test_list_index_out_of_range(self):
+        self.assertEqual(self.subscr_except([1, 2], 5), "caught")
+
+    def test_list_valid_index(self):
+        self.assertEqual(self.subscr_except([10, 20], 1), 20)
+
+    @cinder_support.failUnlessJITCompiled
+    @failUnlessHasOpcodes(EXN_OPCODE)
+    def store_attr_except(self, obj, value):
+        try:
+            obj.x = value
+            return "stored"
+        except (AttributeError, TypeError):
+            return "caught"
+
+    def test_store_attr_on_int(self):
+        self.assertEqual(self.store_attr_except(42, 99), "caught")
+
+    @cinder_support.failUnlessJITCompiled
+    @failUnlessHasOpcodes(EXN_OPCODE)
+    def delete_attr_except(self, obj):
+        try:
+            del obj.x
+            return "deleted"
+        except AttributeError:
+            return "caught"
+
+    def test_delete_attr_missing(self):
+        class C:
+            pass
+        self.assertEqual(self.delete_attr_except(C()), "caught")
+
+    @cinder_support.failUnlessJITCompiled
+    @failUnlessHasOpcodes(EXN_OPCODE)
+    def store_subscr_except(self, container, key, value):
+        try:
+            container[key] = value
+            return "stored"
+        except TypeError:
+            return "caught"
+
+    def test_store_subscr_immutable(self):
+        self.assertEqual(self.store_subscr_except((1, 2), 0, 99), "caught")
+
+    @cinder_support.failUnlessJITCompiled
+    @failUnlessHasOpcodes(EXN_OPCODE)
+    def load_global_except(self):
+        try:
+            return undefined_global_name_xyz
+        except NameError:
+            return "caught"
+
+    def test_load_global_missing(self):
+        self.assertEqual(self.load_global_except(), "caught")
+
+    @cinder_support.failUnlessJITCompiled
+    @failUnlessHasOpcodes(EXN_OPCODE)
+    def mixed_call_and_attr(self, obj, func):
+        try:
+            x = obj.value
+            return func(x)
+        except (AttributeError, TypeError):
+            return "caught"
+
+    def test_mixed_attr_fails(self):
+        class C:
+            pass
+        self.assertEqual(self.mixed_call_and_attr(C(), str), "caught")
+
+    def test_mixed_call_fails(self):
+        class C:
+            value = None
+        def bad(x):
+            raise TypeError("nope")
+        self.assertEqual(self.mixed_call_and_attr(C(), bad), "caught")
+
+    def test_mixed_both_succeed(self):
+        class C:
+            value = 42
+        self.assertEqual(self.mixed_call_and_attr(C(), str), "42")

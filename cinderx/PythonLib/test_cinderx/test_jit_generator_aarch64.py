@@ -27,6 +27,8 @@ try:
 except ImportError:
     HAS_CINDERJIT = False
 
+AT_LEAST_312 = sys.version_info[:2] >= (3, 12)
+
 
 def force_compile(func):
     """Force JIT compilation if cinderjit is available."""
@@ -267,6 +269,7 @@ class TestGeneratorYieldFrom(unittest.TestCase):
 class TestAsyncGenerator(unittest.TestCase):
     """Async generators have the same FP relocation issue."""
 
+    @unittest.skipIf(AT_LEAST_312, "Async generators cannot be JIT-compiled on 3.12+ (T194022335)")
     def test_async_generator_calls_jit_function(self):
         """Async generator calls JIT'd function."""
         async def agen():
@@ -285,6 +288,7 @@ class TestAsyncGenerator(unittest.TestCase):
         results = asyncio.run(collect())
         self.assertEqual(results, [1, 6, 10])
 
+    @unittest.skipIf(AT_LEAST_312, "Async generators cannot be JIT-compiled on 3.12+ (T194022335)")
     def test_async_generator_throw(self):
         """Throw into async generator with JIT calls."""
         async def agen():
@@ -470,6 +474,7 @@ class TestGeneratorJITCompilation(unittest.TestCase):
     @unittest.skipUnless(HAS_CINDERJIT, "requires cinderjit")
     @unittest.skipUnless(platform.machine() in ("aarch64", "arm64"),
                          "aarch64-only")
+    @unittest.skipIf(AT_LEAST_312, "Async generators cannot be JIT-compiled on 3.12+ (T194022335)")
     def test_async_generator_jit_compiled(self):
         """force_compile on an async generator succeeds on aarch64."""
         import asyncio
