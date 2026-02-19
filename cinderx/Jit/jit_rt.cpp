@@ -2313,7 +2313,9 @@ int JITRT_MatchAndClearException(PyObject* exc_type) {
     Py_DECREF(exc);
     return 1;
   }
-  // Restore exception for interpreter to handle.
+  // No match: restore exception for interpreter to handle via deopt.
+  // The deopt path uses kUnhandledException, which causes the interpreter
+  // to enter exception_unwind with this exception still pending.
   PyErr_SetRaisedException(exc);
   return 0;
 }

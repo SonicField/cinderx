@@ -644,17 +644,6 @@ bool HIRBuilder::getSimpleExceptInfo(
     return false;
   }
 
-  // Also verify the except body is simple enough to emit inline.
-  // Currently we only support: POP_EXCEPT + RETURN_CONST.
-  BytecodeInstruction body_bc{code_, except_body};
-  if (body_bc.opcode() == POP_EXCEPT) {
-    body_bc = body_bc.nextInstr();
-  }
-  if (body_bc.opcode() != RETURN_CONST) {
-    // Except body is too complex to inline. Fall back to normal BinaryOp.
-    return false;
-  }
-
   info.name_idx = name_idx;
   info.exc_type = exc_type;
   info.except_body = except_body;
@@ -711,43 +700,106 @@ void HIRBuilder::emitInlineExceptionMatch(
     BasicBlock* deopt_block = cfg.AllocateBlock();
     exc_tc.emit<CondBranch>(match_result, match_block, deopt_block);
 
-    // === Match block: emit except body INLINE ===
-    // Instead of jumping to a separately-translated block (which causes
-    // register allocation conflicts), emit the except body directly.
-    // For B2, the except body after POP_EXCEPT is always simple.
+    // === Match block: emit except body bytecodes inline ===
+    // Delegate to existing emit* methods to handle all edge cases.
     {
       TranslationContext match_tc{match_block, exc_tc.frame};
+      match_tc.frame.cur_instr_offs = info.except_body;
 
-      // Scan except body bytecodes starting at info.except_body.
       BytecodeInstruction ebc{code_, info.except_body};
+      bool emitted_terminator = false;
 
-      // POP_EXCEPT: no-op for B2 (we never pushed exc_info in the JIT).
-      if (ebc.opcode() == POP_EXCEPT) {
-        ebc = ebc.nextInstr();
-      }
+      while (!emitted_terminator) {
+        switch (ebc.opcode()) {
+          case POP_EXCEPT:
+            // No-op for B2: we never pushed exc_info in the JIT.
+            break;
 
-      // Handle the next instruction.
-      if (ebc.opcode() == RETURN_CONST) {
-        // Most common B2 pattern: return a constant.
-        Register* ret_reg = temps_.AllocateStack();
-        Type type = Type::fromObject(
-            PyTuple_GET_ITEM(code_->co_consts, ebc.oparg()));
-        match_tc.emit<LoadConst>(ret_reg, type);
-        match_tc.emit<Return>(ret_reg, type);
-      } else {
-        // Unsupported pattern: deopt to let interpreter handle.
-        match_tc.frame.cur_instr_offs = info.except_body;
-        match_tc.emitSnapshot();
-        match_tc.emit<Deopt>();
+          case POP_TOP:
+            match_tc.frame.stack.pop();
+            break;
+
+          case LOAD_FAST:
+          case LOAD_FAST_CHECK:
+          case LOAD_FAST_AND_CLEAR:
+            emitLoadFast(match_tc, ebc);
+            break;
+
+          case LOAD_CONST: {
+            Register* reg = temps_.AllocateStack();
+            Type type = Type::fromObject(
+                PyTuple_GET_ITEM(code_->co_consts, ebc.oparg()));
+            match_tc.emit<LoadConst>(reg, type);
+            match_tc.frame.stack.push(reg);
+            break;
+          }
+
+          case STORE_FAST:
+            emitStoreFast(match_tc, ebc);
+            break;
+
+          case BINARY_OP:
+            emitBinaryOp(cfg, match_tc, ebc);
+            break;
+
+          case RETURN_CONST: {
+            Register* ret_reg = temps_.AllocateStack();
+            Type type = Type::fromObject(
+                PyTuple_GET_ITEM(code_->co_consts, ebc.oparg()));
+            match_tc.emit<LoadConst>(ret_reg, type);
+            match_tc.emit<Return>(ret_reg, type);
+            emitted_terminator = true;
+            break;
+          }
+
+          case RETURN_VALUE: {
+            Register* ret_val = match_tc.frame.stack.pop();
+            match_tc.emit<Return>(ret_val, preloader_.returnType());
+            emitted_terminator = true;
+            break;
+          }
+
+          case JUMP_BACKWARD:
+          case JUMP_BACKWARD_NO_INTERRUPT: {
+            BCOffset target = ebc.getJumpTarget();
+            auto* target_block = getBlockAtOff(target);
+            match_tc.emit<Branch>(target_block);
+            emitted_terminator = true;
+            break;
+          }
+
+          default:
+            // Unsupported opcode: deopt to interpreter.
+            match_tc.frame.cur_instr_offs = ebc.baseOffset();
+            match_tc.emitSnapshot();
+            match_tc.emit<Deopt>();
+            emitted_terminator = true;
+            break;
+        }
+
+        if (!emitted_terminator) {
+          ebc = ebc.nextInstr();
+        }
       }
     }
 
     // === Deopt block (no match -- let interpreter handle) ===
-    // Point cur_instr_offs at the original BINARY_SUBSCR instruction.
-    // The interpreter will use the exception table to find the handler
-    // and process the exception normally through PUSH_EXC_INFO etc.
+    // JITRT_MatchAndClearException returned 0 and restored the pending
+    // exception via PyErr_SetRaisedException. We deopt back to the
+    // interpreter at the BINARY_SUBSCR offset with left/right re-pushed
+    // (emitBinaryOp already popped them, but the interpreter expects them
+    // on stack at this offset for correct exception_unwind depth).
+    //
+    // Deopt uses kUnhandledException (default for Deopt instruction),
+    // which causes the interpreter to enter the error handler directly
+    // (throwflag=1). The interpreter calls exception_unwind, walks
+    // co_exceptiontable, and finds the correct handler -- including
+    // outer handlers for nested try blocks.
     {
       TranslationContext deopt_tc{deopt_block, tc.frame};
+      // Push left (container) and right (key) back onto the stack.
+      deopt_tc.frame.stack.push(left);
+      deopt_tc.frame.stack.push(right);
       deopt_tc.frame.cur_instr_offs = bc_instr.baseOffset();
       deopt_tc.emitSnapshot();
       deopt_tc.emit<Deopt>();
