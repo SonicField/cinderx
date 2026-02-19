@@ -548,6 +548,23 @@ class HIRBuilder {
 
   BorrowedRef<PyCodeObject> code_;
   BlockMap block_map_;
+
+  // Parsed exception table entries from co_exceptiontable (Layer 1).
+  struct ExceptionTableEntry {
+    BCOffset start;   // Start of try range (byte offset, inclusive)
+    BCOffset end;     // End of try range (byte offset, exclusive)
+    BCOffset target;  // Handler entry point (byte offset)
+    int depth;        // Stack depth at handler entry
+    bool lasti;       // Whether to push lasti
+  };
+  std::vector<ExceptionTableEntry> exception_table_;
+
+  // Parse co_exceptiontable into exception_table_
+  void parseExceptionTable();
+
+  // Find exception handler for a given bytecode offset
+  const ExceptionTableEntry* findExceptionHandler(BCOffset off) const;
+
   const Preloader& preloader_;
 
   TempAllocator temps_{nullptr};

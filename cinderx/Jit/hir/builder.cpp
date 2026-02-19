@@ -511,6 +511,14 @@ HIRBuilder::BlockMap HIRBuilder::createBlocks(
     }
   }
 
+  // Parse co_exceptiontable and add handler targets as block starts.
+  // This ensures exception handler basic blocks are created in the HIR,
+  // even though Python 3.12+ does not emit SETUP_FINALLY opcodes.
+  parseExceptionTable();
+  for (const auto& entry : exception_table_) {
+    block_starts.insert(entry.target.asIndex());
+  }
+
   // Allocate blocks
   auto it = block_starts.begin();
   while (it != block_starts.end()) {
@@ -531,6 +539,60 @@ HIRBuilder::BlockMap HIRBuilder::createBlocks(
   }
 
   return block_map;
+}
+
+
+void HIRBuilder::parseExceptionTable() {
+  PyObject* table_obj = code_->co_exceptiontable;
+  if (table_obj == nullptr || !PyBytes_Check(table_obj)) {
+    return;
+  }
+  const uint8_t* table =
+      reinterpret_cast<const uint8_t*>(PyBytes_AS_STRING(table_obj));
+  Py_ssize_t length = PyBytes_GET_SIZE(table_obj);
+  Py_ssize_t pos = 0;
+
+  // Variable-length integer decoder matching CPython format (LSB first).
+  // Each byte: bits 0-5 = payload, bit 6 = continuation, bit 7 = entry start.
+  auto parse_varint = [&]() -> int {
+    int val = 0;
+    int shift = 0;
+    uint8_t b;
+    do {
+      JIT_DCHECK(pos < length, "Truncated exception table");
+      b = table[pos++];
+      val |= (b & 0x3F) << shift;
+      shift += 6;
+    } while (b & 0x40);
+    return val;
+  };
+
+  while (pos < length) {
+    int start = parse_varint();
+    int size = parse_varint();
+    int target = parse_varint();
+    int depth_lasti = parse_varint();
+
+    // Exception table values are in instruction units (word offsets).
+    // Convert to byte offsets by multiplying by sizeof(_Py_CODEUNIT).
+    constexpr int scale = sizeof(_Py_CODEUNIT);
+    exception_table_.push_back(ExceptionTableEntry{
+        BCOffset{start * scale},
+        BCOffset{(start + size) * scale},
+        BCOffset{target * scale},
+        depth_lasti >> 1,
+        (depth_lasti & 1) != 0});
+  }
+}
+
+const HIRBuilder::ExceptionTableEntry* HIRBuilder::findExceptionHandler(
+    BCOffset off) const {
+  for (const auto& entry : exception_table_) {
+    if (off >= entry.start && off < entry.end) {
+      return &entry;
+    }
+  }
+  return nullptr;
 }
 
 BasicBlock* HIRBuilder::getBlockAtOff(BCOffset off) {
