@@ -2260,23 +2260,100 @@ PyObject JITRT_IterDoneSentinel = {
     nullptr};
 
 PyObject* JITRT_InvokeIterNext(PyObject* iterator) {
-  // Fast path for JIT generators: skip tp_iternext vtable lookup
-  // and jitgen_iternext wrapper, call jitgen_am_send directly.
-  // Saves 2 function calls (~8-12 instructions per yield on aarch64).
+  // G1 fast path: inline send_core + jitgen_am_send for JIT generators.
+  // Eliminates 2 function call boundaries (jitgen_am_send + send_core),
+  // saving ~16-24 instructions per yield on aarch64.
   if (JitGen_CheckExact(iterator)) {
-    PyObject* result = nullptr;
-    PySendResult status = jit::jitgen_am_send(iterator, nullptr, &result);
-    if (status == PYGEN_RETURN) {
-      // Generator exhausted - replicate jitgen_iternext's handling
-      if (result != Py_None) {
-        _PyGen_SetStopIterationValue(result);
+    jit::JitGenObject* gen = jit::JitGenObject::cast(
+        reinterpret_cast<PyGenObject*>(iterator));
+    JIT_DCHECK(gen != nullptr, "JitGen_CheckExact but cast returned null");
+
+    // Only fast-path suspended generators (not EXECUTING, CREATED, etc.)
+    if (gen->gi_frame_state == FRAME_SUSPENDED
+#if PY_VERSION_HEX >= 0x030E0000
+        || gen->gi_frame_state == FRAME_SUSPENDED_YIELD_FROM
+#endif
+    ) {
+
+      PyThreadState* tstate = PyThreadState_Get();
+
+      // Exception state threading (from jitgen_am_send)
+      _PyErr_StackItem* prev_exc_info = tstate->exc_info;
+      gen->gi_exc_state.previous_item = prev_exc_info;
+      tstate->exc_info = &gen->gi_exc_state;
+
+      gen->gi_frame_state = FRAME_EXECUTING;
+      EVAL_CALL_STAT_INC(EVAL_CALL_GENERATOR);
+
+      // Frame linkage (from send_core) — inlined
+      jit::GenDataFooter* gen_footer = gen->genDataFooter();
+      _PyInterpreterFrame* frame = generatorFrame(gen);
+      frame->previous = currentFrame(tstate);
+      setCurrentFrame(tstate, frame);
+
+      JIT_DCHECK(
+          gen_footer->yieldPoint != nullptr,
+          "Attempting to resume a generator with no yield point");
+
+      // Direct call to JIT-compiled generator code
+      PyObject* result = gen_footer->resumeEntry(
+          iterator, Py_None, 0 /* finish_yield_from */, tstate);
+
+      // Post-resume cleanup (from send_core + jitgen_am_send) — inlined
+      if (jit::JitGen_CheckAny(iterator)) {
+        tstate->exc_info = gen->gi_exc_state.previous_item;
+        gen->gi_exc_state.previous_item = nullptr;
+        setCurrentFrame(tstate, frame->previous);
+        frame->previous = nullptr;
+
+        if (FRAME_STATE_FINISHED(gen->gi_frame_state)) {
+          gen->gi_frame_state = FRAME_CLEARED;
+          jit::jitFrameClearExceptCode(frame);
+#ifdef ENABLE_GENERATOR_AWAITER
+          Py_CLEAR(gen->gi_ci_awaiter);
+#endif
+#if PY_VERSION_HEX < 0x030E0000
+          _PyErr_ClearExcState(&gen->gi_exc_state);
+#endif
+        } else {
+#if PY_VERSION_HEX >= 0x030E0000
+          gen->gi_frame_state = gen_footer->yieldPoint->isYieldFrom()
+              ? FRAME_SUSPENDED_YIELD_FROM
+              : FRAME_SUSPENDED;
+#else
+          gen->gi_frame_state = FRAME_SUSPENDED;
+#endif
+        }
       }
-      Py_CLEAR(result);
+
+      // Handle result
+      if (result) {
+        if (!FRAME_STATE_FINISHED(gen->gi_frame_state)) {
+          // Yielded value — return directly
+          return result;
+        }
+        // Generator exhausted (PYGEN_RETURN)
+        if (result != Py_None) {
+          _PyGen_SetStopIterationValue(result);
+        }
+        Py_CLEAR(result);
+      }
+      // Fall through to StopIteration/sentinel handling below
+    } else {
+      // Generator in unexpected state (EXECUTING, CREATED) — use slow path
+      PyObject* result = nullptr;
+      PySendResult status = jit::jitgen_am_send(iterator, nullptr, &result);
+      if (status == PYGEN_RETURN) {
+        if (result != Py_None) {
+          _PyGen_SetStopIterationValue(result);
+        }
+        Py_CLEAR(result);
+      }
+      if (result != nullptr) {
+        return result;
+      }
+      // Fall through to StopIteration/sentinel handling below
     }
-    if (result != nullptr) {
-      return result;
-    }
-    // Fall through to StopIteration/sentinel handling below
   } else {
     iternextfunc iternext_f = Py_TYPE(iterator)->tp_iternext;
     if (iternext_f == nullptr) {
