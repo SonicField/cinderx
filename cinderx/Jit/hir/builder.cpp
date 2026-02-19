@@ -659,10 +659,13 @@ void HIRBuilder::emitInlineExceptionMatch(
     Register* left,
     Register* right,
     Register* result) {
-  // Emit PyObject_GetItem via CallStatic (not BinaryOp/DeoptBase)
-  // so we can handle the error path inline instead of auto-deopting.
-  auto call = tc.emit<CallStatic>(
-      2, result, reinterpret_cast<void*>(PyObject_GetItem), TOptObject);
+  // Emit dict lookup via CallStatic. For BINARY_SUBSCR_DICT (known dict
+  // type), use JITRT_DictGetItem which calls PyDict_GetItemWithError
+  // directly, avoiding PyObject_GetItem's generic type dispatch overhead.
+  void* getitem_fn = (bc_instr.opcode() == BINARY_SUBSCR_DICT)
+      ? reinterpret_cast<void*>(JITRT_DictGetItem)
+      : reinterpret_cast<void*>(PyObject_GetItem);
+  auto call = tc.emit<CallStatic>(2, result, getitem_fn, TOptObject);
   call->SetOperand(0, left);
   call->SetOperand(1, right);
 

@@ -2380,6 +2380,21 @@ PyObject* JITRT_InvokeIterNext(PyObject* iterator) {
 }
 
 // B2: Match pending exception against type and clear if matched.
+// Dict subscript specialisation: use PyDict_GetItemWithError instead of
+// generic PyObject_GetItem for known-dict types. Avoids type dispatch
+// overhead while maintaining the same error semantics.
+PyObject* JITRT_DictGetItem(PyObject* dict, PyObject* key) {
+  PyObject* result = PyDict_GetItemWithError(dict, key);
+  if (result != nullptr) {
+    Py_INCREF(result);  // borrowed -> strong ref
+    return result;
+  }
+  if (!PyErr_Occurred()) {
+    _PyErr_SetKeyError(key);
+  }
+  return nullptr;
+}
+
 int JITRT_MatchAndClearException(PyObject* exc_type) {
   PyObject* exc = PyErr_GetRaisedException();
   if (exc == nullptr) {

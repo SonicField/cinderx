@@ -207,6 +207,7 @@ PyObject* JITRT_Vectorcall(
 
 // B2: Match pending exception against type and clear if matched.
 // Returns 1 if matched (exception cleared), 0 if no match.
+PyObject* JITRT_DictGetItem(PyObject* dict, PyObject* key);
 int JITRT_MatchAndClearException(PyObject* exc_type);
 
 /*
