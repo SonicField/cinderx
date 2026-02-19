@@ -1337,8 +1337,9 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
         hir::Register* base = instr->GetOperand(0);
         Instruction* name = getNameFromIdx(bbb, instr);
         auto cache = getContext()->allocateLoadAttrCache();
-        bbb.appendCallInstruction(
+        auto result = bbb.appendCallInstruction(
             dst, jit::LoadAttrCache::invoke, cache, base, name);
+        appendGuard(bbb, InstrGuardKind::kNotZero, *instr, result);
         break;
       }
       case Opcode::kLoadAttrSpecial: {
