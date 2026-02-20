@@ -2,13 +2,17 @@
 # run_cinderx_tests.sh — Canonical CinderX JIT test runner for aarch64
 #
 # THE single test runner for CinderX on devgpu004/devgpu009.
-# Runs all 41 CinderX test suites and produces a summary report.
+# Runs CinderX test suites and CPython regression tests.
 #
 # Usage:
-#   ./run_cinderx_tests.sh              # Run all tests (default)
+#   ./run_cinderx_tests.sh              # Run all CinderX tests (default)
 #   ./run_cinderx_tests.sh jit          # Run only JIT tests
 #   ./run_cinderx_tests.sh runtime      # Run only runtime tests
-#   ./run_cinderx_tests.sh compiler     # Run only compiler tests
+#   ./run_cinderx_tests.sh compiler     # Run only compiler tests (SBS shards)
+#   ./run_cinderx_tests.sh compiler-full # Run all compiler tests (SBS + individual)
+#   ./run_cinderx_tests.sh overrides    # Run CPython override tests
+#   ./run_cinderx_tests.sh cpython      # Run CPython regression suite (large)
+#   ./run_cinderx_tests.sh full         # Run everything: CinderX + CPython
 #   ./run_cinderx_tests.sh TESTNAME     # Run a specific test module
 #   ./run_cinderx_tests.sh --fix-opcode # Fix cinderx.opcode and exit
 #
@@ -47,13 +51,17 @@ fix_opcode() {
     fi
 }
 
-# NOTE: CINDERJIT_ENABLE is NOT a real CinderX env var. CinderX tests work
-# because they call cinderjit.force_compile() internally, not because of
-# any env var. The real env vars are PYTHONJITAUTO=N, PYTHONJITALL=1, etc.
-# We do NOT set them here — force_compile handles compilation for CinderX tests.
+# NOTE: CINDERJIT_ENABLE is NOT a real CinderX env var. The real env vars are:
+#   PYTHONJITALL=1  — compile every function
+#   PYTHONJITAUTO=N — compile functions after N calls (hot-loop detection)
+#   PYTHONJIT=1     — enable JIT subsystem (allows force_compile)
+# CinderX tests use force_compile() internally, so we don't set any of these.
+# cinderjit.is_enabled() returns True even without PYTHONJITALL/AUTO — it just
+# means the JIT subsystem is loaded and force_compile() will work.
 export PYTHONPATH="$PYTHONLIB${PYTHONPATH:+:$PYTHONPATH}"
 
-# Test suite definitions (41 suites total: 17 JIT + 14 runtime + 10 compiler)
+# Test suite definitions
+# Category 1: JIT tests (17 suites)
 JIT_TESTS=(
     test_cinderjit
     test_jit_async_generators
@@ -104,6 +112,44 @@ COMPILER_TESTS=(
     test_compiler_sbs_stdlib_9
 )
 
+# Category 4: Compiler individual tests (16 suites — NOT the SBS shards)
+# These use the dotted module path: test_cinderx.test_compiler.test_X
+COMPILER_INDIVIDUAL_TESTS=(
+    test_compiler.test_api
+    test_compiler.test_cinder
+    test_compiler.test_code_sbs
+    test_compiler.test_corpus
+    test_compiler.test_errors
+    test_compiler.test_exception_table
+    test_compiler.test_flags
+    test_compiler.test_graph
+    test_compiler.test_linepos
+    test_compiler.test_optimizer
+    test_compiler.test_py310
+    test_compiler.test_pysourceloader
+    test_compiler.test_sbs_external
+    test_compiler.test_symbols
+    test_compiler.test_unparse
+    test_compiler.test_visitor
+)
+
+# Category 5: CPython override tests (12 suites)
+# CinderX-specific replacements for CPython tests where behaviour diverges
+CPYTHON_OVERRIDE_TESTS=(
+    test_cpython_overrides.test_asyncgen
+    test_cpython_overrides.test_coroutines
+    test_cpython_overrides.test_dis
+    test_cpython_overrides.test_fork1
+    test_cpython_overrides.test_gdb
+    test_cpython_overrides.test_generators
+    test_cpython_overrides.test_inspect
+    test_cpython_overrides.test__opcode
+    test_cpython_overrides.test_repl
+    test_cpython_overrides.test_tracemalloc
+    test_cpython_overrides.test_trace
+    test_cpython_overrides.test_types
+)
+
 # Colour codes (disabled if not a terminal)
 if [ -t 1 ]; then
     RED='\033[0;31m'
@@ -126,21 +172,30 @@ fi
 # Strip leading -- from argument (accept both --all and all)
 ARG="${1:-all}"
 ARG="${ARG#--}"
+RUN_CPYTHON=""
 
 case "$ARG" in
-    jit)      SUITES=("${JIT_TESTS[@]}") ;;
-    runtime)  SUITES=("${RUNTIME_TESTS[@]}") ;;
-    compiler) SUITES=("${COMPILER_TESTS[@]}") ;;
-    all)      SUITES=("${JIT_TESTS[@]}" "${RUNTIME_TESTS[@]}" "${COMPILER_TESTS[@]}") ;;
+    jit)           SUITES=("${JIT_TESTS[@]}") ;;
+    runtime)       SUITES=("${RUNTIME_TESTS[@]}") ;;
+    compiler)      SUITES=("${COMPILER_TESTS[@]}") ;;
+    compiler-full) SUITES=("${COMPILER_TESTS[@]}" "${COMPILER_INDIVIDUAL_TESTS[@]}") ;;
+    overrides)     SUITES=("${CPYTHON_OVERRIDE_TESTS[@]}") ;;
+    all)           SUITES=("${JIT_TESTS[@]}" "${RUNTIME_TESTS[@]}" "${COMPILER_TESTS[@]}" "${COMPILER_INDIVIDUAL_TESTS[@]}" "${CPYTHON_OVERRIDE_TESTS[@]}") ;;
+    cpython)       RUN_CPYTHON=1; SUITES=() ;;
+    full)          SUITES=("${JIT_TESTS[@]}" "${RUNTIME_TESTS[@]}" "${COMPILER_TESTS[@]}" "${COMPILER_INDIVIDUAL_TESTS[@]}" "${CPYTHON_OVERRIDE_TESTS[@]}"); RUN_CPYTHON=1 ;;
     help|-h)
-        echo "Usage: $0 [all|jit|runtime|compiler|TESTNAME|--fix-opcode]"
+        echo "Usage: $0 [all|jit|runtime|compiler|compiler-full|overrides|cpython|full|TESTNAME|--fix-opcode]"
         echo ""
-        echo "  all          Run all 41 test suites (default)"
-        echo "  jit          Run 17 JIT test suites only"
-        echo "  runtime      Run 14 runtime test suites only"
-        echo "  compiler     Run 10 compiler test suites only"
-        echo "  TESTNAME     Run a specific test module (e.g. test_jit_attr_cache)"
-        echo "  --fix-opcode Fix cinderx.opcode import and exit"
+        echo "  all            Run all CinderX tests: JIT + runtime + compiler + overrides (default)"
+        echo "  jit            Run 17 JIT test suites only"
+        echo "  runtime        Run 14 runtime test suites only"
+        echo "  compiler       Run 10 compiler SBS test suites only"
+        echo "  compiler-full  Run all compiler tests (10 SBS + 16 individual)"
+        echo "  overrides      Run 12 CPython override test suites"
+        echo "  cpython        Run CPython regression suite (~494 tests, slow)"
+        echo "  full           Run everything: all CinderX + CPython regression"
+        echo "  TESTNAME       Run a specific test module (e.g. test_jit_attr_cache)"
+        echo "  --fix-opcode   Fix cinderx.opcode import and exit"
         exit 0
         ;;
     *)
@@ -166,19 +221,23 @@ SUITE_COUNT=0
 echo -e "${BOLD}CinderX Test Runner${RESET}"
 echo "Root:     $CINDERX_ROOT"
 echo "Python:   $(python3 --version 2>&1)"
-echo "Suites:   ${#SUITES[@]}"
+echo "Suites:   ${#SUITES[@]} CinderX${RUN_CPYTHON:+ + CPython regression}"
 echo "Results:  $RESULTS_FILE"
 echo "Started:  $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
 echo "---"
 
-# HARD GATE: verify CinderX is actually loaded and JIT is active.
-# CinderX tests use force_compile() internally, so the JIT must be available.
-# This prevents silently running tests on stock Python without the cinderjit module.
+# HARD GATE: verify CinderX JIT is actually usable.
+# cinderjit.is_enabled() is NOT sufficient — it returns True even without
+# PYTHONJITALL/PYTHONJITAUTO. We verify that force_compile() actually works
+# by compiling a test function and checking is_jit_compiled().
 echo -n "Verifying CinderX JIT... "
 CINDERX_CHECK=$(python3 -c "
 import cinderjit
-assert cinderjit.is_enabled(), 'cinderjit imported but JIT not enabled'
-print('OK')
+def _gate(): return 42
+cinderjit.force_compile(_gate)
+assert cinderjit.is_jit_compiled(_gate), 'force_compile ran but function not JIT-compiled'
+assert _gate() == 42, 'JIT-compiled function returned wrong result'
+print('OK (force_compile verified)')
 " 2>&1) || {
     echo -e "${RED}FATAL: CinderX JIT not available${RESET}"
     echo "$CINDERX_CHECK"
@@ -309,6 +368,112 @@ if [ ${#SKIPPED_SUITES[@]} -gt 0 ]; then
 fi
 
 echo "Results CSV: $RESULTS_FILE"
+
+# ---- CPython Regression Suite ----
+if [ -n "$RUN_CPYTHON" ]; then
+    echo ""
+    echo -e "${BOLD}=== CPython Regression Suite ===${RESET}"
+    echo "Running CPython test suite via python3 -m test"
+    echo "This validates CinderX does not break standard Python behaviour."
+    echo ""
+
+    CPYTHON_RESULTS="/tmp/cpython_test_results_$(date +%Y%m%d_%H%M%S).txt"
+    CPYTHON_SKIP_FILE="$CINDERX_ROOT/cinderx/TestScripts/cinder_skip_test.txt"
+    CPYTHON_ARM64_FAIL="$CINDERX_ROOT/cinderx/TestScripts/3.12-opt-arm64-failures.txt"
+
+    # Build the ignore list from skip files.
+    # Both files contain a mix of formats:
+    #   - Bare module names: "test_foo" or "test__opcode"
+    #   - Dotted test paths: "test.test_ast.ModuleStateTests.test_subinterpreter"
+    #   - Wildcard entries: "test.test__xxsubinterpreters.*"
+    #   - CinderX entries: "test_cinderx.test_cinderjit" (ARM64 file only)
+    # We extract the CPython module name from all formats and skip the entire
+    # module. This is conservative (hides individual test failures within
+    # partially-skipped modules) but gives a clean pass/fail signal for
+    # detecting NEW regressions.
+    CPYTHON_IGNORES=""
+    declare -A SEEN_MODULES
+
+    if [ -f "$CPYTHON_SKIP_FILE" ]; then
+        while IFS= read -r line; do
+            [[ "$line" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "${line// }" ]] && continue
+            if [[ ! "$line" =~ \. ]]; then
+                # Bare module name: "test_foo"
+                MODULE="$line"
+            elif [[ "$line" =~ ^test\.([^.]+) ]]; then
+                # Dotted path: "test.test_foo.Class.method" → test_foo
+                MODULE="${BASH_REMATCH[1]}"
+            else
+                continue
+            fi
+            if [[ -z "${SEEN_MODULES[$MODULE]+x}" ]]; then
+                CPYTHON_IGNORES="$CPYTHON_IGNORES -x $MODULE"
+                SEEN_MODULES[$MODULE]=1
+            fi
+        done < "$CPYTHON_SKIP_FILE"
+    fi
+
+    # Also skip known ARM64 failures
+    if [ -f "$CPYTHON_ARM64_FAIL" ]; then
+        while IFS= read -r line; do
+            [[ "$line" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "${line// }" ]] && continue
+            if [[ "$line" =~ ^test_cinderx\. ]]; then
+                # CinderX test entry — handled by CinderX runner, skip here
+                continue
+            elif [[ "$line" =~ ^test\.([^.]+) ]]; then
+                # Dotted path: "test.test_ctypes" → test_ctypes
+                MODULE="${BASH_REMATCH[1]}"
+            elif [[ ! "$line" =~ \. ]]; then
+                MODULE="$line"
+            else
+                continue
+            fi
+            if [[ -z "${SEEN_MODULES[$MODULE]+x}" ]]; then
+                CPYTHON_IGNORES="$CPYTHON_IGNORES -x $MODULE"
+                SEEN_MODULES[$MODULE]=1
+            fi
+        done < "$CPYTHON_ARM64_FAIL"
+    fi
+
+    # Environment-specific failures (not JIT-related, not in CinderX skip lists)
+    # test_pdb: test_basic_completion fails due to ANSI colour codes in readline
+    # test_venv: test_upgrade_dependencies fails due to pip upgrade in venv env
+    for ENV_SKIP in test_pdb test_venv; do
+        if [[ -z "${SEEN_MODULES[$ENV_SKIP]+x}" ]]; then
+            CPYTHON_IGNORES="$CPYTHON_IGNORES -x $ENV_SKIP"
+            SEEN_MODULES[$ENV_SKIP]=1
+        fi
+    done
+
+    # Run CPython tests with timeout per test (60s) and overall timeout (30min)
+    # Use --failfast for initial runs, remove for full sweep
+    echo "Skip file: $CPYTHON_SKIP_FILE"
+    echo "ARM64 failures: $CPYTHON_ARM64_FAIL"
+    echo "Modules skipped: ${#SEEN_MODULES[@]}"
+    echo ""
+
+    # Run and capture output
+    timeout 1800 python3 -m test \
+        --timeout 60 \
+        -j4 \
+        $CPYTHON_IGNORES \
+        2>&1 | tee "$CPYTHON_RESULTS" | tail -20
+
+    CPYTHON_EXIT=$?
+
+    echo ""
+    echo "CPython results saved to: $CPYTHON_RESULTS"
+
+    if [ $CPYTHON_EXIT -eq 0 ]; then
+        echo -e "${GREEN}CPython regression suite: PASS${RESET}"
+    elif [ $CPYTHON_EXIT -eq 124 ]; then
+        echo -e "${YELLOW}CPython regression suite: TIMEOUT (30 min limit)${RESET}"
+    else
+        echo -e "${RED}CPython regression suite: FAIL (exit $CPYTHON_EXIT)${RESET}"
+    fi
+fi
 
 # Exit code: 0 if all suites executed (failures ok), 1 if any suite errored (didn't execute)
 if [ ${#ERROR_SUITES[@]} -gt 0 ]; then
