@@ -9,6 +9,7 @@
 #include "cinderx/Jit/hir/builder.h"
 #include "cinderx/Jit/hir/builtin_load_method_elimination.h"
 #include "cinderx/Jit/hir/clean_cfg.h"
+#include "cinderx/Jit/hir/licm.h"
 #include "cinderx/Jit/hir/dead_code_elimination.h"
 #include "cinderx/Jit/hir/dynamic_comparison_elimination.h"
 #include "cinderx/Jit/hir/guard_removal.h"
@@ -108,6 +109,8 @@ void Compiler::runPasses(
   runPassIf(hir::DeadCodeElimination{}, PassConfig::kDeadCodeElim);
   runPassIf(hir::CleanCFG{}, PassConfig::kCleanCFG);
 
+  runPassIf(hir::LICM{}, PassConfig::kLICM);
+
   runPass(jit::hir::RefcountInsertion{}, irfunc, callback);
 
   if (getConfig().dump_hir_stats) {
@@ -158,6 +161,8 @@ PassConfig createConfig() {
   set(hir_opts.insert_update_prev_instr, PassConfig::kInsertUpdatePrevInstr);
   set(hir_opts.phi_elim, PassConfig::kPhiElim);
   set(hir_opts.simplify, PassConfig::kSimplify);
+  // LICM: always enabled (no config flag yet)
+  result |= static_cast<uint64_t>(PassConfig::kLICM);
 
   return static_cast<PassConfig>(result);
 }
