@@ -788,6 +788,27 @@ Register* simplifyInPlaceOp(Env& env, const InPlaceOp* instr) {
         break;
     }
   }
+  // Phase 2: Float in-place ops. Convert InPlaceOpKind to BinaryOpKind
+  // for FloatBinaryOp emission.
+  if (lhs->isA(TFloatExact) && rhs->isA(TFloatExact)) {
+    std::optional<BinaryOpKind> binop;
+    switch (instr->op()) {
+      case InPlaceOpKind::kAdd: binop = BinaryOpKind::kAdd; break;
+      case InPlaceOpKind::kSubtract: binop = BinaryOpKind::kSubtract; break;
+      case InPlaceOpKind::kMultiply: binop = BinaryOpKind::kMultiply; break;
+      case InPlaceOpKind::kTrueDivide: binop = BinaryOpKind::kTrueDivide; break;
+      case InPlaceOpKind::kFloorDivide: binop = BinaryOpKind::kFloorDivide; break;
+      case InPlaceOpKind::kModulo: binop = BinaryOpKind::kModulo; break;
+      case InPlaceOpKind::kPower: binop = BinaryOpKind::kPower; break;
+      default: break;
+    }
+    if (binop && (FloatBinaryOp::slotMethod(*binop) || *binop == BinaryOpKind::kPower)) {
+      env.emit<UseType>(lhs, TFloatExact);
+      env.emit<UseType>(rhs, TFloatExact);
+      return env.emit<FloatBinaryOp>(*binop, lhs, rhs, *instr->frameState());
+    }
+  }
+
   return nullptr;
 }
 
