@@ -28,6 +28,22 @@ namespace jit::hir {
 // criteria:
 // - It operates on one instruction at a time, with no global analysis or
 //   state.
+
+// Convert InPlaceOpKind to the corresponding BinaryOpKind.
+// InPlaceOpKind and BinaryOpKind share names but have different ordinals
+// (BinaryOpKind has kSubscript at position 10, which InPlaceOpKind lacks).
+static std::optional<BinaryOpKind> inPlaceOpToBinaryOp(InPlaceOpKind op) {
+  switch (op) {
+    case InPlaceOpKind::kAdd: return BinaryOpKind::kAdd;
+    case InPlaceOpKind::kSubtract: return BinaryOpKind::kSubtract;
+    case InPlaceOpKind::kMultiply: return BinaryOpKind::kMultiply;
+    case InPlaceOpKind::kTrueDivide: return BinaryOpKind::kTrueDivide;
+    case InPlaceOpKind::kFloorDivide: return BinaryOpKind::kFloorDivide;
+    case InPlaceOpKind::kModulo: return BinaryOpKind::kModulo;
+    case InPlaceOpKind::kPower: return BinaryOpKind::kPower;
+    default: return std::nullopt;
+  }
+}
 // - Optimizable instructions are replaced with 0 or more new instructions that
 //   define an equivalent value while doing less work.
 //
@@ -736,12 +752,92 @@ Register* simplifyBinaryOp(Env& env, const BinaryOp* instr) {
     return env.emit<LongBinaryOp>(op, lhs, rhs, *instr->frameState());
   }
 
+  // BinaryOp float speculation: guard Object operand to FloatExact.
+  // Handles untyped function arguments that are actually float at runtime.
+  if (op != BinaryOpKind::kSubscript && op != BinaryOpKind::kMatrixMultiply) {
+    if (lhs->isA(TFloatExact) && !rhs->isA(TFloatExact) &&
+        rhs->type().couldBe(TFloatExact)) {
+      if (FloatBinaryOp::slotMethod(op) || op == BinaryOpKind::kPower) {
+        env.emit<UseType>(lhs, TFloatExact);
+        Register* guarded = env.emit<GuardType>(TFloatExact, rhs,
+                                                 *instr->frameState());
+        return env.emit<FloatBinaryOp>(op, lhs, guarded,
+                                        *instr->frameState());
+      }
+    }
+    if (rhs->isA(TFloatExact) && !lhs->isA(TFloatExact) &&
+        lhs->type().couldBe(TFloatExact)) {
+      if (FloatBinaryOp::slotMethod(op) || op == BinaryOpKind::kPower) {
+        env.emit<UseType>(rhs, TFloatExact);
+        Register* guarded = env.emit<GuardType>(TFloatExact, lhs,
+                                                 *instr->frameState());
+        return env.emit<FloatBinaryOp>(op, guarded, rhs,
+                                        *instr->frameState());
+      }
+    }
+  }
+
+  // BinaryOp long speculation: same pattern for integer operations.
+  if (op != BinaryOpKind::kSubscript && op != BinaryOpKind::kMatrixMultiply) {
+    if (lhs->isA(TLongExact) && !rhs->isA(TLongExact) &&
+        rhs->type().couldBe(TLongExact)) {
+      env.emit<UseType>(lhs, TLongExact);
+      Register* guarded = env.emit<GuardType>(TLongExact, rhs,
+                                               *instr->frameState());
+      return env.emit<LongBinaryOp>(op, lhs, guarded,
+                                      *instr->frameState());
+    }
+    if (rhs->isA(TLongExact) && !lhs->isA(TLongExact) &&
+        lhs->type().couldBe(TLongExact)) {
+      env.emit<UseType>(rhs, TLongExact);
+      Register* guarded = env.emit<GuardType>(TLongExact, lhs,
+                                               *instr->frameState());
+      return env.emit<LongBinaryOp>(op, guarded, rhs,
+                                      *instr->frameState());
+    }
+  }
+
   if (lhs->isA(TFloatExact) && rhs->isA(TFloatExact) &&
       ((instr->op() == BinaryOpKind::kPower) ||
        FloatBinaryOp::slotMethod(instr->op()))) {
     env.emit<UseType>(lhs, TFloatExact);
     env.emit<UseType>(rhs, TFloatExact);
     return env.emit<FloatBinaryOp>(instr->op(), lhs, rhs, *instr->frameState());
+  }
+
+  // Phase 3: Constant-fold int->float for mixed (FloatExact, LongExact) ops.
+  // When one operand is float and the other is a known int constant,
+  // convert the int to float at compile time and emit FloatBinaryOp.
+  {
+    Register* float_reg = nullptr;
+    Register* int_reg = nullptr;
+    if (lhs->isA(TFloatExact) && rhs->isA(TLongExact) && rhs->type().hasObjectSpec()) {
+      float_reg = lhs;
+      int_reg = rhs;
+    } else if (rhs->isA(TFloatExact) && lhs->isA(TLongExact) && lhs->type().hasObjectSpec()) {
+      float_reg = rhs;
+      int_reg = lhs;
+    }
+    if (float_reg != nullptr &&
+        ((op == BinaryOpKind::kPower) || FloatBinaryOp::slotMethod(op))) {
+      RETURN_MULTITHREADED_COMPILE(nullptr);
+      double dval = PyLong_AsDouble(int_reg->type().objectSpec());
+      if (dval != -1.0 || !PyErr_Occurred()) {
+        ThreadedCompileSerialize guard;
+        Ref<> float_obj = Ref<>::steal(PyFloat_FromDouble(dval));
+        if (float_obj) {
+          env.emit<UseType>(float_reg, TFloatExact);
+          env.emit<UseType>(int_reg, int_reg->type());
+          Register* float_const = env.emit<LoadConst>(
+              Type::fromObject(env.func.env.addReference(std::move(float_obj))));
+          return env.emit<FloatBinaryOp>(op,
+              (int_reg == lhs) ? float_const : lhs,
+              (int_reg == rhs) ? float_const : rhs,
+              *instr->frameState());
+        }
+      }
+      PyErr_Clear();
+    }
   }
 
   if ((lhs->isA(TUnicodeExact) && rhs->isA(TLongExact)) &&
@@ -806,6 +902,33 @@ Register* simplifyInPlaceOp(Env& env, const InPlaceOp* instr) {
       env.emit<UseType>(lhs, TFloatExact);
       env.emit<UseType>(rhs, TFloatExact);
       return env.emit<FloatBinaryOp>(*binop, lhs, rhs, *instr->frameState());
+    }
+  }
+
+  // InPlaceOp float speculation: guard Object operand to FloatExact.
+  // Handles accumulators (total += val) where total is Object through Phi.
+  if (lhs->isA(TFloatExact) && !rhs->isA(TFloatExact) &&
+      rhs->type().couldBe(TFloatExact)) {
+    auto binop = inPlaceOpToBinaryOp(instr->op());
+    if (binop && (FloatBinaryOp::slotMethod(*binop) ||
+                  *binop == BinaryOpKind::kPower)) {
+      env.emit<UseType>(lhs, TFloatExact);
+      Register* guarded = env.emit<GuardType>(TFloatExact, rhs,
+                                               *instr->frameState());
+      return env.emit<FloatBinaryOp>(*binop, lhs, guarded,
+                                      *instr->frameState());
+    }
+  }
+  if (rhs->isA(TFloatExact) && !lhs->isA(TFloatExact) &&
+      lhs->type().couldBe(TFloatExact)) {
+    auto binop = inPlaceOpToBinaryOp(instr->op());
+    if (binop && (FloatBinaryOp::slotMethod(*binop) ||
+                  *binop == BinaryOpKind::kPower)) {
+      env.emit<UseType>(rhs, TFloatExact);
+      Register* guarded = env.emit<GuardType>(TFloatExact, lhs,
+                                               *instr->frameState());
+      return env.emit<FloatBinaryOp>(*binop, guarded, rhs,
+                                      *instr->frameState());
     }
   }
 
