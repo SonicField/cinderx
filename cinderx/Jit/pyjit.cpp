@@ -3282,6 +3282,26 @@ void unregisterFunctionCodes(BorrowedRef<PyFunctionObject> func) {
 
 } // namespace
 
+// Tier 1 vectorcall wrapper: counts post-JIT invocations and
+// triggers Tier 2 recompilation when threshold is reached.
+PyObject* tier1Vectorcall(
+    PyObject* func_obj,
+    PyObject* const* stack,
+    size_t nargsf,
+    PyObject* kwnames) {
+  using namespace jit;
+  BorrowedRef<PyFunctionObject> func{func_obj};
+  CompiledFunction* compiled = jitCtx()->lookupFunc(func);
+  JIT_DCHECK(compiled != nullptr, "tier1Vectorcall: not compiled");
+  auto& data = compiled->mutableData();
+  data.tier1_invocation_count.fetch_add(1, std::memory_order_relaxed);
+  if (data.tier1_invocation_count.load(std::memory_order_relaxed) >= CompiledFunctionData::kTier2ThresholdDefault &&
+      data.compilation_tier == 1) {
+    func->vectorcall = compiled->vectorcallEntry();
+  }
+  return compiled->vectorcallEntry()(func_obj, stack, nargsf, kwnames);
+}
+
 #if PY_VERSION_HEX < 0x030C0000
 PyObject* _PyJIT_GenSend(
     PyGenObject* gen,

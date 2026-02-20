@@ -1459,7 +1459,8 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
         hir::Register* dst = instr->output();
         hir::Register* base = instr->receiver();
         Instruction* name = getNameFromIdx(bbb, instr);
-        auto cache = getContext()->allocateLoadMethodCache();
+        auto cache = getContext()->allocateLoadMethodCache(
+            instr->frameState()->code, instr->bytecodeOffset().value());
         if (getConfig().collect_attr_cache_stats) {
           BorrowedRef<PyCodeObject> code = instr->frameState()->code;
           cache->initCacheStats(

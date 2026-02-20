@@ -298,6 +298,9 @@ class LoadMethodCache {
   void clearCacheStats();
   const CacheStats* cacheStats();
 
+  // Public accessor for IC entries (speculative inlining)
+  const std::array<Entry, 4>& entries() const { return entries_; }
+
  private:
   LoadMethodResult lookupSlowPath(BorrowedRef<> obj, BorrowedRef<> name);
   void

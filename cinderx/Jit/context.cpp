@@ -18,6 +18,8 @@
 #include <dlfcn.h>
 #endif
 
+// Forward declaration
+PyObject* tier1Vectorcall(PyObject*, PyObject* const*, size_t, PyObject*);
 namespace jit {
 
 AotContext g_aot_ctx;
@@ -300,6 +302,18 @@ LoadTypeAttrCache* Context::allocateLoadTypeAttrCache() {
 }
 
 LoadMethodCache* Context::allocateLoadMethodCache() {
+}
+
+LoadMethodCache* Context::allocateLoadMethodCache(
+    BorrowedRef<PyCodeObject> code, int bc_offset) {
+  auto key = std::make_pair(code.get(), bc_offset);
+  auto it = load_method_cache_map_.find(key);
+  if (it != load_method_cache_map_.end()) {
+    return it->second;  // Return existing warm IC
+  }
+  auto* cache = load_method_caches_.allocate();
+  load_method_cache_map_[key] = cache;
+  return cache;
   return load_method_caches_.allocate();
 }
 
@@ -419,7 +433,7 @@ void Context::finalizeFunc(
   // In case the function had previously been deopted.
   removeDeoptedFunc(func);
 
-  func->vectorcall = compiled.vectorcallEntry();
+  if (compiled.compilationTier() == 1) { func->vectorcall = ::tier1Vectorcall; } else { func->vectorcall = compiled.vectorcallEntry(); }
   if (hasFunctionEntryCache(func)) {
     void** indirect = findFunctionEntryCache(func);
     *indirect = compiled.staticEntry();

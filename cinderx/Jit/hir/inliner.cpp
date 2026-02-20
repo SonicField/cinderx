@@ -10,6 +10,8 @@
 #include "cinderx/Jit/hir/copy_propagation.h"
 #include "cinderx/Jit/hir/instr_effects.h"
 #include "cinderx/Jit/hir/preload.h"
+#include "cinderx/Jit/inline_cache.h"
+#include "cinderx/Jit/context.h"
 
 namespace jit::hir {
 
@@ -22,8 +24,10 @@ struct AbstractCall {
       BorrowedRef<PyFunctionObject> func,
       size_t nargs,
       DeoptBase* instr,
-      Register* target = nullptr)
-      : func{func}, nargs{nargs}, instr{instr}, target{target} {}
+      Register* target = nullptr,
+      PyTypeObject* speculated_receiver_type = nullptr)
+      : func{func}, nargs{nargs}, instr{instr}, target{target},
+        speculated_receiver_type{speculated_receiver_type} {}
 
   Register* arg(std::size_t i) const {
     if (instr->IsInvokeStaticFunction()) {
@@ -41,6 +45,7 @@ struct AbstractCall {
   size_t nargs{0};
   DeoptBase* instr{nullptr};
   Register* target{nullptr};
+  PyTypeObject* speculated_receiver_type{nullptr};
 };
 
 void dlogAndCollectFailureStats(
@@ -390,6 +395,45 @@ void InlineFunctionCalls::Run(Function& irfunc) {
       } else if (instr.IsInvokeStaticFunction()) {
         auto call = static_cast<InvokeStaticFunction*>(&instr);
         to_inline.emplace_back(call->func(), call->NumArgs() - 1, call);
+      } else if (instr.IsCallMethod()) {
+        // Speculative inlining: check IC type feedback for monomorphic sites
+        auto call = static_cast<CallMethod*>(&instr);
+        Register* func_reg = call->func();
+        Instr* def = func_reg->instr();
+        if (def != nullptr && def->opcode() == Opcode::kLoadMethodCached) {
+          auto* fs = def->asDeoptBase()->frameState();
+          if (fs != nullptr) {
+            BorrowedRef<PyCodeObject> code = fs->code;
+            int bc_off = def->bytecodeOffset().value();
+            auto* ic = getContext()->allocateLoadMethodCache(code, bc_off);
+            // Check monomorphism: exactly one non-NULL type entry
+            PyTypeObject* mono_type = nullptr;
+            bool is_monomorphic = false;
+            for (const auto& entry : ic->entries()) {
+              if (entry.type != nullptr) {
+                if (mono_type == nullptr) {
+                  mono_type = entry.type;
+                  is_monomorphic = true;
+                } else if (entry.type != mono_type) {
+                  is_monomorphic = false;
+                  break;
+                }
+              }
+            }
+            if (is_monomorphic && mono_type != nullptr) {
+              // Look up the method on the speculated type
+              PyObject* method = _PyType_Lookup(mono_type, call->arg(0)->name().c_str() ? nullptr : nullptr);
+              // TODO: need method name from LoadMethodCached, not available here
+              // For now, use the IC value directly if it is a function
+              auto& first_entry = ic->entries()[0];
+              if (first_entry.value != nullptr && PyFunction_Check(first_entry.value)) {
+                BorrowedRef<PyFunctionObject> callee{first_entry.value};
+                LOG_INLINER("Speculative inline: monomorphic CallMethod via IC type {}", mono_type->tp_name);
+                to_inline.emplace_back(callee, call->NumArgs(), call, func_reg, mono_type);
+              }
+            }
+          }
+        }
       }
     }
   }
@@ -417,6 +461,19 @@ void InlineFunctionCalls::Run(Function& irfunc) {
     }
     cost = new_cost;
 
+    // Step 4: Insert GuardType for speculative inlining (CallMethod with IC feedback)
+    if (call.speculated_receiver_type != nullptr && call.instr->IsCallMethod()) {
+      auto* cm = static_cast<CallMethod*>(call.instr);
+      Register* receiver = cm->self();
+      auto& env = irfunc.env;
+      Register* guarded = env.AllocateRegister();
+      Type guard_type = Type::fromTypeExact(call.speculated_receiver_type);
+      // Use create factory method from Operands<1>
+      auto* guard = GuardType::create(guarded, guard_type, receiver, *call.instr->frameState());
+      // Insert guard before the CallMethod instruction
+      call.instr->InsertBefore(*guard);
+      LOG_INLINER("Inserted GuardType for speculative inline, type={}", call.speculated_receiver_type->tp_name);
+    }
     inlineFunctionCall(irfunc, &call);
 
     // We need to reflow types after every inline to propagate new type

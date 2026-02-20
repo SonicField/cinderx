@@ -334,6 +334,8 @@ class Context : public IJitContext {
   LoadAttrCache* allocateLoadAttrCache();
   LoadTypeAttrCache* allocateLoadTypeAttrCache();
   LoadMethodCache* allocateLoadMethodCache();
+  // Lookup-or-create: returns existing warm IC for (code, bc_offset) if available
+  LoadMethodCache* allocateLoadMethodCache(BorrowedRef<PyCodeObject> code, int bc_offset);
   LoadModuleAttrCache* allocateLoadModuleAttrCache();
   LoadModuleMethodCache* allocateLoadModuleMethodCache();
   LoadTypeMethodCache* allocateLoadTypeMethodCache();
@@ -434,6 +436,11 @@ class Context : public IJitContext {
   SlabArena<LoadAttrCache, AttributeCacheSizeTrait> load_attr_caches_;
   SlabArena<LoadTypeAttrCache> load_type_attr_caches_;
   SlabArena<LoadMethodCache> load_method_caches_;
+  // Map from (code, bc_offset) -> IC for tier 2 reuse
+  std::unordered_map<std::pair<PyCodeObject*, int>, LoadMethodCache*,
+    decltype([](const std::pair<PyCodeObject*, int>& p) {
+      return std::hash<void*>{}(p.first) ^ std::hash<int>{}(p.second);
+    })> load_method_cache_map_;
   SlabArena<LoadModuleAttrCache> load_module_attr_caches_;
   SlabArena<LoadModuleMethodCache> load_module_method_caches_;
   SlabArena<LoadTypeMethodCache> load_type_method_caches_;
