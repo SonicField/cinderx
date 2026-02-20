@@ -34,6 +34,7 @@
 #include "cinderx/Jit/elf/writer.h"
 #include "cinderx/Jit/frame.h"
 #include "cinderx/Jit/generators_rt.h"
+#include "cinderx/Jit/iterator_types.h"
 #include "cinderx/Jit/hir/annotation_index.h"
 #include "cinderx/Jit/hir/preload.h"
 #include "cinderx/Jit/inline_cache.h"
@@ -3480,6 +3481,7 @@ int initialize() {
 
 #if PY_VERSION_HEX >= 0x030C0000
   jit::init_jit_genobject_type();
+  jit::init_iterator_types();
 #endif
 
   // Create code allocator after jit::Config has been filled out.

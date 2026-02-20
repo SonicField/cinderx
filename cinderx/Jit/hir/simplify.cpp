@@ -15,6 +15,8 @@
 #include "cinderx/Jit/hir/copy_propagation.h"
 #include "cinderx/Jit/hir/printer.h"
 #include "cinderx/Jit/hir/type.h"
+#include "cinderx/Jit/iterator_types.h"
+#include "cinderx/Jit/jit_rt.h"
 #include "cinderx/Jit/threaded_compile.h"
 #include "cinderx/StaticPython/strictmoduleobject.h"
 
@@ -2085,6 +2087,36 @@ Register* simplifyInstr(Env& env, const Instr* instr) {
     case Opcode::kCIntToCBool:
       return simplifyCIntToCBool(env, static_cast<const CIntToCBool*>(instr));
 
+    case Opcode::kGetIter: {
+      // C->C inlining: narrow iterator type for known input types
+      Register* input = instr->GetOperand(0);
+      if (jit::g_range_iterator_type != nullptr &&
+          input->type() <= Type::fromTypeExact(&PyRange_Type)) {
+        env.emit<UseType>(instr->output(),
+                          Type::fromTypeExact(jit::g_range_iterator_type));
+      }
+      return nullptr;
+    }
+    case Opcode::kInvokeIterNext: {
+      // C->C inlining: skip JitGen check for known non-generator iterators
+      Register* iterator = instr->GetOperand(0);
+      PyTypeObject* iter_type = iterator->type().runtimePyType();
+      if (iter_type != nullptr &&
+          jit::g_range_iterator_type != nullptr &&
+          iter_type == jit::g_range_iterator_type) {
+        // Known non-generator iterator: use direct JITRT_InvokeIterNext
+        // which still handles sentinel conversion but skips the JitGen check
+        auto* iter_next = static_cast<const InvokeIterNext*>(instr);
+        auto call = env.emitRawInstr<CallStatic>(
+            1,
+            env.func.env.AllocateRegister(),
+            reinterpret_cast<void*>(JITRT_InvokeIterNext),
+            TOptObject);
+        call->SetOperand(0, iterator);
+        return call->output();
+      }
+      return nullptr;
+    }
     default:
       return nullptr;
   }
