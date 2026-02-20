@@ -884,6 +884,29 @@ Register* simplifyInPlaceOp(Env& env, const InPlaceOp* instr) {
         break;
     }
   }
+  // Change 4: InPlaceOp Object speculation for float accumulators.
+  // When the LHS is Object (accumulator through Phi) and RHS is FloatExact,
+  // guard LHS as FloatExact. This enables the Phi cascade: the guard narrows
+  // the accumulator type, which propagates through the Phi back-edge.
+  if (!lhs->isA(TFloatExact) && rhs->isA(TFloatExact)) {
+    std::optional<BinaryOpKind> binop;
+    switch (instr->op()) {
+      case InPlaceOpKind::kAdd: binop = BinaryOpKind::kAdd; break;
+      case InPlaceOpKind::kSubtract: binop = BinaryOpKind::kSubtract; break;
+      case InPlaceOpKind::kMultiply: binop = BinaryOpKind::kMultiply; break;
+      case InPlaceOpKind::kTrueDivide: binop = BinaryOpKind::kTrueDivide; break;
+      case InPlaceOpKind::kFloorDivide: binop = BinaryOpKind::kFloorDivide; break;
+      case InPlaceOpKind::kModulo: binop = BinaryOpKind::kModulo; break;
+      case InPlaceOpKind::kPower: binop = BinaryOpKind::kPower; break;
+      default: break;
+    }
+    if (binop && (FloatBinaryOp::slotMethod(*binop) || *binop == BinaryOpKind::kPower)) {
+      Register* guarded_lhs = env.emit<GuardType>(TFloatExact, lhs, *instr->frameState());
+      env.emit<UseType>(rhs, TFloatExact);
+      return env.emit<FloatBinaryOp>(*binop, guarded_lhs, rhs, *instr->frameState());
+    }
+  }
+
   // Phase 2: Float in-place ops. Convert InPlaceOpKind to BinaryOpKind
   // for FloatBinaryOp emission.
   if (lhs->isA(TFloatExact) && rhs->isA(TFloatExact)) {
