@@ -237,7 +237,7 @@ target_link_libraries(common PRIVATE asmjit::asmjit fmt::fmt ZLIB::ZLIB)
 ########################################
 # UpstreamBorrow/
 
-if (${PY_VERSION} EQUAL 3.12 OR ${PY_VERSION} EQUAL 3.14 OR ${PY_VERSION} EQUAL 3.15)
+if ("${PY_VERSION}" STREQUAL "3.12" OR "${PY_VERSION}" STREQUAL "3.14" OR "${PY_VERSION}" STREQUAL "3.15")
   set(BORROWED_C ${PROJECT_SOURCE_DIR}/UpstreamBorrow/borrowed-${PY_VERSION}.gen_cached.c)
 else()
   set(BORROWED_C "${GENERATED_HEADER_DIR}/dummy-borrowed.c")
@@ -262,7 +262,7 @@ set(INTERP_SOURCES
   ${PROJECT_SOURCE_DIR}/Interpreter/iter_helpers.c
 )
 
-if (${PY_VERSION} EQUAL 3.12 OR ${PY_VERSION} EQUAL 3.14 OR ${PY_VERSION} EQUAL 3.15)
+if ("${PY_VERSION}" STREQUAL "3.12" OR "${PY_VERSION}" STREQUAL "3.14" OR "${PY_VERSION}" STREQUAL "3.15")
   set(SOURCE_CINDERX_OPCODE_TARGETS_H ${PROJECT_SOURCE_DIR}/Interpreter/${PY_VERSION}/cinderx_opcode_targets.h)
   set(SOURCE_CINDER_OPCODE_H ${PROJECT_SOURCE_DIR}/Interpreter/${PY_VERSION}/cinder_opcode.h)
   set(SOURCE_CINDER_OPCODE_IDS_H ${PROJECT_SOURCE_DIR}/Interpreter/${PY_VERSION}/cinder_opcode_ids.h)
@@ -318,7 +318,7 @@ target_link_libraries(static-python PRIVATE fmt::fmt asmjit::asmjit common borro
 
 file(GLOB_RECURSE JIT_SOURCES ${PROJECT_SOURCE_DIR}/Jit/*.cpp ${PROJECT_SOURCE_DIR}/Jit/*.c)
 list(FILTER JIT_SOURCES EXCLUDE REGEX ".*\.gen_cached\.c")
-if (${PY_VERSION} EQUAL 3.12 OR ${PY_VERSION} EQUAL 3.14 OR ${PY_VERSION} EQUAL 3.15)
+if ("${PY_VERSION}" STREQUAL "3.12" OR "${PY_VERSION}" STREQUAL "3.14" OR "${PY_VERSION}" STREQUAL "3.15")
   list(APPEND JIT_SOURCES "${PROJECT_SOURCE_DIR}/Jit/generators_borrowed_${PY_VERSION}.gen_cached.c")
 endif()
 
