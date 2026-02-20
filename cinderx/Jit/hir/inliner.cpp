@@ -344,6 +344,7 @@ void tryEliminateBeginEnd(EndInlinedFunction* end) {
 } // namespace
 
 void InlineFunctionCalls::Run(Function& irfunc) {
+  fprintf(stderr, "INLINER_ENTRY: func=%s\n", irfunc.fullname.c_str());
   if (irfunc.code == nullptr) {
     // In tests, irfunc may not have bytecode.
     return;
@@ -371,6 +372,21 @@ void InlineFunctionCalls::Run(Function& irfunc) {
               *target,
               target->type(),
               caller_name);
+          // Speculative inlining: check IC for resolved method
+          PyTypeObject* recv_type = target->type().runtimePyType();
+          if (recv_type != nullptr) {
+            auto* fs = call->asDeoptBase() ? call->asDeoptBase()->frameState() : nullptr;
+            if (fs != nullptr) {
+              auto* ic = jit::getContext()->allocateLoadMethodCache(BorrowedRef<PyCodeObject>(fs->code), instr.bytecodeOffset().value());
+              for (const auto& entry : ic->entries()) {
+                if (entry.value != nullptr && PyFunction_Check(entry.value)) {
+                  BorrowedRef<PyFunctionObject> callee{entry.value};
+                  to_inline.emplace_back(callee, call->numArgs(), call, target);
+                  break;
+                }
+              }
+            }
+          }
           continue;
         }
         if (!target->type().hasValueSpec(TFunc)) {
