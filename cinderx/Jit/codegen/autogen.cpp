@@ -1919,7 +1919,13 @@ void translateLea(Environ* env, const Instruction* instr) {
   JIT_CHECK(output->isReg(), "Expected output to be a register");
 
   if (input->isStack()) {
-    as->add(AT::getGp(output), arch::fp, input->getStackSlot().loc);
+    // Use sub for negative offsets (aarch64 ADD only takes unsigned immediates)
+    int loc = input->getStackSlot().loc;
+    if (loc >= 0) {
+      as->add(AT::getGp(output), arch::fp, loc);
+    } else {
+      as->sub(AT::getGp(output), arch::fp, -loc);
+    }
   } else if (input->isMem()) {
     auto address = reinterpret_cast<uint64_t>(input->getMemoryAddress());
     as->mov(AT::getGp(output), address);

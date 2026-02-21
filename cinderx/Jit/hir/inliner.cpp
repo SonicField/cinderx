@@ -24,10 +24,8 @@ struct AbstractCall {
       BorrowedRef<PyFunctionObject> func,
       size_t nargs,
       DeoptBase* instr,
-      Register* target = nullptr,
-      PyTypeObject* speculated_receiver_type = nullptr)
-      : func{func}, nargs{nargs}, instr{instr}, target{target},
-        speculated_receiver_type{speculated_receiver_type} {}
+      Register* target = nullptr)
+      : func{func}, nargs{nargs}, instr{instr}, target{target} {}
 
   Register* arg(std::size_t i) const {
     if (instr->IsInvokeStaticFunction()) {
@@ -38,6 +36,14 @@ struct AbstractCall {
       auto f = static_cast<VectorCall*>(instr);
       return f->arg(i);
     }
+    if (instr->IsCallMethod()) {
+      auto f = static_cast<CallMethod*>(instr);
+      // arg(0) is self, arg(1+) are the regular arguments
+      if (i == 0) {
+        return f->self();
+      }
+      return f->arg(i - 1);
+    }
     JIT_ABORT("Unsupported call type {}", instr->opname());
   }
 
@@ -45,7 +51,6 @@ struct AbstractCall {
   size_t nargs{0};
   DeoptBase* instr{nullptr};
   Register* target{nullptr};
-  PyTypeObject* speculated_receiver_type{nullptr};
 };
 
 void dlogAndCollectFailureStats(
@@ -344,7 +349,6 @@ void tryEliminateBeginEnd(EndInlinedFunction* end) {
 } // namespace
 
 void InlineFunctionCalls::Run(Function& irfunc) {
-  fprintf(stderr, "INLINER_ENTRY: func=%s\n", irfunc.fullname.c_str());
   if (irfunc.code == nullptr) {
     // In tests, irfunc may not have bytecode.
     return;
@@ -412,17 +416,18 @@ void InlineFunctionCalls::Run(Function& irfunc) {
         auto call = static_cast<InvokeStaticFunction*>(&instr);
         to_inline.emplace_back(call->func(), call->NumArgs() - 1, call);
       } else if (instr.IsCallMethod()) {
-        // Speculative inlining: check IC type feedback for monomorphic sites
-        auto call = static_cast<CallMethod*>(&instr);
-        Register* func_reg = call->func();
+        // Speculative inlining for method calls: check IC type feedback
+        // for monomorphic call sites.
+        auto* cm = static_cast<CallMethod*>(&instr);
+        Register* func_reg = cm->func();
         Instr* def = func_reg->instr();
         if (def != nullptr && def->opcode() == Opcode::kLoadMethodCached) {
           auto* fs = def->asDeoptBase()->frameState();
           if (fs != nullptr) {
             BorrowedRef<PyCodeObject> code = fs->code;
             int bc_off = def->bytecodeOffset().value();
-            auto* ic = getContext()->allocateLoadMethodCache(code, bc_off);
-            // Check monomorphism: exactly one non-NULL type entry
+            auto* ic = jit::getContext()->allocateLoadMethodCache(code, bc_off);
+            // Check for monomorphic type in IC entries
             PyTypeObject* mono_type = nullptr;
             bool is_monomorphic = false;
             for (const auto& entry : ic->entries()) {
@@ -437,15 +442,16 @@ void InlineFunctionCalls::Run(Function& irfunc) {
               }
             }
             if (is_monomorphic && mono_type != nullptr) {
-              // Look up the method on the speculated type
-              PyObject* method = _PyType_Lookup(mono_type, call->arg(0)->name().c_str() ? nullptr : nullptr);
-              // TODO: need method name from LoadMethodCached, not available here
-              // For now, use the IC value directly if it is a function
-              auto& first_entry = ic->entries()[0];
-              if (first_entry.value != nullptr && PyFunction_Check(first_entry.value)) {
-                BorrowedRef<PyFunctionObject> callee{first_entry.value};
-                LOG_INLINER("Speculative inline: monomorphic CallMethod via IC type {}", mono_type->tp_name);
-                to_inline.emplace_back(callee, call->NumArgs(), call, func_reg, mono_type);
+              // Get the resolved function from the IC entry
+              for (const auto& entry : ic->entries()) {
+                if (entry.value != nullptr && PyFunction_Check(entry.value)) {
+                  BorrowedRef<PyFunctionObject> callee{entry.value};
+                  LOG_INLINER(
+                      "Speculative inline: monomorphic CallMethod via IC type {}",
+                      mono_type->tp_name);
+                  to_inline.emplace_back(callee, cm->NumArgs() + 1, cm, func_reg);  // +1 for self
+                  break;
+                }
               }
             }
           }
@@ -477,18 +483,56 @@ void InlineFunctionCalls::Run(Function& irfunc) {
     }
     cost = new_cost;
 
-    // Step 4: Insert GuardType for speculative inlining (CallMethod with IC feedback)
-    if (call.speculated_receiver_type != nullptr && call.instr->IsCallMethod()) {
-      auto* cm = static_cast<CallMethod*>(call.instr);
-      Register* receiver = cm->self();
-      auto& env = irfunc.env;
-      Register* guarded = env.AllocateRegister();
-      Type guard_type = Type::fromTypeExact(call.speculated_receiver_type);
-      // Use create factory method from Operands<1>
-      auto* guard = GuardType::create(guarded, guard_type, receiver, *call.instr->frameState());
-      // Insert guard before the CallMethod instruction
-      call.instr->InsertBefore(*guard);
-      LOG_INLINER("Inserted GuardType for speculative inline, type={}", call.speculated_receiver_type->tp_name);
+    // For speculative IC-based inlining, insert GuardType on the receiver
+    // to deopt if the speculated type doesn't match at runtime.
+    if (call.target != nullptr) {
+      Register* receiver = nullptr;
+      bool is_speculative = false;
+
+      if (call.instr->IsVectorCall() && !call.target->isA(TFunc)) {
+        // VectorCall with non-TFunc target (IC-resolved)
+        auto* vc = static_cast<VectorCall*>(call.instr);
+        if (vc->numArgs() > 0) {
+          receiver = vc->arg(0);
+          is_speculative = true;
+        }
+      } else if (call.instr->IsCallMethod()) {
+        // CallMethod with IC-resolved function
+        auto* cm = static_cast<CallMethod*>(call.instr);
+        receiver = cm->self();
+        is_speculative = true;
+      }
+
+      if (is_speculative && receiver != nullptr) {
+        // Look up the monomorphic type from the IC
+        Instr* def = call.target->instr();
+        if (def != nullptr && def->opcode() == Opcode::kLoadMethodCached) {
+          auto* fs = def->asDeoptBase()->frameState();
+          if (fs != nullptr) {
+            BorrowedRef<PyCodeObject> code = fs->code;
+            int bc_off = def->bytecodeOffset().value();
+            auto* ic = jit::getContext()->allocateLoadMethodCache(code, bc_off);
+            PyTypeObject* mono_type = nullptr;
+            for (const auto& entry : ic->entries()) {
+              if (entry.type != nullptr) {
+                mono_type = entry.type;
+                break;
+              }
+            }
+            if (mono_type != nullptr) {
+              auto& env = irfunc.env;
+              Register* guarded = env.AllocateRegister();
+              Type guard_type = Type::fromTypeExact(mono_type);
+              auto* guard = GuardType::create(
+                  guarded, guard_type, receiver, *call.instr->frameState());
+              guard->InsertBefore(*call.instr);
+              LOG_INLINER(
+                  "Inserted GuardType for speculative inline, type={}",
+                  mono_type->tp_name);
+            }
+          }
+        }
+      }
     }
     inlineFunctionCall(irfunc, &call);
 

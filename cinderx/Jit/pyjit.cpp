@@ -38,6 +38,7 @@
 #include "cinderx/Jit/hir/annotation_index.h"
 #include "cinderx/Jit/hir/preload.h"
 #include "cinderx/Jit/inline_cache.h"
+#include "cinderx/Jit/bytecode.h"
 #include "cinderx/Jit/jit_flag_processor.h"
 #include "cinderx/Jit/jit_gdb_support.h"
 #include "cinderx/Jit/jit_list.h"
@@ -3297,7 +3298,20 @@ PyObject* tier1Vectorcall(
   data.tier1_invocation_count.fetch_add(1, std::memory_order_relaxed);
   if (data.tier1_invocation_count.load(std::memory_order_relaxed) >= CompiledFunctionData::kTier2ThresholdDefault &&
       data.compilation_tier == 1) {
-    func->vectorcall = compiled->vectorcallEntry();
+    // Tier 2 recompilation: clear old compiled code, recompile with warm ICs.
+    // forgetCode clears compiled_codes_ so compileFunction will recompile.
+    // removeCompiledFunc clears compiled_funcs_ so finalizeFunc re-registers.
+    jitCtx()->forgetCode(func);
+    jitCtx()->removeCompiledFunc(func);
+    PyObject* result = forcedJitVectorcall(func_obj, stack, nargsf, kwnames);
+    // Fix up: forcedJitVectorcall recompiled as Tier 1 (default).
+    // Set tier to 2 so tier1Vectorcall is not re-installed on next lookup.
+    CompiledFunction* recompiled = jitCtx()->lookupFunc(func);
+    if (recompiled != nullptr) {
+      recompiled->mutableData().compilation_tier = 2;
+      func->vectorcall = recompiled->vectorcallEntry();
+    }
+    return result;
   }
   return compiled->vectorcallEntry()(func_obj, stack, nargsf, kwnames);
 }
@@ -3731,6 +3745,38 @@ std::vector<BorrowedRef<PyFunctionObject>> preloadFuncAndDeps(
       BorrowedRef<PyFunctionObject> target_func = obj.get();
       if (shouldPreload(target_func)) {
         worklist.push_back(target_func);
+      }
+    }
+
+    // Preload IC-resolved method targets for speculative inlining.
+    // At Tier 2 recompilation, ICs are warm and contain resolved method
+    // functions that the inliner may want to speculatively inline.
+    // At Tier 1, ICs are cold so this loop finds nothing (correct).
+    {
+      BorrowedRef<PyCodeObject> f_code{f->func_code};
+      jit::BytecodeInstructionBlock bc_block{f_code};
+      for (const auto& bc_instr : bc_block) {
+        // In 3.12+, LOAD_METHOD is merged into LOAD_ATTR with oparg & 1
+        bool is_load_method = false;
+#if PY_VERSION_HEX >= 0x030C0000
+        is_load_method = (bc_instr.opcode() == LOAD_ATTR && (bc_instr.oparg() & 1));
+#else
+        is_load_method = (bc_instr.opcode() == LOAD_METHOD);
+#endif
+        if (is_load_method) {
+          int bc_off = bc_instr.opcodeOffset().value();
+          auto* ic = jitCtx()->allocateLoadMethodCache(
+              f_code, bc_off);
+          for (const auto& entry : ic->entries()) {
+            if (entry.value != nullptr && PyFunction_Check(entry.value)) {
+              BorrowedRef<PyFunctionObject> ic_func{entry.value};
+              if (shouldPreload(ic_func)) {
+                worklist.push_back(ic_func);
+              }
+              break;
+            }
+          }
+        }
       }
     }
   }
