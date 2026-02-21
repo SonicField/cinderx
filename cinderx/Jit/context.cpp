@@ -433,6 +433,9 @@ void Context::finalizeFunc(
   // In case the function had previously been deopted.
   removeDeoptedFunc(func);
 
+  // tier1Vectorcall is safe for both varargs and non-varargs because
+  // JITRT_CallWithKeywordArgs (Option D) looks up the JIT vectorcall
+  // entry via CompiledFunction instead of using func->vectorcall.
   if (compiled.compilationTier() == 1) { func->vectorcall = ::tier1Vectorcall; } else { func->vectorcall = compiled.vectorcallEntry(); }
   if (hasFunctionEntryCache(func)) {
     void** indirect = findFunctionEntryCache(func);

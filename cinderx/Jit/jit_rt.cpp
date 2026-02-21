@@ -52,6 +52,19 @@ PySendResult jitgen_am_send(PyObject* obj, PyObject* arg, PyObject** presult);
 // **args / nargsf.
 // One significant difference is we don't need to incref the args
 // in the new array.
+// Helper: get the correct JIT re-entry point for a function.
+// func->vectorcall may point to tier1Vectorcall (a C function) rather than
+// JIT code. JITRT_GET_REENTRY requires its argument to point into JIT code
+// (it subtracts JITRT_CALL_REENTRY_OFFSET to find the correct_args_entry
+// label). This helper looks up the actual JIT entry from CompiledFunction.
+static vectorcallfunc getJitReentry(PyFunctionObject* func) {
+  jit::CompiledFunction* compiled = jit::getContext()->lookupFunc(func);
+  if (compiled != nullptr) {
+    return JITRT_GET_REENTRY(compiled->vectorcallEntry());
+  }
+  return JITRT_GET_REENTRY(func->vectorcall);
+}
+
 static int JITRT_BindKeywordArgs(
     PyFunctionObject* func,
     PyObject** args,
@@ -237,7 +250,7 @@ PyObject* JITRT_CallWithKeywordArgs(
 #if PY_VERSION_HEX < 0x030C0000
     new_nargsf |= (nargsf & Ci_Py_AWAITED_CALL_MARKER);
 #endif
-    return JITRT_GET_REENTRY(func->vectorcall)(
+    return getJitReentry(func)(
         (PyObject*)func, arg_space.get(), new_nargsf, nullptr);
   }
 
@@ -297,7 +310,7 @@ JITRT_StaticCallFPReturn JITRT_CallWithIncorrectArgcountFPReturn(
 #endif
 
   return reinterpret_cast<staticvectorcallfuncfp>(
-      JITRT_GET_REENTRY(func->vectorcall))(
+      getJitReentry(func))(
       (PyObject*)func,
       arg_space.get(),
       new_nargsf,
@@ -347,7 +360,7 @@ JITRT_StaticCallReturn JITRT_CallWithIncorrectArgcount(
 #endif
 
   return reinterpret_cast<staticvectorcallfunc>(
-      JITRT_GET_REENTRY(func->vectorcall))(
+      getJitReentry(func))(
       (PyObject*)func,
       arg_space.get(),
       new_nargsf,
@@ -417,7 +430,7 @@ TRetType JITRT_CallStaticallyWithPrimitiveSignatureWorker(
     goto fail;
   }
 
-  return reinterpret_cast<TVectorcall>(JITRT_GET_REENTRY(func->vectorcall))(
+  return reinterpret_cast<TVectorcall>(getJitReentry(func))(
       (PyObject*)func, (PyObject**)arg_space.get(), nargsf, nullptr);
 
 fail:
