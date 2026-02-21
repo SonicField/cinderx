@@ -1829,10 +1829,14 @@ void HIRBuilder::translate(
         case CHECK_EXC_MATCH:
         case CLEANUP_THROW:
         case PUSH_EXC_INFO:
-          JIT_ABORT(
-              "Opcode {} ({}) should only appear in exception handlers",
+          // Graceful fallback: these opcodes appear in with-statement
+          // try/finally blocks that the builder does not handle.
+          // Throwing allows compilePreloaderImpl to catch and fall back
+          // to the interpreter instead of aborting the process.
+          throw std::runtime_error(fmt::format(
+              "Cannot compile: opcode {} ({}) in non-handler context",
               opcode,
-              opcodeName(opcode));
+              opcodeName(opcode)));
         default: {
           JIT_ABORT("Unhandled opcode {} ({})", opcode, opcodeName(opcode));
         }
