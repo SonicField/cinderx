@@ -106,26 +106,38 @@ bool isHoistableGuard(const Instr& instr) {
   return instr.IsGuardType() || instr.IsGuardIs();
 }
 
-// Check if all operands of an instruction are defined outside the loop.
-bool allOperandsOutsideLoop(
-    const Instr& instr,
+// Check if a register is defined outside the loop.
+bool isDefinedOutsideLoop(
+    Register* reg,
     const std::unordered_set<BasicBlock*>& loop_body) {
-  for (size_t i = 0; i < instr.NumOperands(); i++) {
-    Register* operand = instr.GetOperand(i);
-    if (operand == nullptr) {
-      continue;
-    }
-    Instr* def = operand->instr();
-    if (def == nullptr) {
-      continue;  // Function argument or constant — always outside loop
-    }
-    BasicBlock* def_block = def->block();
-    if (def_block != nullptr && loop_body.count(def_block) > 0) {
-      // Operand defined inside the loop — not hoistable
-      return false;
-    }
+  if (reg == nullptr) {
+    return true;
   }
-  return true;
+  Instr* def = reg->instr();
+  if (def == nullptr) {
+    return true;  // Function argument or constant — always outside loop
+  }
+  BasicBlock* def_block = def->block();
+  return def_block == nullptr || loop_body.count(def_block) == 0;
+}
+
+// Check if all uses of an instruction are defined outside the loop.
+// For DeoptBase instructions (GuardType, GuardIs), this also checks the
+// FrameState and live_regs — registers referenced by deoptimisation
+// metadata must also be defined outside the loop, otherwise deopt after
+// hoisting would reference uninitialised values and segfault.
+bool allUsesOutsideLoop(
+    Instr& instr,
+    const std::unordered_set<BasicBlock*>& loop_body) {
+  bool all_outside = true;
+  instr.visitUses([&](Register*& reg) -> bool {
+    if (!isDefinedOutsideLoop(reg, loop_body)) {
+      all_outside = false;
+      return false;  // Stop visiting
+    }
+    return true;
+  });
+  return all_outside;
 }
 
 // Hoist loop-invariant guards from a single loop to its preheader.
@@ -147,7 +159,7 @@ int hoistInvariantGuards(LoopInfo& loop) {
       if (instr.IsPhi()) {
         continue;  // Never hoist phi nodes
       }
-      if (allOperandsOutsideLoop(instr, loop.body)) {
+      if (allUsesOutsideLoop(instr, loop.body)) {
         to_hoist.push_back(&instr);
       }
     }
