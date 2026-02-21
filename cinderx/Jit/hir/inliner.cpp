@@ -12,6 +12,8 @@
 #include "cinderx/Jit/hir/preload.h"
 #include "cinderx/Jit/inline_cache.h"
 #include "cinderx/Jit/context.h"
+#include "cinderx/Jit/type_deopt_patchers.h"
+#include "cinderx/StaticPython/strictmoduleobject.h"
 
 namespace jit::hir {
 
@@ -545,7 +547,82 @@ void InlineFunctionCalls::Run(Function& irfunc) {
         }
       }
     }
+    // Eliminate redundant LoadMethodCached for speculative inlining.
+    // The IC lookup (Py_TYPE, entries iteration, version check, 2x Py_INCREF)
+    // is redundant when the guard chain (GuardType on receiver, GuardIs on
+    // func.__code__) provides the same safety guarantees.
+    // For mutable types, add TypeAttrDeoptPatcher to detect method reassignment.
+    if (call.target != nullptr) {
+      Instr* target_def = call.target->instr();
+      if (target_def != nullptr &&
+          target_def->opcode() == Opcode::kLoadMethodCached) {
+        auto* lmc = static_cast<LoadMethodCached*>(target_def);
+        Register* receiver = target_def->GetOperand(0);
+
+        // Get the attribute name from co_names for the DeoptPatchpoint.
+        auto* fs = target_def->asDeoptBase()->frameState();
+        PyObject* attr_name = PyTuple_GetItem(fs->code->co_names, lmc->name_idx());
+
+        // For mutable types, install a TypeAttrDeoptPatcher to detect
+        // method reassignment at runtime. If Dog.speak is reassigned,
+        // the patcher fires and deopts to the interpreter.
+        PyTypeObject* mono_type = nullptr;
+        auto* ic = jit::getContext()->allocateLoadMethodCache(
+            fs->code, target_def->bytecodeOffset().value());
+        for (const auto& entry : ic->entries()) {
+          if (entry.type != nullptr) {
+            mono_type = entry.type;
+            break;
+          }
+        }
+
+        if (mono_type != nullptr &&
+            !_PyClassLoader_IsImmutable(reinterpret_cast<PyObject*>(mono_type))) {
+          PyObject* func_obj_raw = reinterpret_cast<PyObject*>(call.func.get());
+          auto* patcher = irfunc.allocateCodePatcher<TypeAttrDeoptPatcher>(
+              BorrowedRef<PyTypeObject>{mono_type},
+              BorrowedRef<PyUnicodeObject>{attr_name},
+              BorrowedRef<>{func_obj_raw});
+          auto* patchpoint = DeoptPatchpoint::create(patcher);
+          patchpoint->copyBytecodeOffset(*target_def);
+          auto cloned_fs = std::make_unique<FrameState>(*fs);
+          patchpoint->setFrameState(std::move(cloned_fs));
+          patchpoint->setGuiltyReg(receiver);
+          patchpoint->setDescr("speculative inline method guard");
+          patchpoint->InsertBefore(*target_def);
+          LOG_INLINER(
+              "Added TypeAttrDeoptPatcher for speculative inline of {}",
+              funcFullname(call.func));
+        }
+
+        // Find and replace GetSecondOutput (self extraction) before replacing
+        // LoadMethodCached. Replace with Assign from the original receiver.
+        for (auto& block : irfunc.cfg.blocks) {
+          for (auto it = block.begin(); it != block.end();) {
+            auto& inst = *it;
+            ++it;
+            if (inst.IsGetSecondOutput() && inst.GetOperand(0) == call.target) {
+              auto* assign = Assign::create(inst.output(), receiver);
+              inst.ReplaceWith(*assign);
+              delete &inst;
+            }
+          }
+        }
+
+        // Replace LoadMethodCached with LoadConst of the resolved function.
+        PyObject* func_obj = reinterpret_cast<PyObject*>(call.func.get());
+        Type func_type = Type::fromObject(irfunc.env.addReference(func_obj));
+        auto* load_const = LoadConst::create(call.target, func_type);
+        target_def->ReplaceWith(*load_const);
+        delete target_def;
+        LOG_INLINER(
+            "Eliminated LoadMethodCached for speculative inline of {}",
+            funcFullname(call.func));
+      }
+    }
+
     inlineFunctionCall(irfunc, &call);
+
 
     // We need to reflow types after every inline to propagate new type
     // information from the callee.
