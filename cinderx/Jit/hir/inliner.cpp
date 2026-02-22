@@ -537,7 +537,13 @@ void InlineFunctionCalls::Run(Function& irfunc) {
               Register* guarded = env.AllocateRegister();
               Type guard_type = Type::fromTypeExact(mono_type);
               auto* guard = GuardType::create(
-                  guarded, guard_type, receiver, *call.instr->frameState());
+                  guarded, guard_type, receiver, *def->asDeoptBase()->frameState());
+              // Insert Snapshot with LoadMethodCached FrameState before the
+              // guard. refcount_insertion's snapshot resolution overwrites
+              // guard FrameStates with the dominating Snapshot's FrameState.
+              auto* snapshot = Snapshot::create(*def->asDeoptBase()->frameState());
+              snapshot->copyBytecodeOffset(*def);
+              snapshot->InsertBefore(*call.instr);
               guard->InsertBefore(*call.instr);
               LOG_INLINER(
                   "Inserted GuardType for speculative inline, type={}",
