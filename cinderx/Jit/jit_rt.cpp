@@ -2432,6 +2432,32 @@ PyObject* JITRT_InvokeIterNext(PyObject* iterator) {
   return &JITRT_IterDoneSentinel;
 }
 
+
+// JITRT_BuiltinNext: Fast-path wrapper for builtin next().
+// Routes through JITRT_InvokeIterNext which has a G1 fast path for JIT
+// generators (direct resumeEntry call, skipping tp_iternext dispatch).
+// Converts the JITRT_IterDoneSentinel return to next() semantics:
+//   - No default: raise StopIteration
+//   - With default: return default value
+PyObject* JITRT_BuiltinNext(PyObject* it, PyObject* def) {
+  PyObject* result = JITRT_InvokeIterNext(it);
+  if (result == nullptr) {
+    // Error propagation (non-StopIteration exception)
+    return nullptr;
+  }
+  if (result != &JITRT_IterDoneSentinel) {
+    // Normal yielded/returned value
+    return result;
+  }
+  // Iterator exhausted — sentinel returned.
+  // JITRT_InvokeIterNext increfs the sentinel, so release it.
+  Py_DECREF(result);
+  if (def != nullptr) {
+    return Py_NewRef(def);
+  }
+  PyErr_SetNone(PyExc_StopIteration);
+  return nullptr;
+}
 // B2: Match pending exception against type and clear if matched.
 // Dict subscript specialisation: use PyDict_GetItemWithError instead of
 // generic PyObject_GetItem for known-dict types. Avoids type dispatch

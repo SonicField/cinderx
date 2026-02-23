@@ -636,6 +636,10 @@ extern PyObject JITRT_IterDoneSentinel;
  */
 PyObject* JITRT_InvokeIterNext(PyObject* iterator);
 
+// Fast-path builtin next() wrapper. Routes through JITRT_InvokeIterNext
+// (G1 fast path for JIT generators), converts sentinel to next() semantics.
+PyObject* JITRT_BuiltinNext(PyObject* it, PyObject* def);
+
 // Return the value at the given index in a unicode dict keys' entries array.
 // Used by LOAD_ATTR_MODULE inline specialisation.
 PyObject* JITRT_LoadModuleDictEntry(PyDictKeysObject* keys, Py_ssize_t index);

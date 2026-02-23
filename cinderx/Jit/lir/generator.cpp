@@ -400,12 +400,12 @@ bool LIRGenerator::TranslateSpecializedCall(
   if (callee == cinderx::getModuleState()->builtinNext()) {
     if (hir_instr.numArgs() == 1) {
       bbb.appendCallInstruction(
-          hir_instr.output(), Ci_Builtin_Next_Core, hir_instr.arg(0), nullptr);
+          hir_instr.output(), JITRT_BuiltinNext, hir_instr.arg(0), nullptr);
       return true;
     } else if (hir_instr.numArgs() == 2) {
       bbb.appendCallInstruction(
           hir_instr.output(),
-          Ci_Builtin_Next_Core,
+          JITRT_BuiltinNext,
           hir_instr.arg(0),
           hir_instr.arg(1));
       return true;
