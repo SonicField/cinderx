@@ -205,6 +205,30 @@ PyObject* JITRT_Vectorcall(
     size_t nargsf,
     PyObject* kwnames);
 
+
+/*
+ * METH_FASTCALL wrapper functions.
+ *
+ * Bridge from CinderX register-based calling convention to _PyCFunctionFast
+ * (self, args_array, nargs). Each wrapper builds the args array on the stack
+ * from individual arguments and calls the C function directly.
+ *
+ * Used by TranslateSpecializedCall (generator.cpp) for PyCFunction builtins
+ * with METH_FASTCALL flags.
+ */
+PyObject* JITRT_FastCall0(void* ml_meth, PyObject* self);
+PyObject* JITRT_FastCall1(void* ml_meth, PyObject* self, PyObject* a0);
+PyObject* JITRT_FastCall2(
+    void* ml_meth,
+    PyObject* self,
+    PyObject* a0,
+    PyObject* a1);
+PyObject* JITRT_FastCall3(
+    void* ml_meth,
+    PyObject* self,
+    PyObject* a0,
+    PyObject* a1,
+    PyObject* a2);
 // B2: Match pending exception against type and clear if matched.
 // Returns 1 if matched (exception cleared), 0 if no match.
 PyObject* JITRT_DictGetItem(PyObject* dict, PyObject* key);

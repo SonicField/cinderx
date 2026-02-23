@@ -1091,6 +1091,41 @@ PyObject* JITRT_Vectorcall(
   return res;
 }
 
+// JITRT_FastCall wrappers for METH_FASTCALL C extension methods.
+// These bridge CinderX register-based calling convention to _PyCFunctionFast
+// which expects a contiguous args array. Used by TranslateSpecializedCall.
+
+PyObject* JITRT_FastCall0(void* ml_meth, PyObject* self) {
+  auto cfunc = reinterpret_cast<_PyCFunctionFast>(ml_meth);
+  return cfunc(self, nullptr, 0);
+}
+
+PyObject* JITRT_FastCall1(void* ml_meth, PyObject* self, PyObject* a0) {
+  auto cfunc = reinterpret_cast<_PyCFunctionFast>(ml_meth);
+  PyObject* args[1] = {a0};
+  return cfunc(self, args, 1);
+}
+
+PyObject* JITRT_FastCall2(
+    void* ml_meth,
+    PyObject* self,
+    PyObject* a0,
+    PyObject* a1) {
+  auto cfunc = reinterpret_cast<_PyCFunctionFast>(ml_meth);
+  PyObject* args[2] = {a0, a1};
+  return cfunc(self, args, 2);
+}
+
+PyObject* JITRT_FastCall3(
+    void* ml_meth,
+    PyObject* self,
+    PyObject* a0,
+    PyObject* a1,
+    PyObject* a2) {
+  auto cfunc = reinterpret_cast<_PyCFunctionFast>(ml_meth);
+  PyObject* args[3] = {a0, a1, a2};
+  return cfunc(self, args, 3);
+}
 PyObject* JITRT_UnaryNot(PyObject* value) {
   int res = PyObject_IsTrue(value);
   if (res == 0) {
