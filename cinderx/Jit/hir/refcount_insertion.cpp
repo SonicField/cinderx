@@ -1217,13 +1217,22 @@ void bindGuards(Function& irfunc) {
       } else if (
           instr.IsGuard() || instr.IsGuardIs() || instr.IsGuardType() ||
           instr.IsDeopt() || instr.IsDeoptPatchpoint()) {
-        JIT_DCHECK(
-            fs != nullptr,
-            "No dominating snapshot for '{}' in function:\n{}",
-            instr,
-            irfunc);
         auto& guard = static_cast<DeoptBase&>(instr);
-        guard.setFrameState(*fs);
+        // D83502082: If the guard already carries its own FrameState
+        // (e.g. from builder.cpp tc.emit<GuardType>(..., tc.frame)),
+        // prefer that over the dominating Snapshot's FrameState.
+        // This prevents crashes when a GuardType appears after a
+        // non-replayable instruction without an intervening Snapshot.
+        if (guard.frameState() != nullptr) {
+          fs = guard.frameState();
+        } else {
+          JIT_DCHECK(
+              fs != nullptr,
+              "No dominating snapshot for '{}' in function:\n{}",
+              instr,
+              irfunc);
+          guard.setFrameState(*fs);
+        }
       } else if (!instr.isReplayable()) {
         fs = nullptr;
       }

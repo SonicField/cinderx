@@ -2380,6 +2380,8 @@ void HIRBuilder::emitBinaryOp(
   int oparg = bc_instr.oparg();
 
   if (getConfig().specialized_opcodes) {
+    // Bug 6 fix: ensure dominating Snapshot for specialised-opcode GuardType
+    tc.emitSnapshot();
     switch (bc_instr.specializedOpcode()) {
       case BINARY_OP_ADD_INT:
       case BINARY_OP_MULTIPLY_INT:
@@ -2998,6 +3000,8 @@ void HIRBuilder::emitCompareOp(
   CompareOp op = static_cast<CompareOp>(compare_op);
 
   if (getConfig().specialized_opcodes) {
+    // Bug 6 fix: ensure dominating Snapshot for specialised-opcode GuardType
+    tc.emitSnapshot();
     switch (bc_instr.specializedOpcode()) {
       case COMPARE_OP_FLOAT:
         tc.emit<GuardType>(left, TFloatExact, left, tc.frame);
@@ -3176,6 +3180,8 @@ void HIRBuilder::emitLoadAttr(
   Register* receiver = tc.frame.stack.pop();
 
   if (getConfig().specialized_opcodes) {
+    // Bug 6 fix: ensure dominating Snapshot for specialised-opcode GuardType
+    tc.emitSnapshot();
     switch (bc_instr.specializedOpcode()) {
       case LOAD_ATTR_MODULE: {
         // Guard receiver is a module
@@ -4424,6 +4430,8 @@ void HIRBuilder::emitStoreSubscr(
 
   if (getConfig().specialized_opcodes &&
       bc_instr.specializedOpcode() == STORE_SUBSCR_DICT) {
+    // Bug 6 fix: ensure a Snapshot dominates specialised-opcode GuardType
+    tc.emitSnapshot();
     tc.emit<GuardType>(container, TDictExact, container, tc.frame);
   }
 
@@ -4441,6 +4449,8 @@ void HIRBuilder::emitGetIter(
   // the loop body. This enables the Simplify pass to replace generic
   // InvokeIterNext with CallStatic(JITRT_InvokeIterNext).
   if (getConfig().specialized_opcodes) {
+    // Bug 6 fix: ensure dominating Snapshot for specialised-opcode GuardType
+    tc.emitSnapshot();
     auto next_instr = bc_instr.nextInstr();
     auto next_opcode = next_instr.specializedOpcode();
     if (next_opcode == FOR_ITER_RANGE &&
@@ -4562,6 +4572,8 @@ void HIRBuilder::emitUnpackSequence(
   Register* seq = stack.top();
 
   if (getConfig().specialized_opcodes) {
+    // Bug 6 fix: ensure dominating Snapshot for specialised-opcode GuardType
+    tc.emitSnapshot();
     switch (bc_instr.specializedOpcode()) {
       case UNPACK_SEQUENCE_LIST:
         tc.emit<GuardType>(seq, TListExact, seq, tc.frame);
