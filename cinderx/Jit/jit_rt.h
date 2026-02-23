@@ -611,3 +611,7 @@ extern PyObject JITRT_IterDoneSentinel;
  * Returns the next value, or JITRT_IterDoneSentinel if the iterator is done.
  */
 PyObject* JITRT_InvokeIterNext(PyObject* iterator);
+
+// Return the value at the given index in a unicode dict keys' entries array.
+// Used by LOAD_ATTR_MODULE inline specialisation.
+PyObject* JITRT_LoadModuleDictEntry(PyDictKeysObject* keys, Py_ssize_t index);

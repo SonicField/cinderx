@@ -2,6 +2,8 @@
 
 #include "cinderx/Jit/jit_rt.h"
 
+#include "cinderx/Common/dict.h"
+
 #include "internal/pycore_call.h"
 #include "internal/pycore_ceval.h"
 #include "internal/pycore_object.h"
@@ -2423,4 +2425,11 @@ int JITRT_MatchAndClearException(PyObject* exc_type) {
   // to enter exception_unwind with this exception still pending.
   PyErr_SetRaisedException(exc);
   return 0;
+}
+
+PyObject* JITRT_LoadModuleDictEntry(
+    PyDictKeysObject* keys,
+    Py_ssize_t index) {
+  PyDictUnicodeEntry* ep = DK_UNICODE_ENTRIES(keys) + index;
+  return Py_XNewRef(ep->me_value);
 }

@@ -14,6 +14,7 @@
 #endif
 
 #include "cinderx/Common/code.h"
+#include "cinderx/Common/dict.h"
 #include "cinderx/Common/py-portability.h"
 #include "cinderx/Common/ref.h"
 #include "cinderx/Interpreter/cinder_opcode.h"
@@ -3177,8 +3178,72 @@ void HIRBuilder::emitLoadAttr(
   if (getConfig().specialized_opcodes) {
     switch (bc_instr.specializedOpcode()) {
       case LOAD_ATTR_MODULE: {
-        Type type = Type::fromTypeExact(&PyModule_Type);
-        tc.emit<GuardType>(receiver, type, receiver, tc.frame);
+        // Guard receiver is a module
+        Type mod_type = Type::fromTypeExact(&PyModule_Type);
+        tc.emit<GuardType>(receiver, mod_type, receiver, tc.frame);
+
+        // Read dict_version and index from CPython's inline cache
+        _Py_CODEUNIT* code_units = codeUnit(code_);
+        int instr_idx = bc_instr.opcodeIndex().value();
+        const _PyAttrCache* cache =
+            reinterpret_cast<const _PyAttrCache*>(
+                &code_units[instr_idx + 1]);
+        uint32_t dict_version = cache->version[0] |
+            (static_cast<uint32_t>(cache->version[1]) << 16);
+        uint16_t index = cache->index;
+
+        if (dict_version != 0) {
+          // Inline dict access: module->md_dict->ma_keys->dk_version
+          Register* dict = temps_.AllocateStack();
+          tc.emit<LoadField>(
+              dict, receiver, "md_dict",
+              offsetof(PyModuleObject, md_dict), TObject);
+
+          Register* keys = temps_.AllocateStack();
+          tc.emit<LoadField>(
+              keys, dict, "ma_keys",
+              offsetof(PyDictObject, ma_keys), TCPtr);
+
+          Register* loaded_version = temps_.AllocateStack();
+          tc.emit<LoadField>(
+              loaded_version, keys, "dk_version",
+              offsetof(PyDictKeysObject, dk_version), TCUInt32);
+
+          Register* expected_version = temps_.AllocateStack();
+          tc.emit<LoadConst>(
+              expected_version,
+              Type::fromCUInt(dict_version, TCUInt32));
+
+          Register* version_match = temps_.AllocateStack();
+          tc.emit<PrimitiveCompare>(
+              version_match, PrimitiveCompareOp::kEqual,
+              loaded_version, expected_version);
+          tc.emit<Guard>(version_match, tc.frame);
+
+          // Load entry value via helper (computes DK_UNICODE_ENTRIES)
+          Register* index_reg = temps_.AllocateStack();
+          tc.emit<LoadConst>(
+              index_reg,
+              Type::fromCInt(static_cast<int64_t>(index), TCInt64));
+
+          Register* result = temps_.AllocateStack();
+          auto call = tc.emit<CallStatic>(
+              2, result,
+              reinterpret_cast<void*>(JITRT_LoadModuleDictEntry),
+              TOptObject);
+          call->SetOperand(0, keys);
+          call->SetOperand(1, index_reg);
+
+          // Deopt if value is NULL (attribute deleted)
+          BorrowedRef<> attr_name =
+              PyTuple_GET_ITEM(code_->co_names, name_idx);
+          auto cf = tc.emit<CheckField>(
+              result, result, attr_name, tc.frame);
+          cf->setGuiltyReg(receiver);
+
+          tc.frame.stack.push(result);
+          return;
+        }
         break;
       }
       case LOAD_ATTR_SLOT:
