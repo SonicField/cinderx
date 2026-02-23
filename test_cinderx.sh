@@ -22,7 +22,7 @@
 #   torch        8 PyTorch P0 smoke tests
 #   benchmarks   Benchmark-based correctness tests (5 benchmarks)
 #   bugs         Bug 1 + Bug 4 regression tests
-#   specialisation  5 adaptive specialisation correctness tests
+#   specialisation  7 adaptive specialisation correctness tests
 #   all          Everything above
 #
 # Multiple suites can be combined:
@@ -1148,6 +1148,8 @@ SPECIALISATION_TESTS=(
     "test_store_attr_instance_value.py:STORE_ATTR_INSTANCE_VALUE correctness"
     "test_for_iter_list_mutation.py:FOR_ITER list mutation deopt"
     "test_for_iter_polymorphic_deopt.py:FOR_ITER polymorphic deopt"
+    "test_binary_subscr_deopt.py:BINARY_SUBSCR polymorphic deopt"
+    "test_binary_subscr_correctness.py:BINARY_SUBSCR correctness"
 )
 
 run_specialisation() {
