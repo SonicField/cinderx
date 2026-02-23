@@ -2,3 +2,16 @@ scratch
 cinderx.egg-info
 dist
 
+# Python bytecode cache
+__pycache__/
+*.pyc
+
+# Testing / development artefacts
+.hypothesis/
+venv/
+.dev_build
+
+# Backup files
+*.bak
+*.backup
+*.so.bak
