@@ -2372,6 +2372,10 @@ void HIRBuilder::emitBinaryOp(
     TranslationContext& tc,
     const jit::BytecodeInstruction& bc_instr) {
   auto& stack = tc.frame.stack;
+  if (getConfig().specialized_opcodes) {
+    // Bug 7 fix: Snapshot BEFORE popping operands — deopt re-executes instruction
+    tc.emitSnapshot();
+  }
   Register* right = stack.pop();
   Register* left = stack.pop();
   Register* result = temps_.AllocateStack();
@@ -2380,35 +2384,33 @@ void HIRBuilder::emitBinaryOp(
   int oparg = bc_instr.oparg();
 
   if (getConfig().specialized_opcodes) {
-    // Bug 6 fix: ensure dominating Snapshot for specialised-opcode GuardType
-    tc.emitSnapshot();
     switch (bc_instr.specializedOpcode()) {
       case BINARY_OP_ADD_INT:
       case BINARY_OP_MULTIPLY_INT:
       case BINARY_OP_SUBTRACT_INT:
-        tc.emit<GuardType>(left, TLongExact, left, tc.frame);
-        tc.emit<GuardType>(right, TLongExact, right, tc.frame);
+        tc.emit<GuardType>(left, TLongExact, left);
+        tc.emit<GuardType>(right, TLongExact, right);
         break;
       case BINARY_OP_ADD_FLOAT:
       case BINARY_OP_MULTIPLY_FLOAT:
       case BINARY_OP_SUBTRACT_FLOAT:
-        tc.emit<GuardType>(left, TFloatExact, left, tc.frame);
-        tc.emit<GuardType>(right, TFloatExact, right, tc.frame);
+        tc.emit<GuardType>(left, TFloatExact, left);
+        tc.emit<GuardType>(right, TFloatExact, right);
         break;
       case BINARY_OP_ADD_UNICODE:
-        tc.emit<GuardType>(left, TUnicodeExact, left, tc.frame);
-        tc.emit<GuardType>(right, TUnicodeExact, right, tc.frame);
+        tc.emit<GuardType>(left, TUnicodeExact, left);
+        tc.emit<GuardType>(right, TUnicodeExact, right);
         break;
       case BINARY_SUBSCR_DICT:
-        tc.emit<GuardType>(left, TDictExact, left, tc.frame);
+        tc.emit<GuardType>(left, TDictExact, left);
         break;
       case BINARY_SUBSCR_LIST_INT:
-        tc.emit<GuardType>(left, TListExact, left, tc.frame);
-        tc.emit<GuardType>(right, TLongExact, right, tc.frame);
+        tc.emit<GuardType>(left, TListExact, left);
+        tc.emit<GuardType>(right, TLongExact, right);
         break;
       case BINARY_SUBSCR_TUPLE_INT:
-        tc.emit<GuardType>(left, TTupleExact, left, tc.frame);
-        tc.emit<GuardType>(right, TLongExact, right, tc.frame);
+        tc.emit<GuardType>(left, TTupleExact, left);
+        tc.emit<GuardType>(right, TLongExact, right);
         break;
       default:
         break;
@@ -2994,26 +2996,28 @@ void HIRBuilder::emitCompareOp(
   JIT_CHECK(compare_op >= Py_LT, "Invalid op {}", compare_op);
   JIT_CHECK(compare_op <= Py_GE, "Invalid op {}", compare_op);
   auto& stack = tc.frame.stack;
+  if (getConfig().specialized_opcodes) {
+    // Bug 7 fix: Snapshot BEFORE popping operands — deopt re-executes instruction
+    tc.emitSnapshot();
+  }
   Register* right = stack.pop();
   Register* left = stack.pop();
   Register* result = temps_.AllocateStack();
   CompareOp op = static_cast<CompareOp>(compare_op);
 
   if (getConfig().specialized_opcodes) {
-    // Bug 6 fix: ensure dominating Snapshot for specialised-opcode GuardType
-    tc.emitSnapshot();
     switch (bc_instr.specializedOpcode()) {
       case COMPARE_OP_FLOAT:
-        tc.emit<GuardType>(left, TFloatExact, left, tc.frame);
-        tc.emit<GuardType>(right, TFloatExact, right, tc.frame);
+        tc.emit<GuardType>(left, TFloatExact, left);
+        tc.emit<GuardType>(right, TFloatExact, right);
         break;
       case COMPARE_OP_INT:
-        tc.emit<GuardType>(left, TLongExact, left, tc.frame);
-        tc.emit<GuardType>(right, TLongExact, right, tc.frame);
+        tc.emit<GuardType>(left, TLongExact, left);
+        tc.emit<GuardType>(right, TLongExact, right);
         break;
       case COMPARE_OP_STR:
-        tc.emit<GuardType>(left, TUnicodeExact, left, tc.frame);
-        tc.emit<GuardType>(right, TUnicodeExact, right, tc.frame);
+        tc.emit<GuardType>(left, TUnicodeExact, left);
+        tc.emit<GuardType>(right, TUnicodeExact, right);
         break;
       default:
         break;
@@ -3177,16 +3181,18 @@ void HIRBuilder::emitLoadAttr(
     }
   }
 
+  if (getConfig().specialized_opcodes) {
+    // Bug 7 fix: Snapshot BEFORE popping operands — deopt re-executes instruction
+    tc.emitSnapshot();
+  }
   Register* receiver = tc.frame.stack.pop();
 
   if (getConfig().specialized_opcodes) {
-    // Bug 6 fix: ensure dominating Snapshot for specialised-opcode GuardType
-    tc.emitSnapshot();
     switch (bc_instr.specializedOpcode()) {
       case LOAD_ATTR_MODULE: {
         // Guard receiver is a module
         Type mod_type = Type::fromTypeExact(&PyModule_Type);
-        tc.emit<GuardType>(receiver, mod_type, receiver, tc.frame);
+        tc.emit<GuardType>(receiver, mod_type, receiver);
 
         // Read dict_version and index from CPython's inline cache
         _Py_CODEUNIT* code_units = codeUnit(code_);
@@ -3269,7 +3275,7 @@ void HIRBuilder::emitLoadAttr(
         PyTypeObject* slot_type = findTypeByVersionTag(type_version);
         if (slot_type != nullptr) {
           Type type = Type::fromTypeExact(slot_type);
-          tc.emit<GuardType>(receiver, type, receiver, tc.frame);
+          tc.emit<GuardType>(receiver, type, receiver);
         }
         break;
       }
@@ -4424,15 +4430,17 @@ void HIRBuilder::emitStoreSubscr(
     TranslationContext& tc,
     const jit::BytecodeInstruction& bc_instr) {
   auto& stack = tc.frame.stack;
+  if (getConfig().specialized_opcodes) {
+    // Bug 7 fix: Snapshot BEFORE popping operands — deopt re-executes instruction
+    tc.emitSnapshot();
+  }
   Register* sub = stack.pop();
   Register* container = stack.pop();
   Register* value = stack.pop();
 
   if (getConfig().specialized_opcodes &&
       bc_instr.specializedOpcode() == STORE_SUBSCR_DICT) {
-    // Bug 6 fix: ensure a Snapshot dominates specialised-opcode GuardType
-    tc.emitSnapshot();
-    tc.emit<GuardType>(container, TDictExact, container, tc.frame);
+    tc.emit<GuardType>(container, TDictExact, container);
   }
 
   tc.emit<StoreSubscr>(container, sub, value, tc.frame);
@@ -4449,7 +4457,16 @@ void HIRBuilder::emitGetIter(
   // the loop body. This enables the Simplify pass to replace generic
   // InvokeIterNext with CallStatic(JITRT_InvokeIterNext).
   if (getConfig().specialized_opcodes) {
-    // Bug 6 fix: ensure dominating Snapshot for specialised-opcode GuardType
+    // Bug 7 fix: The Snapshot/GuardType FrameState must reflect the
+    // interpreter state AT FOR_ITER (not GET_ITER), because:
+    // - GET_ITER already executed successfully (we have a valid iterator)
+    // - If the type guard fails, the interpreter should resume at FOR_ITER
+    //   with the iterator on the stack (FOR_ITER handles any iterator type)
+    // - The old code had cur_instr_offs=GET_ITER with iterable popped,
+    //   causing the interpreter to re-execute GET_ITER with garbage stack.
+    tc.frame.stack.push(result);  // iterator must be on stack for FOR_ITER
+    auto saved_offs = tc.frame.cur_instr_offs;
+    tc.frame.cur_instr_offs = bc_instr.nextInstr().baseOffset();  // FOR_ITER
     tc.emitSnapshot();
     auto next_instr = bc_instr.nextInstr();
     auto next_opcode = next_instr.specializedOpcode();
@@ -4469,8 +4486,11 @@ void HIRBuilder::emitGetIter(
           Type::fromTypeExact(jit::g_tuple_iterator_type);
       tc.emit<GuardType>(result, tuple_iter_type, result, tc.frame);
     }
+    tc.frame.cur_instr_offs = saved_offs;  // restore for subsequent processing
+    // result already pushed above - do NOT push again
+  } else {
+    tc.frame.stack.push(result);
   }
-  tc.frame.stack.push(result);
   if constexpr (PY_VERSION_HEX >= 0x030F0000) {
     // TASK(T243355471): We should support virtual indexing
     emitPushNull(tc);
@@ -5648,3 +5668,4 @@ void HIRBuilder::checkTranslate() {
 }
 
 } // namespace jit::hir
+
