@@ -4318,29 +4318,6 @@ void HIRBuilder::emitStoreAttr(
   Register* receiver = tc.frame.stack.pop();
   Register* value = tc.frame.stack.pop();
 
-  if (getConfig().specialized_opcodes) {
-    switch (bc_instr.specializedOpcode()) {
-      case STORE_ATTR_INSTANCE_VALUE:
-      case STORE_ATTR_SLOT: {
-        _Py_CODEUNIT* code_units = codeUnit(code_);
-        int instr_idx = bc_instr.opcodeIndex().value();
-        const _PyAttrCache* cache =
-            reinterpret_cast<const _PyAttrCache*>(&code_units[instr_idx + 1]);
-        uint32_t type_version =
-            cache->version[0] |
-            (static_cast<uint32_t>(cache->version[1]) << 16);
-        PyTypeObject* attr_type = findTypeByVersionTag(type_version);
-        if (attr_type != nullptr) {
-          Type type = Type::fromTypeExact(attr_type);
-          tc.emit<GuardType>(receiver, type, receiver, tc.frame);
-        }
-        break;
-      }
-      default:
-        break;
-    }
-  }
-
   tc.emit<StoreAttr>(receiver, value, bc_instr.oparg(), tc.frame);
 }
 
