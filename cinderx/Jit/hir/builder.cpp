@@ -19,6 +19,7 @@
 #include "cinderx/Interpreter/cinder_opcode.h"
 #include "cinderx/Jit/containers.h"
 #include "cinderx/Jit/context.h"
+#include "cinderx/Jit/iterator_types.h"
 #include "cinderx/Jit/hir/annotation_index.h"
 #include "cinderx/Jit/hir/ssa.h"
 #include "cinderx/Jit/hir/type.h"
@@ -1555,7 +1556,7 @@ void HIRBuilder::translate(
           break;
         }
         case GET_ITER: {
-          emitGetIter(tc);
+          emitGetIter(tc, bc_instr);
           break;
         }
         case GET_YIELD_FROM_ITER: {
@@ -3180,7 +3181,8 @@ void HIRBuilder::emitLoadAttr(
         tc.emit<GuardType>(receiver, type, receiver, tc.frame);
         break;
       }
-      case LOAD_ATTR_SLOT: {
+      case LOAD_ATTR_SLOT:
+      case LOAD_ATTR_INSTANCE_VALUE: {
         // Read the type version from CPython's inline cache.
         // The cache follows the instruction word in the bytecode array.
         // Layout: _PyAttrCache { counter, version[2], index }
@@ -4250,6 +4252,30 @@ void HIRBuilder::emitStoreAttr(
     const jit::BytecodeInstruction& bc_instr) {
   Register* receiver = tc.frame.stack.pop();
   Register* value = tc.frame.stack.pop();
+
+  if (getConfig().specialized_opcodes) {
+    switch (bc_instr.specializedOpcode()) {
+      case STORE_ATTR_INSTANCE_VALUE:
+      case STORE_ATTR_SLOT: {
+        _Py_CODEUNIT* code_units = codeUnit(code_);
+        int instr_idx = bc_instr.opcodeIndex().value();
+        const _PyAttrCache* cache =
+            reinterpret_cast<const _PyAttrCache*>(&code_units[instr_idx + 1]);
+        uint32_t type_version =
+            cache->version[0] |
+            (static_cast<uint32_t>(cache->version[1]) << 16);
+        PyTypeObject* attr_type = findTypeByVersionTag(type_version);
+        if (attr_type != nullptr) {
+          Type type = Type::fromTypeExact(attr_type);
+          tc.emit<GuardType>(receiver, type, receiver, tc.frame);
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
   tc.emit<StoreAttr>(receiver, value, bc_instr.oparg(), tc.frame);
 }
 
@@ -4362,10 +4388,36 @@ void HIRBuilder::emitStoreSubscr(
   tc.emit<StoreSubscr>(container, sub, value, tc.frame);
 }
 
-void HIRBuilder::emitGetIter(TranslationContext& tc) {
+void HIRBuilder::emitGetIter(
+    TranslationContext& tc,
+    const jit::BytecodeInstruction& bc_instr) {
   Register* iterable = tc.frame.stack.pop();
   Register* result = temps_.AllocateStack();
   tc.emit<GetIter>(result, iterable, tc.frame);
+  // FOR_ITER specialisation: if the next instruction is a specialised FOR_ITER,
+  // guard the iterator type here (once, before the loop) rather than inside
+  // the loop body. This enables the Simplify pass to replace generic
+  // InvokeIterNext with CallStatic(JITRT_InvokeIterNext).
+  if (getConfig().specialized_opcodes) {
+    auto next_instr = bc_instr.nextInstr();
+    auto next_opcode = next_instr.specializedOpcode();
+    if (next_opcode == FOR_ITER_RANGE &&
+        jit::g_range_iterator_type != nullptr) {
+      Type range_iter_type =
+          Type::fromTypeExact(jit::g_range_iterator_type);
+      tc.emit<GuardType>(result, range_iter_type, result, tc.frame);
+    } else if (next_opcode == FOR_ITER_LIST &&
+               jit::g_list_iterator_type != nullptr) {
+      Type list_iter_type =
+          Type::fromTypeExact(jit::g_list_iterator_type);
+      tc.emit<GuardType>(result, list_iter_type, result, tc.frame);
+    } else if (next_opcode == FOR_ITER_TUPLE &&
+               jit::g_tuple_iterator_type != nullptr) {
+      Type tuple_iter_type =
+          Type::fromTypeExact(jit::g_tuple_iterator_type);
+      tc.emit<GuardType>(result, tuple_iter_type, result, tc.frame);
+    }
+  }
   tc.frame.stack.push(result);
   if constexpr (PY_VERSION_HEX >= 0x030F0000) {
     // TASK(T243355471): We should support virtual indexing

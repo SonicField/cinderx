@@ -89,11 +89,17 @@ int BytecodeInstruction::specializedOpcode() const {
     case COMPARE_OP_INT:
     case COMPARE_OP_STR:
     case LOAD_ATTR_MODULE:
+    case LOAD_ATTR_INSTANCE_VALUE:
+    case STORE_ATTR_INSTANCE_VALUE:
+    case STORE_ATTR_SLOT:
     case LOAD_ATTR_SLOT:
     case STORE_SUBSCR_DICT:
     case UNPACK_SEQUENCE_LIST:
     case UNPACK_SEQUENCE_TUPLE:
     case UNPACK_SEQUENCE_TWO_TUPLE:
+    case FOR_ITER_RANGE:
+    case FOR_ITER_LIST:
+    case FOR_ITER_TUPLE:
       return opcode;
     default:
       return unspecialize(opcode);

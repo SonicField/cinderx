@@ -2102,8 +2102,12 @@ Register* simplifyInstr(Env& env, const Instr* instr) {
       Register* iterator = instr->GetOperand(0);
       PyTypeObject* iter_type = iterator->type().runtimePyType();
       if (iter_type != nullptr &&
-          jit::g_range_iterator_type != nullptr &&
-          iter_type == jit::g_range_iterator_type) {
+          ((jit::g_range_iterator_type != nullptr &&
+            iter_type == jit::g_range_iterator_type) ||
+           (jit::g_list_iterator_type != nullptr &&
+            iter_type == jit::g_list_iterator_type) ||
+           (jit::g_tuple_iterator_type != nullptr &&
+            iter_type == jit::g_tuple_iterator_type))) {
         // Known non-generator iterator: use direct JITRT_InvokeIterNext
         // which still handles sentinel conversion but skips the JitGen check
         auto* iter_next = static_cast<const InvokeIterNext*>(instr);
@@ -2111,7 +2115,7 @@ Register* simplifyInstr(Env& env, const Instr* instr) {
             1,
             env.func.env.AllocateRegister(),
             reinterpret_cast<void*>(JITRT_InvokeIterNext),
-            TOptObject);
+            TObject);
         call->SetOperand(0, iterator);
         return call->output();
       }

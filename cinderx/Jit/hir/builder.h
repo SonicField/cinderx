@@ -273,7 +273,7 @@ class HIRBuilder {
   bool emitInvokeNative(
       TranslationContext& tc,
       const jit::BytecodeInstruction& bc_instr);
-  void emitGetIter(TranslationContext& tc);
+  void emitGetIter(TranslationContext& tc, const jit::BytecodeInstruction& bc_instr);
   void emitGetYieldFromIter(CFG& cfg, TranslationContext& tc);
   void emitListAppend(
       TranslationContext& tc,
