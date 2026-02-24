@@ -526,6 +526,10 @@ bool Context::didCompile(BorrowedRef<PyFunctionObject> func) {
   return compiled_funcs_.contains(func);
 }
 
+bool Context::isDeoptimized(BorrowedRef<PyFunctionObject> func) {
+  return deopted_funcs_.count(func) > 0;
+}
+
 CompiledFunction* Context::lookupFunc(BorrowedRef<PyFunctionObject> func) {
   return lookupCode(func->func_code, func->func_builtins, func->func_globals);
 }

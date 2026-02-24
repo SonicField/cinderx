@@ -6,6 +6,7 @@
 #include "cinderx/Common/log.h"
 #include "cinderx/Jit/disassembler.h"
 #include "cinderx/Jit/hir/printer.h"
+#include "cinderx/Jit/context_iface.h"
 #include "cinderx/module_state.h"
 
 #include <iostream>
@@ -19,9 +20,25 @@ bool isJitCompiled(const PyFunctionObject* func) {
   if (mod_state == nullptr) {
     return false;
   }
+  // Primary check: vectorcall points into JIT-allocated code.
   jit::ICodeAllocator* code_allocator = mod_state->codeAllocator();
-  return code_allocator != nullptr &&
-      code_allocator->contains(reinterpret_cast<const void*>(func->vectorcall));
+  if (code_allocator != nullptr &&
+      code_allocator->contains(reinterpret_cast<const void*>(func->vectorcall))) {
+    return true;
+  }
+
+  // Secondary check: handle tier1Vectorcall trampoline case.
+  // tier1Vectorcall is a statically-linked function, not in the code
+  // allocator, but the function IS JIT-compiled. Check the JIT context
+  // for compilation status, excluding deoptimized functions.
+  jit::IJitContext* jit_ctx = mod_state->jitContext();
+  if (jit_ctx != nullptr) {
+    auto* mutable_func = const_cast<PyFunctionObject*>(func);
+    return jit_ctx->didCompile(mutable_func)
+        && !jit_ctx->isDeoptimized(mutable_func);
+  }
+
+  return false;
 }
 
 } // extern "C"

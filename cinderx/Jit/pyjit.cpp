@@ -787,6 +787,10 @@ bool reoptFunc(BorrowedRef<PyFunctionObject> func) {
   if (jitCtx() == nullptr) {
     return false;
   } else if (jitCtx()->didCompile(func)) {
+    // Clear stale deopt entry. After deoptimization, the function stays in
+    // compiled_funcs_ but is added to deopted_funcs_. When reopting, we need
+    // to clear deopted_funcs_ so isDeoptimized() returns the correct state.
+    jitCtx()->removeDeoptedFunc(func);
     return true;
   }
 

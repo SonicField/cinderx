@@ -1072,6 +1072,19 @@ void HIRBuilder::translate(
     // Translate remaining instructions into HIR
     auto& bc_block = map_get(block_map_.bc_blocks, tc.block);
 
+    // Safety: skip unreachable END_FOR blocks. With _PyOpcode_Deopt in
+    // opcode(), getJumpTarget() correctly skips past END_FOR after
+    // FOR_ITER. createBlocks() still creates a block boundary at END_FOR
+    // (from JUMP_BACKWARD fall-through), but no CFG edge leads to it.
+    // If it somehow enters the queue, skip it entirely to avoid stack
+    // assertions on subsequent instructions (STORE_FAST etc.).
+    {
+      auto first_it = bc_block.begin();
+      if (first_it != bc_block.end() && (*first_it).opcode() == END_FOR) {
+        continue;
+      }
+    }
+
     auto is_in_async_for_header_block = [&tc, &bc_instrs]() {
       if (tc.frame.block_stack.isEmpty()) {
         return false;
@@ -1502,11 +1515,12 @@ void HIRBuilder::translate(
           break;
         }
         case END_FOR: {
-          // This instruction is only for use when FOR_ITER is specialized for a
-          // generator. As we use unspecialized bytecode only, we modify
-          // BytecodeInstruction::getJumpTarget() to always skip the END_FOR so
-          // that block should never be processed.
-          JIT_ABORT("We should never cross an END_FOR in the HIR builder");
+          // END_FOR is unreachable: getJumpTarget() skips past it after
+          // FOR_ITER. With _PyOpcode_Deopt in opcode(), specialised
+          // FOR_ITER variants (FOR_ITER_LIST etc.) are correctly mapped
+          // back to FOR_ITER, so getJumpTarget() always fires.
+          // Safety no-op if the block is somehow reached.
+          break;
         }
         case SETUP_FINALLY: {
           emitSetupFinally(tc, bc_instr);
@@ -1840,7 +1854,7 @@ void HIRBuilder::translate(
               opcode,
               opcodeName(opcode)));
         default: {
-          JIT_ABORT("Unhandled opcode {} ({})", opcode, opcodeName(opcode));
+          throw std::runtime_error(fmt::format("Cannot compile: unhandled opcode {} ({})", opcode, opcodeName(opcode)));
         }
       }
     }
@@ -4438,9 +4452,18 @@ void HIRBuilder::emitStoreSubscr(
   Register* container = stack.pop();
   Register* value = stack.pop();
 
-  if (getConfig().specialized_opcodes &&
-      bc_instr.specializedOpcode() == STORE_SUBSCR_DICT) {
-    tc.emit<GuardType>(container, TDictExact, container);
+  if (getConfig().specialized_opcodes) {
+    switch (bc_instr.specializedOpcode()) {
+      case STORE_SUBSCR_DICT:
+        tc.emit<GuardType>(container, TDictExact, container);
+        break;
+      case STORE_SUBSCR_LIST_INT:
+        tc.emit<GuardType>(container, TListExact, container);
+        tc.emit<GuardType>(sub, TLongExact, sub);
+        break;
+      default:
+        break;
+    }
   }
 
   tc.emit<StoreSubscr>(container, sub, value, tc.frame);

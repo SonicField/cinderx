@@ -204,7 +204,8 @@ class Context : public IJitContext {
   /*
    * Return whether or not this context compiled the supplied function.
    */
-  bool didCompile(BorrowedRef<PyFunctionObject> func);
+  bool didCompile(BorrowedRef<PyFunctionObject> func) override;
+  bool isDeoptimized(BorrowedRef<PyFunctionObject> func) override;
 
   /*
    * Remove the specified code object from the known compiled codes.
