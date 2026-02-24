@@ -158,8 +158,6 @@ std::vector<_PyInterpreterFrame*> getUnitFrames(_PyInterpreterFrame* frame) {
   std::vector<_PyInterpreterFrame*> frames;
   while (frame != nullptr) {
     if (!isJitFrame(frame)) {
-      // We've reached an interpreter frame before finding the non-inlined
-      // frame.
       JIT_ABORT("couldn't find non-inlined frame");
     }
     frames.emplace_back(frame);
@@ -246,6 +244,8 @@ UnitState getUnitState(_PyInterpreterFrame* frame) {
   return unit_state;
 }
 
+} // namespace (temporarily close anonymous ns to export updatePrevInstr)
+
 void updatePrevInstr(_PyInterpreterFrame* frame) {
 #ifdef ENABLE_LIGHTWEIGHT_FRAMES
   auto unit_state = getUnitState(frame);
@@ -268,6 +268,8 @@ void updatePrevInstr(_PyInterpreterFrame* frame) {
       "updatePrevInstr: Lightweight frames are not supported"};
 #endif
 }
+
+namespace { // reopen anonymous namespace
 
 #if PY_VERSION_HEX < 0x030E0000
 
@@ -460,7 +462,10 @@ _PyInterpreterFrame* convertInterpreterFrameFromStackToSlab(
   }
 
   jitFramePopulateFrame(frame);
-  updatePrevInstr(frame);
+  // updatePrevInstr is now called from prepareForDeopt before
+  // reifyLightweightFrames, while all frames still have JIT reifiers.
+  // Calling it here would crash for inlined frames because the outer
+  // frame's reifier has already been removed by earlier reification.
   jitFrameRemoveReifier(frame);
 
   memcpy(new_frame, frame, code->co_framesize * sizeof(PyObject*));

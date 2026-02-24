@@ -49,6 +49,10 @@ void jitFramePopulateFrame(_PyInterpreterFrame* frame);
 void jitFrameRemoveReifier(_PyInterpreterFrame* frame);
 
 // Turns a stack allocated interpreter frame into a slab allocated one.
+// Update prev_instr for all frames in the compilation unit.
+// Must be called while all frames in the chain still have JIT reifiers.
+void updatePrevInstr(_PyInterpreterFrame* frame);
+
 _PyInterpreterFrame* convertInterpreterFrameFromStackToSlab(
     PyThreadState* tstate,
     _PyInterpreterFrame* frame);

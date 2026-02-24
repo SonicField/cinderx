@@ -197,6 +197,13 @@ CiPyFrameObjType* prepareForDeopt(
   _PyInterpreterFrame* frame = interpFrameFromThreadState(tstate);
 
   if (getConfig().frame_mode == FrameMode::kLightweight) {
+    // Update prev_instr for all frames BEFORE reification.
+    // getUnitFrames (called by updatePrevInstr) walks frame->previous
+    // and requires isJitFrame() true for each frame. After reification,
+    // jitFrameRemoveReifier clears the reifier on outer frames, causing
+    // getUnitFrames to abort when processing inner (inlined) frames.
+    updatePrevInstr(frame);
+
     frame = reifyLightweightFrames(
         tstate, deopt_meta, deopt_meta.inline_depth(), frame);
     if (frame == nullptr) {
