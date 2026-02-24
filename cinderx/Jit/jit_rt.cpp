@@ -1416,6 +1416,26 @@ double JITRT_PowerDouble(double x, double y) {
   return pow(x, y);
 }
 
+double JITRT_ModDouble(double x, double y) {
+  // Python float modulo semantics: result has same sign as divisor.
+  // Matches CPython's float_rem in Objects/floatobject.c.
+  double mod = fmod(x, y);
+  if (mod) {
+    if ((y < 0) != (mod < 0)) {
+      mod += y;
+    }
+  } else {
+    mod = copysign(0.0, y);
+  }
+  return mod;
+}
+
+double JITRT_FloorDivideDouble(double x, double y) {
+  // Python float floor division: floor(x / y).
+  // Matches CPython's float_floor_div in Objects/floatobject.c.
+  return floor(x / y);
+}
+
 double JITRT_Power32(int32_t x, int32_t y) {
   return pow(x, y);
 }

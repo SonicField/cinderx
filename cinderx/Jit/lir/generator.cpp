@@ -1004,6 +1004,24 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
           break;
         }
 
+        if (instr->op() == BinaryOpKind::kModulo) {
+          bbb.appendCallInstruction(
+              instr->output(),
+              JITRT_ModDouble,
+              instr->left(),
+              instr->right());
+          break;
+        }
+
+        if (instr->op() == BinaryOpKind::kFloorDivide) {
+          bbb.appendCallInstruction(
+              instr->output(),
+              JITRT_FloorDivideDouble,
+              instr->left(),
+              instr->right());
+          break;
+        }
+
         auto op = Instruction::kNop;
         switch (instr->op()) {
           case BinaryOpKind::kAdd: {
