@@ -536,12 +536,21 @@ void InlineFunctionCalls::Run(Function& irfunc) {
               auto& env = irfunc.env;
               Register* guarded = env.AllocateRegister();
               Type guard_type = Type::fromTypeExact(mono_type);
+              // Construct deopt FrameState at the LOAD_METHOD bytecode
+              // offset with the receiver on the operand stack.
+              // LoadMethodCached FrameState has the correct bytecodeOffset
+              // (LOAD_METHOD) but an empty stack because emitLoadMethod()
+              // pops the receiver before emitting the instruction. Clone
+              // the FrameState and push the receiver back so that deopt
+              // re-executes LOAD_METHOD from the correct interpreter state.
+              FrameState deopt_fs(*def->asDeoptBase()->frameState());
+              deopt_fs.stack.push(receiver);
               auto* guard = GuardType::create(
-                  guarded, guard_type, receiver, *def->asDeoptBase()->frameState());
-              // Insert Snapshot with LoadMethodCached FrameState before the
-              // guard. refcount_insertion's snapshot resolution overwrites
+                  guarded, guard_type, receiver, deopt_fs);
+              // Insert Snapshot with the same corrected FrameState before
+              // the guard. refcount_insertion's snapshot resolution overwrites
               // guard FrameStates with the dominating Snapshot's FrameState.
-              auto* snapshot = Snapshot::create(*def->asDeoptBase()->frameState());
+              auto* snapshot = Snapshot::create(deopt_fs);
               snapshot->copyBytecodeOffset(*def);
               snapshot->InsertBefore(*call.instr);
               guard->InsertBefore(*call.instr);
