@@ -185,16 +185,6 @@ bool canInline(Function& caller, AbstractCall* call_instr) {
     }
   }
 
-  // Refuse to inline functions with exception handlers (try/except).
-  // The inlined frame metadata setup (BeginInlinedFunction/EndInlinedFunction)
-  // does not correctly handle exception table entries from the callee.
-  // When an exception occurs inside an inlined function with try/except,
-  // the frame walker (getUnitFrames) fails to find the non-inlined frame,
-  // crashing with "couldn't find non-inlined frame" at frame.cpp:163.
-  if (code->co_exceptiontable != nullptr &&
-      PyBytes_GET_SIZE(code->co_exceptiontable) > 0) {
-    return fail(InlineFailureType::kHasExceptionHandlers);
-  }
 
   return true;
 }

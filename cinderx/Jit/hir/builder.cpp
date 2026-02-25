@@ -907,6 +907,12 @@ BasicBlock* HIRBuilder::buildHIRImpl(
 
   BytecodeInstructionBlock bc_instrs{code_};
   block_map_ = createBlocks(*irfunc, bc_instrs);
+  if (frame_state != nullptr) {
+    // Suppress exception table for inlined callees to prevent B2
+    // (emitBinaryOp -> findExceptionHandler -> emitInlineExceptionMatch)
+    // from creating reachable handler blocks. All exceptions deopt.
+    exception_table_.clear();
+  }
 
   // Ensure that the entry block isn't a loop header
   BasicBlock* entry_block = getBlockAtOff(BCOffset{0});
