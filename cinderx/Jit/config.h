@@ -194,7 +194,9 @@ struct Config {
   // Size (in number of entries) of the LoadAttrCached and StoreAttrCached
   // inline caches used by the JIT.
   uint32_t attr_cache_size{4};
-  std::optional<uint32_t> compile_after_n_calls;
+  // Default: compile all functions on first call (JIT always on).
+  // Opt-out: PYTHONJITDISABLE=1 to disable JIT entirely.
+  std::optional<uint32_t> compile_after_n_calls{0};
   GdbOptions gdb;
   JitListOptions jit_list;
   LogOptions log;
