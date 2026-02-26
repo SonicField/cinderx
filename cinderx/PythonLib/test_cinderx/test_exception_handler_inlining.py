@@ -13,18 +13,14 @@ Callee functions MUST be at module scope (accessed via LOAD_GLOBAL) so the
 JIT preloader can find them and the inliner can inline them. Functions
 defined inside test methods are accessed via LOAD_DEREF (closure) and
 CANNOT be inlined.
-
-Usage: cd /data/users/alexturner/cinderx_dev/cinderx && \
-       source /data/users/alexturner/cinderx_dev/venv/bin/activate && \
-       PYTHONJIT=1 python3 test_exception_handler_inlining.py
 """
 import unittest
 
 try:
     import cinderjit
-    HAS_JIT = True
+    HAS_CINDERJIT = True
 except ImportError:
-    HAS_JIT = False
+    HAS_CINDERJIT = False
 
 
 # =====================================================================
@@ -130,7 +126,7 @@ def callee_b2_subscript(key):
 # Test class
 # =====================================================================
 
-@unittest.skipUnless(HAS_JIT, "requires CinderX JIT")
+@unittest.skipUnless(HAS_CINDERJIT, "requires cinderjit")
 class TestExceptionHandlerInlining(unittest.TestCase):
 
     def _force_compile_and_warm(self, caller, warm_args_list, n=1200):

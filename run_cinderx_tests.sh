@@ -61,7 +61,7 @@ fix_opcode() {
 export PYTHONPATH="$PYTHONLIB${PYTHONPATH:+:$PYTHONPATH}"
 
 # Test suite definitions
-# Category 1: JIT tests (17 suites)
+# Category 1: JIT tests (28 suites)
 JIT_TESTS=(
     test_cinderjit
     test_jit_async_generators
@@ -78,8 +78,19 @@ JIT_TESTS=(
     test_jit_perf_map
     test_jit_preload
     test_jit_specialization
+    test_jit_specialised_opcode_deopt
     test_jit_support_instrumentation
     test_jit_type_annotations
+    test_binary_op_add_int
+    test_binary_subscr_correctness
+    test_binary_subscr_deopt
+    test_double_binary_op
+    test_exception_handler_inlining
+    test_for_iter_list_mutation
+    test_for_iter_polymorphic_deopt
+    test_load_attr_instance_value
+    test_load_attr_module_inline
+    test_store_attr_instance_value
 )
 
 RUNTIME_TESTS=(
@@ -187,7 +198,7 @@ case "$ARG" in
         echo "Usage: $0 [all|jit|runtime|compiler|compiler-full|overrides|cpython|full|TESTNAME|--fix-opcode]"
         echo ""
         echo "  all            Run all CinderX tests: JIT + runtime + compiler + overrides (default)"
-        echo "  jit            Run 17 JIT test suites only"
+        echo "  jit            Run 28 JIT test suites only"
         echo "  runtime        Run 14 runtime test suites only"
         echo "  compiler       Run 10 compiler SBS test suites only"
         echo "  compiler-full  Run all compiler tests (10 SBS + 16 individual)"
