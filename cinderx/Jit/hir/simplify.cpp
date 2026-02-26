@@ -18,6 +18,7 @@
 #include "cinderx/Jit/iterator_types.h"
 #include "cinderx/Jit/jit_rt.h"
 #include "cinderx/Jit/threaded_compile.h"
+#include "cinderx/Jit/hir/preload.h"
 #include "cinderx/StaticPython/strictmoduleobject.h"
 
 #include <fmt/ostream.h>
@@ -1701,6 +1702,24 @@ Register* simplifyCallMethod(Env& env, const CallMethod* instr) {
       for (size_t i = 1; i < instr->NumOperands(); ++i) {
         call->SetOperand(i - 1, instr->GetOperand(i));
       }
+      call->output()->set_type(outputType(*call));
+
+      // Stage 1.5: Narrow output type for constructor calls of types with
+      // default __new__. When GuardIs proves the callable is a specific class
+      // and that class uses PyBaseObject_Type.tp_new, the constructor is
+      // guaranteed to return an instance of exactly that class.
+      Register* callable = call->GetOperand(0);
+      Type callable_type = callable->type();
+      if (callable_type.hasObjectSpec()) {
+        PyObject* callable_obj = callable_type.objectSpec();
+        if (PyType_Check(callable_obj)) {
+          auto* cls = reinterpret_cast<PyTypeObject*>(callable_obj);
+          if (cls->tp_new == PyBaseObject_Type.tp_new) {
+            call->output()->set_type(Type::fromTypeExact(cls));
+          }
+        }
+      }
+
       return call->output();
     }
   }
@@ -1853,8 +1872,133 @@ std::optional<std::pair<Instr*, std::vector<Instr*>>> isVectorCallIfIsInstance(
   return std::nullopt;
 }
 
+
+// Simplify VectorCall where the function operand was produced by
+// LoadAttrSpecial (used for __enter__/__aenter__ in with-statements).
+// If the receiver type is exact and the special method resolves to a
+// PyFunctionObject, replace the bound-method call with a static call
+// to the resolved function with self as the first argument.
+Register* simplifyVectorCallBoundMethod(Env& env, const VectorCall* instr) {
+#if PY_VERSION_HEX < 0x030C0000
+  (void)env;
+  (void)instr;
+  return nullptr;
+#else
+  // Only handle simple calls -- no kwargs, static, or awaited.
+  if (instr->flags() &
+      (CallFlags::KwArgs | CallFlags::Static | CallFlags::Awaited)) {
+    return nullptr;
+  }
+
+  // Check if the function operand was produced by LoadAttrSpecial.
+  Register* func_reg = instr->func();
+  Instr* func_def = func_reg->instr();
+  if (func_def == nullptr || !func_def->IsLoadAttrSpecial()) {
+    return nullptr;
+  }
+
+  auto load_attr_special = static_cast<const LoadAttrSpecial*>(func_def);
+  PyObject* attr_id = load_attr_special->id();
+
+  // Handle __enter__/__aenter__ and __exit__/__aexit__ -- the special methods
+  // used by with-statements. Resolving both sides lets the inliner eliminate
+  // all context-manager call overhead.
+  if (attr_id != &_Py_ID(__enter__) && attr_id != &_Py_ID(__aenter__) &&
+      attr_id != &_Py_ID(__exit__) && attr_id != &_Py_ID(__aexit__)) {
+    return nullptr;
+  }
+
+  // The receiver is the object being used as a context manager.
+  Register* receiver = load_attr_special->GetOperand(0);
+  Type receiver_type = receiver->type();
+  BorrowedRef<PyTypeObject> py_type{receiver_type.runtimePyType()};
+
+  // Bail if receiver type is not exact or not ready.
+  if (!receiver_type.isExact() || py_type == nullptr ||
+      !PyType_HasFeature(py_type, Py_TPFLAGS_READY)) {
+    return nullptr;
+  }
+
+  // Ensure the type has a valid version tag for deopt safety.
+  if (getThreadedCompileContext().compileRunning()) {
+    if (!Ci_Type_HasValidVersionTag(py_type)) {
+      return nullptr;
+    }
+  } else if (!ensureVersionTag(py_type)) {
+    return nullptr;
+  }
+
+  // Resolve the special method through the MRO at compile time.
+  BorrowedRef<> method{typeLookupSafe(py_type, attr_id)};
+  if (method == nullptr) {
+    return nullptr;
+  }
+
+  // Only handle plain Python functions -- reject C method descriptors,
+  // classmethod, staticmethod, property, etc.
+  if (!PyFunction_Check(method)) {
+    return nullptr;
+  }
+
+  // Ensure a preloader exists for the resolved callee so the inliner can
+  // inline it. preloadFuncAndDeps only discovers globals and static
+  // invocations, not type attribute methods from LoadAttrSpecial.
+  // Safe to call here: in single-function mode we hold the GIL, and for
+  // trivial methods (e.g. __enter__(self): return self) the preloader
+  // matches no bytecodes -- no Python code execution occurs.
+  if (!getThreadedCompileContext().compileRunning()) {
+    BorrowedRef<PyFunctionObject> py_func{method};
+    if (preloaderManager().find(py_func) == nullptr) {
+      auto callee_preloader = Preloader::makePreloader(py_func);
+      if (callee_preloader) {
+        preloaderManager().add(
+            BorrowedRef<PyCodeObject>{py_func->func_code},
+            std::move(callee_preloader));
+      }
+    }
+  }
+
+  // Emit a Snapshot to provide a FrameState for the DeoptPatchpoint.
+  // bindGuards resets fs to nullptr on non-replayable instructions
+  // (LoadAttrSpecial), so our DeoptPatchpoint needs its own Snapshot.
+  env.emitInstr<Snapshot>(*instr->frameState());
+
+  if (!_PyClassLoader_IsImmutable(py_type)) {
+    auto patchpoint = env.emitInstr<DeoptPatchpoint>(
+        env.func.allocateCodePatcher<TypeAttrDeoptPatcher>(
+            py_type, BorrowedRef<PyUnicodeObject>{attr_id}, method));
+    patchpoint->setGuiltyReg(receiver);
+    patchpoint->setDescr("LoadAttrSpecial method resolution");
+  }
+  env.emit<UseType>(receiver, receiver_type.unspecialized());
+
+  // Load the resolved function as a constant.
+  Register* func_const = env.emit<LoadConst>(
+      Type::fromObject(env.func.env.addReference(method.get())));
+
+  // Build a new VectorCall with the function, self (receiver), and
+  // original arguments. Mark as Static since we're calling directly.
+  size_t orig_nargs = instr->numArgs();
+  auto new_call = env.emitRawInstr<VectorCall>(
+      2 + orig_nargs,
+      env.func.env.AllocateRegister(),
+      instr->flags() | CallFlags::Static,
+      *instr->frameState());
+  new_call->SetOperand(0, func_const);
+  new_call->SetOperand(1, receiver);
+  for (size_t i = 0; i < orig_nargs; ++i) {
+    new_call->SetOperand(2 + i, instr->arg(i));
+  }
+
+  return new_call->output();
+#endif
+}
+
 Register* simplifyVectorCall(Env& env, const VectorCall* instr) {
   if (Register* result = simplifyVectorCallStatic(env, instr)) {
+    return result;
+  }
+  if (Register* result = simplifyVectorCallBoundMethod(env, instr)) {
     return result;
   }
   if (instr->flags() & CallFlags::KwArgs) {

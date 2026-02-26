@@ -69,9 +69,10 @@ Type returnType(Type callable) {
     return returnType(meth->d_method);
   }
   if (Py_TYPE(callable_obj) == &PyType_Type) {
-    Type result =
-        Type::fromTypeExact(reinterpret_cast<PyTypeObject*>(callable_obj));
-    if (result <= TBuiltinExact && !(result <= TType)) {
+    PyTypeObject* cls = reinterpret_cast<PyTypeObject*>(callable_obj);
+    Type result = Type::fromTypeExact(cls);
+    if (!(result <= TType) &&
+        (result <= TBuiltinExact || cls->tp_new == PyBaseObject_Type.tp_new)) {
       if (result <= TUnicodeExact || result <= TBytesExact) {
         // bytes and str are odd in that you can have a subclass which overrides
         // __str__ or __bytes__ and returns a subclass. The subclass is what's

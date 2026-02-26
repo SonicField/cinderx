@@ -16,6 +16,7 @@
 #include "cinderx/Jit/hir/hir_stats.h"
 #include "cinderx/Jit/hir/inliner.h"
 #include "cinderx/Jit/hir/insert_update_prev_instr.h"
+#include "cinderx/Jit/hir/resolve_kwargs.h"
 #include "cinderx/Jit/hir/phi_elimination.h"
 #include "cinderx/Jit/hir/printer.h"
 #include "cinderx/Jit/hir/refcount_insertion.h"
@@ -93,6 +94,11 @@ void Compiler::runPasses(
   runPassIf(hir::GuardTypeRemoval{}, PassConfig::kGuardTypeRemoval);
   runPassIf(hir::PhiElimination{}, PassConfig::kPhiElim);
 
+
+  // Resolve keyword argument calls to positional before inlining.
+  if (config & PassConfig::kInliner) {
+    runPass(jit::hir::ResolveKwargs{}, irfunc, callback);
+  }
   if (config & PassConfig::kInliner) {
     runPass(jit::hir::InlineFunctionCalls{}, irfunc, callback);
 

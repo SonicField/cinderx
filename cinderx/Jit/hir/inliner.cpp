@@ -176,8 +176,13 @@ bool canInline(Function& caller, AbstractCall* call_instr) {
   }
 #endif
 
-  if constexpr (PY_VERSION_HEX >= 0x030C0000) {
-    // This requires access to the frame so we can't inline it.
+  if constexpr (PY_VERSION_HEX >= 0x030E0000 && PY_VERSION_HEX < 0x030F0000) {
+    // On 3.14, EagerImportName LIR uses env_->asm_interpreter_frame which is
+    // wrong for inlined functions. On 3.12 (PyImport_Import) and 3.15+
+    // (JITRT_ImportName), the import path does not use the interpreter frame
+    // directly. Note: both paths use PyEval_GetGlobals() for __builtins__
+    // lookup, which returns the caller frame globals under inlining — same
+    // pre-existing behaviour as regular ImportName (JITRT_ImportName).
     for (auto& bci : BytecodeInstructionBlock{code}) {
       if (bci.opcode() == EAGER_IMPORT_NAME) {
         return fail(InlineFailureType::kHasEagerImportName);
