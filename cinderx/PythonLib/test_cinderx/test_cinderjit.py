@@ -253,19 +253,14 @@ class InlinedFunctionLineNumberTests(unittest.TestCase):
         "meaningless without HIR inliner enabled",
     )
     def test_inline_function_stats(self) -> None:
-        self.assertEqual(cinderx.jit.get_num_inlined_functions(func), 2)
+        self.assertEqual(cinderx.jit.get_num_inlined_functions(func), 3)
         stats = cinderx.jit.get_inlined_functions_stats(func)
-        self.assertEqual(stats.get("num_inlined_functions"), 2)
+        self.assertEqual(stats.get("num_inlined_functions"), 3)
         failure_stats = stats.get("failure_stats") or {}
         assert isinstance(failure_stats, dict)
-        self.assertNotEqual(failure_stats, {})
-        has_varargs = failure_stats.get("HasVarargs") or set()
-        assert isinstance(has_varargs, set)
-        self.assertNotEqual(has_varargs, {})
-        self.assertEqual(len(has_varargs), 1, repr(has_varargs))
-        self.assertIn(
-            "test_cinderx.test_cinderjit:func_with_varargs", next(iter(has_varargs))
-        )
+        # Step 1a: all three callees (func_to_be_inlined, func_with_defaults,
+        # func_with_varargs) are now inlined. No failure stats expected.
+        self.assertEqual(failure_stats, {})
 
     @jit_suppress
     @passIf(

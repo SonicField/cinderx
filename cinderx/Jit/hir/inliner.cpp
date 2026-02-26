@@ -141,15 +141,21 @@ bool canInline(Function& caller, AbstractCall* call_instr) {
   if (code->co_kwonlyargcount > 0) {
     return fail(InlineFailureType::kHasKwOnlyArgs);
   }
-  if (code->co_flags & CO_VARARGS) {
-    return fail(InlineFailureType::kHasVarargs);
-  }
   if (code->co_flags & CO_VARKEYWORDS) {
     return fail(InlineFailureType::kHasVarkwargs);
   }
   JIT_DCHECK(code->co_argcount >= 0, "argcount must be positive");
-  if (call_instr->nargs != static_cast<size_t>(code->co_argcount)) {
-    return fail(InlineFailureType::kCalledWithMismatchedArgs);
+  if (code->co_flags & CO_VARARGS) {
+    // Allow inlining *args functions when the call site provides a
+    // statically-known argument count >= co_argcount. Excess arguments
+    // will be packed into a MakeTuple in inlineFunctionCall().
+    if (call_instr->nargs < static_cast<size_t>(code->co_argcount)) {
+      return fail(InlineFailureType::kCalledWithMismatchedArgs);
+    }
+  } else {
+    if (call_instr->nargs != static_cast<size_t>(code->co_argcount)) {
+      return fail(InlineFailureType::kCalledWithMismatchedArgs);
+    }
   }
   if (code->co_flags & kCoFlagsAnyGenerator) {
     return fail(InlineFailureType::kIsGenerator);
@@ -290,17 +296,43 @@ void inlineFunctionCall(Function& caller, AbstractCall* call_instr) {
   }
   tail->push_front(EndInlinedFunction::create(begin_inlined_function));
 
-  // Transform LoadArg into Assign
+  // Transform LoadArg into Assign (or MakeTuple for *args)
+  int starargs_idx = (callee_code->co_flags & CO_VARARGS)
+      ? callee_code->co_argcount + callee_code->co_kwonlyargcount
+      : -1;
   for (auto it = result.entry->begin(); it != result.entry->end();) {
     auto& instr = *it;
     ++it;
 
     if (instr.IsLoadArg()) {
       auto load_arg = static_cast<LoadArg*>(&instr);
-      auto assign =
-          Assign::create(instr.output(), call_instr->arg(load_arg->arg_idx()));
-      instr.ReplaceWith(*assign);
-      delete &instr;
+      int arg_idx = load_arg->arg_idx();
+      if (arg_idx == starargs_idx) {
+        // *args parameter: pack excess caller arguments into a tuple.
+        // This is semantics-preserving -- a non-inlined call creates the
+        // same tuple in the interpreter. Escape analysis (Step 2) can
+        // later eliminate the allocation for constant-index access.
+        size_t num_excess = call_instr->nargs
+            - static_cast<size_t>(callee_code->co_argcount);
+        std::vector<Register*> excess_args;
+        excess_args.reserve(num_excess);
+        for (size_t i = 0; i < num_excess; i++) {
+          excess_args.push_back(
+              call_instr->arg(callee_code->co_argcount + i));
+        }
+        auto* make_tuple = MakeTuple::create(
+            num_excess,
+            instr.output(),
+            excess_args,
+            *call_instr->instr->frameState());
+        instr.ReplaceWith(*make_tuple);
+        delete &instr;
+      } else {
+        auto assign =
+            Assign::create(instr.output(), call_instr->arg(arg_idx));
+        instr.ReplaceWith(*assign);
+        delete &instr;
+      }
     }
   }
 
