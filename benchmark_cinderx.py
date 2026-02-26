@@ -1511,9 +1511,56 @@ def cmd_g1(args):
 # Subcommand: jit (subprocess isolation)
 # ═══════════════════════════════════════════════════════════════════════════
 
+
+def _resolve_cinderx_python():
+    """Resolve the CinderX Python executable.
+
+    Fallback chain:
+      1. CINDERX_PYTHON envvar (explicit path)
+      2. CINDERX_VENV/bin/python3 (venv directory)
+      3. sys.executable (current interpreter)
+    """
+    import os
+    explicit = os.environ.get("CINDERX_PYTHON")
+    if explicit:
+        return explicit
+    venv = os.environ.get("CINDERX_VENV")
+    if venv:
+        return os.path.join(venv, "bin/python3")
+    return sys.executable
+
+
+def _check_cinderx_available(python_path):
+    """Check that the given Python can import _cinderx.
+
+    Returns True if _cinderx is importable, False otherwise.
+    Prints a diagnostic message on failure.
+    """
+    import subprocess
+    try:
+        result = subprocess.run(
+            [python_path, "-c", "import _cinderx"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            print(f"WARNING: {python_path} cannot import _cinderx")
+            print(f"  stderr: {result.stderr.strip()}")
+            return False
+        return True
+    except Exception as e:
+        print(f"WARNING: Failed to check _cinderx availability: {e}")
+        return False
+
+
 def _run_worker(python_cmd, condition, compile_mode):
     """Run this script as a subprocess worker, return JSON results."""
     env = os.environ.copy()
+    # Enable HIR inliner for JIT-ON workers (improves benchmark accuracy).
+    # Strip from OFF/baseline workers for experimental hygiene.
+    if condition == "on":
+        env.setdefault("PYTHONJITENABLEHIRINLINER", "1")
+    else:
+        env.pop("PYTHONJITENABLEHIRINLINER", None)
     cmd = python_cmd + [
         os.path.abspath(__file__),
         f"--worker=jit",
@@ -1650,13 +1697,11 @@ def cmd_jit(args):
     print_config_header(args)
 
     # Determine Python commands
-    venv_python = os.environ.get(
-        "CINDERX_PYTHON",
-        os.path.join(
-            os.environ.get("CINDERX_VENV", ""),
-            "bin/python3",
-        ),
-    )
+    venv_python = _resolve_cinderx_python()
+    if not _check_cinderx_available(venv_python):
+        print(f"FATAL: CinderX not available at {venv_python}")
+        print("Set CINDERX_PYTHON or CINDERX_VENV to point to a CinderX venv.")
+        return
     vanilla_python = os.environ.get(
         "VANILLA_PYTHON",
         "/usr/local/fbcode/platform010-aarch64/bin/python3.12",
@@ -1783,13 +1828,11 @@ def cmd_spec(args):
     print(f"Reps:         {args.reps}")
     print_config_header(args)
 
-    venv_python = os.environ.get(
-        "CINDERX_PYTHON",
-        os.path.join(
-            os.environ.get("CINDERX_VENV", ""),
-            "bin/python3",
-        ),
-    )
+    venv_python = _resolve_cinderx_python()
+    if not _check_cinderx_available(venv_python):
+        print(f"FATAL: CinderX not available at {venv_python}")
+        print("Set CINDERX_PYTHON or CINDERX_VENV to point to a CinderX venv.")
+        return
     python_cmd = [venv_python]
     print(f"Python: {venv_python}")
     print()
@@ -1928,9 +1971,12 @@ Examples:
   benchmark_cinderx.py all               # Run everything
 
 Environment variables:
-  CINDERX_PYTHON   Path to CinderX venv Python (default: $CINDERX_VENV/bin/python3)
+  CINDERX_PYTHON   Path to CinderX venv Python (default: $CINDERX_VENV/bin/python3,
+                   then sys.executable)
   CINDERX_VENV     Path to CinderX venv directory
   VANILLA_PYTHON   Path to vanilla Python (default: system python3.12)
+  PYTHONJITENABLEHIRINLINER  Set to 1 to enable HIR inliner (opt-in, passed
+                   to JIT-ON workers only; stripped from baseline/OFF workers)
 """,
     )
 
