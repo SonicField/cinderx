@@ -34,6 +34,7 @@
 #include "cinderx/Jit/jit_gdb_support.h"
 #include "cinderx/Jit/jit_rt.h"
 #include "cinderx/Jit/lir/dce.h"
+#include "cinderx/Jit/lir/cold_block_marker.h"
 #include "cinderx/Jit/lir/generator.h"
 #include "cinderx/Jit/lir/postalloc.h"
 #include "cinderx/Jit/lir/postgen.h"
@@ -1279,6 +1280,12 @@ void* NativeGenerator::getVectorcallEntry() {
       GetFunction()->compilation_phase_timer,
       "DeadCodeElimination",
       eliminateDeadCode(lir_func.get()))
+  COMPILE_TIMER(
+      GetFunction()->compilation_phase_timer,
+      "ColdBlockMarking",
+      lir::markColdBlocks(lir_func.get()))
+
+
 
   LinearScanAllocator lsalloc(
       lir_func.get(), frame_asm_.frameHeaderSize() + inline_stack_size_);
