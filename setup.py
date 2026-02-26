@@ -373,7 +373,7 @@ class BuildExt(build_ext):
 
         # pyre-ignore[16]: No pyre types for build_ext.
         extension_dir = os.path.abspath(self.get_ext_fullpath(extension.name))
-        os.makedirs(extension_dir, exist_ok=True)
+        os.makedirs(os.path.dirname(extension_dir), exist_ok=True)
 
         cc, cxx = get_compiler()
 
