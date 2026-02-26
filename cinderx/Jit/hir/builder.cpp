@@ -560,21 +560,19 @@ void HIRBuilder::parseExceptionTable() {
   Py_ssize_t length = PyBytes_GET_SIZE(table_obj);
   Py_ssize_t pos = 0;
 
-  // Variable-length integer decoder matching CPython format (LSB first).
-  // Each byte: bits 0-5 = payload, bit 6 = continuation, bit 7 = entry start.
-  auto parse_varint = [&]() -> int {
-    int val = 0;
-    int shift = 0;
-    uint8_t b;
-    do {
-      JIT_DCHECK(pos < length, "Truncated exception table");
-      b = table[pos++];
-      val |= (b & 0x3F) << shift;
-      shift += 6;
-    } while (b & 0x40);
-    return val;
-  };
-
+    // Variable-length integer decoder matching CPython 3.12 format (MSB first).
+    // Each byte: bits 0-5 = payload, bit 6 = continuation.
+    // First byte holds the most-significant bits of the value.
+    auto parse_varint = [&]() -> int {
+      int val = 0;
+      uint8_t b;
+      do {
+        JIT_DCHECK(pos < length, "Truncated exception table");
+        b = table[pos++];
+        val = (val << 6) | (b & 0x3F);
+      } while (b & 0x40);
+      return val;
+    };
   while (pos < length) {
     int start = parse_varint();
     int size = parse_varint();
