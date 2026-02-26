@@ -311,6 +311,9 @@ class Context : public IJitContext {
   // Clear all deopt stats.
   void clearDeoptStats();
 
+  // Clear type deopt patchers before final GC to prevent dangling pointers.
+  void clearTypeDeoptPatchers();
+
   // Get and clear inline cache stats.
   InlineCacheStats getAndClearLoadMethodCacheStats();
   InlineCacheStats getAndClearLoadTypeMethodCacheStats();

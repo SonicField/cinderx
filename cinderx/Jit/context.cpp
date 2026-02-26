@@ -293,6 +293,11 @@ void Context::releaseReferences() {
   type_deopt_patchers_.clear();
 }
 
+void Context::clearTypeDeoptPatchers() {
+  ThreadedCompileSerialize guard;
+  type_deopt_patchers_.clear();
+}
+
 LoadAttrCache* Context::allocateLoadAttrCache() {
   return load_attr_caches_.allocate();
 }

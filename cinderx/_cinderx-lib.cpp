@@ -1055,6 +1055,15 @@ void module_free(void* raw_mod) {
   cinderx::removeModuleState();
 }
 
+// Clear JIT type deopt patchers before final GC to prevent dangling pointers
+// during Py_FinalizeEx shutdown.
+static PyObject* clear_type_deopt_patchers(PyObject*, PyObject*) {
+  if (auto* ctx = jit::getContext()) {
+    ctx->clearTypeDeoptPatchers();
+  }
+  Py_RETURN_NONE;
+}
+
 // Called when the interpreter is shutting down, allows us to do some aggressive
 // cleanup. Currently this includes clearing out all strict modules which the
 // interpreter won't do because it only supports clearing normal module objects.
@@ -1154,6 +1163,10 @@ PyMethodDef _cinderx_methods[] = {
      clear_strict_modules,
      METH_NOARGS,
      "Clears all strict modules for shutdown"},
+    {"_clear_type_deopt_patchers",
+     clear_type_deopt_patchers,
+     METH_NOARGS,
+     "Clears JIT type deopt patchers before final GC"},
     {"_compile_perf_trampoline_pre_fork",
      compile_perf_trampoline_pre_fork,
      METH_NOARGS,
@@ -1432,6 +1445,18 @@ int _cinderx_exec_impl(PyObject* m) {
   auto res = Ref<>::steal(
       PyObject_CallOneArg(register_func, clear_strict_modules_func));
   if (res == nullptr) {
+    return -1;
+  }
+
+  // Also register JIT type deopt patcher cleanup before shutdown GC.
+  auto clear_type_deopt_patchers_func =
+      Ref<>::steal(PyObject_GetAttrString(m, "_clear_type_deopt_patchers"));
+  if (clear_type_deopt_patchers_func == nullptr) {
+    return -1;
+  }
+  auto res2 = Ref<>::steal(
+      PyObject_CallOneArg(register_func, clear_type_deopt_patchers_func));
+  if (res2 == nullptr) {
     return -1;
   }
 
