@@ -2060,9 +2060,6 @@ Register* simplifyVectorCallGlobal(Env& env, const VectorCall* instr) {
   patchpoint->setGuiltyReg(func_reg);
   patchpoint->setDescr("Global callee guard elimination");
 
-  // Register the patcher with the JIT context so notifyDictUpdate triggers it.
-  jit::getContext()->watchGlobal(globals, key_name, patcher);
-
   // Load the resolved function as a constant.  This gives the register
   // TFunc[expected] type so the inliner can determine the inline target.
   Register* func_const = env.emit<LoadConst>(

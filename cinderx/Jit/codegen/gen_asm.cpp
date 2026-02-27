@@ -25,6 +25,7 @@
 #include "cinderx/Jit/compiled_function.h"
 #include "cinderx/Jit/config.h"
 #include "cinderx/Jit/context.h"
+#include "cinderx/Jit/global_deopt_patcher.h"
 #include "cinderx/Jit/frame.h"
 #include "cinderx/Jit/frame_header.h"
 #include "cinderx/Jit/generators_rt.h"
@@ -2508,6 +2509,14 @@ void NativeGenerator::linkDeoptPatchers(const asmjit::CodeHolder& code) {
     // Register patcher with the runtime if it is type-based.
     if (auto typed_patcher = dynamic_cast<TypeDeoptPatcher*>(udp.patcher)) {
       env_.ctx->watchType(typed_patcher->type(), typed_patcher);
+    }
+
+    // Register patcher with the runtime if it is global-based.
+    if (auto global_patcher = dynamic_cast<GlobalDeoptPatcher*>(udp.patcher)) {
+      env_.ctx->watchGlobal(
+          global_patcher->globals(),
+          global_patcher->keyName(),
+          global_patcher);
     }
   }
 
