@@ -10,6 +10,7 @@
 #include "cinderx/Common/py-portability.h"
 #include "cinderx/Common/type.h"
 #include "cinderx/Jit/context.h"
+#include "cinderx/Jit/global_deopt_patcher.h"
 #include "cinderx/Jit/hir/analysis.h"
 #include "cinderx/Jit/hir/clean_cfg.h"
 #include "cinderx/Jit/hir/copy_propagation.h"
@@ -1994,11 +1995,102 @@ Register* simplifyVectorCallBoundMethod(Env& env, const VectorCall* instr) {
 #endif
 }
 
+// Eliminate the function-identity GuardIs for calls to global functions that
+// are loaded via LoadGlobalCached.  Instead of checking function identity at
+// runtime (GuardIs), we install a GlobalDeoptPatcher that invalidates the
+// compiled code if the global is rebound.  The code-object GuardIs in the
+// inliner is kept as a safety net.
+//
+// Pattern matched:
+//   LoadGlobalCached -> GuardIs(expected_func) -> VectorCall
+// Replaced with:
+//   Snapshot -> DeoptPatchpoint(GlobalDeoptPatcher) -> LoadConst(expected_func) -> VectorCall(Static)
+Register* simplifyVectorCallGlobal(Env& env, const VectorCall* instr) {
+  // Only handle simple calls -- no kwargs, static, or awaited.
+  if (instr->flags() &
+      (CallFlags::KwArgs | CallFlags::Static | CallFlags::Awaited)) {
+    return nullptr;
+  }
+
+  // Check if the function operand was produced by a GuardIs.
+  Register* func_reg = instr->func();
+  Instr* func_def = func_reg->instr();
+  if (func_def == nullptr || !func_def->IsGuardIs()) {
+    return nullptr;
+  }
+
+  auto guard_is = static_cast<const GuardIs*>(func_def);
+
+  // Check if the GuardIs operand came from LoadGlobalCached.
+  Register* guarded_input = guard_is->GetOperand(0);
+  Instr* input_def = guarded_input->instr();
+  if (input_def == nullptr || !input_def->IsLoadGlobalCached()) {
+    return nullptr;
+  }
+
+  // Get the expected value from the GuardIs.
+  PyObject* expected = guard_is->target();
+  if (!PyFunction_Check(expected)) {
+    return nullptr;
+  }
+
+  // Get the globals dict and name from the LoadGlobalCached instruction.
+  auto load_global = static_cast<const LoadGlobalCached*>(input_def);
+  BorrowedRef<PyDictObject> globals{load_global->globals()};
+  PyObject* name = PyTuple_GET_ITEM(load_global->code()->co_names,
+                                     load_global->name_idx());
+  if (!PyUnicode_CheckExact(name)) {
+    return nullptr;
+  }
+  BorrowedRef<PyUnicodeObject> key_name{name};
+
+  // Don't simplify during threaded compilation -- we need the GIL to
+  // safely register watchers and access the preloader.
+  if (getThreadedCompileContext().compileRunning()) {
+    return nullptr;
+  }
+
+  // Emit a Snapshot to provide a FrameState for the DeoptPatchpoint.
+  env.emitInstr<Snapshot>(*instr->frameState());
+
+  // Install a GlobalDeoptPatcher that fires if this global is rebound.
+  auto* patcher = env.func.allocateCodePatcher<GlobalDeoptPatcher>(
+      globals, key_name, BorrowedRef<>{expected});
+  auto patchpoint = env.emitInstr<DeoptPatchpoint>(patcher);
+  patchpoint->setGuiltyReg(func_reg);
+  patchpoint->setDescr("Global callee guard elimination");
+
+  // Register the patcher with the JIT context so notifyDictUpdate triggers it.
+  jit::getContext()->watchGlobal(globals, key_name, patcher);
+
+  // Load the resolved function as a constant.  This gives the register
+  // TFunc[expected] type so the inliner can determine the inline target.
+  Register* func_const = env.emit<LoadConst>(
+      Type::fromObject(env.func.env.addReference(expected)));
+
+  // Build a new VectorCall with the constant function and original arguments.
+  size_t orig_nargs = instr->numArgs();
+  auto new_call = env.emitRawInstr<VectorCall>(
+      1 + orig_nargs,
+      env.func.env.AllocateRegister(),
+      instr->flags() | CallFlags::Static,
+      *instr->frameState());
+  new_call->SetOperand(0, func_const);
+  for (size_t i = 0; i < orig_nargs; ++i) {
+    new_call->SetOperand(1 + i, instr->arg(i));
+  }
+
+  return new_call->output();
+}
+
 Register* simplifyVectorCall(Env& env, const VectorCall* instr) {
   if (Register* result = simplifyVectorCallStatic(env, instr)) {
     return result;
   }
   if (Register* result = simplifyVectorCallBoundMethod(env, instr)) {
+    return result;
+  }
+  if (Register* result = simplifyVectorCallGlobal(env, instr)) {
     return result;
   }
   if (instr->flags() & CallFlags::KwArgs) {

@@ -6,6 +6,7 @@
 #include "cinderx/Common/util.h"
 #include "cinderx/Common/watchers.h"
 #include "cinderx/Jit/threaded_compile.h"
+#include "cinderx/Jit/context.h"
 #include "cinderx/module_state.h"
 
 #ifndef ENABLE_LAZY_IMPORTS
@@ -122,6 +123,10 @@ void GlobalCacheManager::notifyDictUpdate(
     }
   }
   disableCaches(to_disable);
+
+  // Notify the JIT context so GlobalDeoptPatchers can fire code invalidation
+  // for compiled code that inlined based on this global.
+  getContext()->notifyGlobalModified(dict, key, value);
 }
 
 void GlobalCacheManager::notifyDictClear(BorrowedRef<PyDictObject> dict) {
