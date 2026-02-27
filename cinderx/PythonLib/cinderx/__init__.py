@@ -600,4 +600,4 @@ def get_import_error() -> ImportError | None:
     return _import_error
 
 
-init()
+# init()  # Bug 8: crashes on aarch64

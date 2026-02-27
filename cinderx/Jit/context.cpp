@@ -7,6 +7,7 @@
 
 #include "cinderx/Common/log.h"
 #include "cinderx/Common/py-portability.h"
+#include "cinderx/Interpreter/interpreter.h"
 #include "cinderx/Jit/elf/reader.h"
 #include "cinderx/StaticPython/classloader.h"
 #include "cinderx/module_state.h"
@@ -216,6 +217,51 @@ void Context::recordDeopt(
   stat.count++;
   if (guilty_value != nullptr) {
     stat.types.recordType(Py_TYPE(guilty_value));
+  }
+
+  // Deopt backoff: suppress JIT for code objects that deopt repeatedly.
+  // When the threshold is reached, reset vectorcall on all function objects
+  // using this CodeRuntime. This handles both:
+  //   - Module-level functions (persistent PyFunctionObjects that never
+  //     re-enter reoptFunc after initial compilation)
+  //   - Inner-class functions (new PyFunctionObjects caught by the v4
+  //     reoptFunc checks via isDeoptBackoffTriggered)
+  auto& count = deopt_backoff_counts_[code_runtime];
+  count++;
+  if (count == kDeoptBackoffThreshold) {
+    BorrowedRef<PyCodeObject> code = code_runtime->frameState()->code();
+    JIT_LOG(
+        "Deopt backoff: {} reached {} guard failures, suppressing",
+        PyUnicode_AsUTF8(code->co_qualname),
+        count);
+    deoptBackoffSuppressFunctions(code_runtime);
+  }
+}
+
+void Context::deoptBackoffSuppressFunctions(CodeRuntime* code_runtime) {
+  // Collect functions using this CodeRuntime. Must collect first because
+  // removeCompiledFunc modifies compiled_funcs_ (iterator invalidation).
+  std::vector<BorrowedRef<PyFunctionObject>> to_deopt;
+  for (auto func : compiled_funcs_) {
+    if (CompiledFunction* compiled = lookupFunc(func)) {
+      if (compiled->runtime() == code_runtime) {
+        to_deopt.push_back(func);
+      }
+    }
+  }
+
+  // Deopt each function: remove from compiled set, reset vectorcall to
+  // interpreter entry, mark as deopted. This is safe mid-deopt because
+  // vectorcall is a pointer on PyFunctionObject (not co_flags on
+  // PyCodeObject), and the current execution has already left the JIT
+  // entry point via the deopt stub.
+  for (auto func : to_deopt) {
+    JIT_LOG(
+        "Deopt backoff: detaching JIT from {}",
+        PyUnicode_AsUTF8(func->func_qualname));
+    removeCompiledFunc(func);
+    func->vectorcall = getInterpretedVectorcall(func.get());
+    addDeoptedFunc(func);
   }
 }
 

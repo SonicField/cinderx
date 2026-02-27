@@ -457,6 +457,36 @@ class Context : public IJitContext {
   DeoptStats deopt_stats_;
   GuardFailureCallback guard_failure_callback_;
 
+  // Deopt backoff: after kDeoptBackoffThreshold runtime guard failures for a
+  // single CodeRuntime, set CI_CO_SUPPRESS_JIT on its code object. This
+  // prevents reoptFunc() (pyjit.cpp:798) and scheduleJitCompile()
+  // (pyjit.cpp:3892) from re-attaching JIT code that will just deopt again.
+  // Separate from deopt_stats_ because deopt_stats_ can be cleared by
+  // cinderjit.get_and_clear_runtime_stats().
+  // NOTE: Thread safety relies on GIL (Py_GIL_DISABLED is NOT defined in our
+  // build). If moving to nogil, this map needs a mutex.
+  static constexpr uint32_t kDeoptBackoffThreshold = 100;
+  UnorderedMap<const CodeRuntime*, uint32_t> deopt_backoff_counts_;
+
+  // Check if a CodeRuntime has exceeded the deopt backoff threshold.
+  // Called from reoptFunc() to decide whether to set CI_CO_SUPPRESS_JIT
+  // and refuse re-attachment for new function objects (inner-class methods).
+  bool isDeoptBackoffTriggered(const CodeRuntime* runtime) const {
+    auto it = deopt_backoff_counts_.find(runtime);
+    return it != deopt_backoff_counts_.end() &&
+           it->second >= kDeoptBackoffThreshold;
+  }
+
+  // Deopt all compiled functions using a given CodeRuntime by resetting
+  // their vectorcall to the interpreter entry. Called from recordDeopt()
+  // when the backoff threshold is reached. This handles the case where
+  // module-level functions (persistent PyFunctionObjects) loop through
+  // JIT entry -> guard fail -> deopt -> JIT entry without ever re-entering
+  // reoptFunc(). Resetting vectorcall (a pointer swap on PyFunctionObject)
+  // is safe mid-deopt, unlike co_flags mutation on PyCodeObject which
+  // crashed in v1.
+  void deoptBackoffSuppressFunctions(CodeRuntime* code_runtime);
+
   // References to Python objects held by this Context
   std::unordered_set<ThreadedRef<PyObject>> references_;
   Builtins builtins_;

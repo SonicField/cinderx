@@ -787,6 +787,19 @@ bool reoptFunc(BorrowedRef<PyFunctionObject> func) {
   if (jitCtx() == nullptr) {
     return false;
   } else if (jitCtx()->didCompile(func)) {
+    // Deopt backoff: before re-attaching JIT code, check if this function's
+    // CodeRuntime has exceeded the guard failure threshold. If so, set
+    // CI_CO_SUPPRESS_JIT and refuse to re-attach. This is the primary deopt
+    // loop path — didCompile returns true for functions that were compiled
+    // and then deopted via runtime guard failure.
+    if (CompiledFunction* compiled = jitCtx()->lookupFunc(func)) {
+      CodeRuntime* rt = compiled->runtime();
+      if (jitCtx()->isDeoptBackoffTriggered(rt)) {
+        BorrowedRef<PyCodeObject> code{func->func_code};
+        code->co_flags |= CI_CO_SUPPRESS_JIT;
+        return false;
+      }
+    }
     // Clear stale deopt entry. After deoptimization, the function stays in
     // compiled_funcs_ but is added to deopted_funcs_. When reopting, we need
     // to clear deopted_funcs_ so isDeoptimized() returns the correct state.
@@ -804,6 +817,16 @@ bool reoptFunc(BorrowedRef<PyFunctionObject> func) {
   jitCtx()->removeDeoptedFunc(func);
 
   if (CompiledFunction* compiled = jitCtx()->lookupFunc(func)) {
+    // Deopt backoff: if this CodeRuntime has exceeded the guard failure
+    // threshold, set CI_CO_SUPPRESS_JIT and refuse to re-attach JIT code.
+    // The flag is set HERE (between calls) rather than in recordDeopt()
+    // (mid-deopt) because mutating co_flags during the deopt stub causes
+    // crashes.
+    CodeRuntime* rt = compiled->runtime();
+    if (jitCtx()->isDeoptBackoffTriggered(rt)) {
+      code->co_flags |= CI_CO_SUPPRESS_JIT;
+      return false;
+    }
     jitCtx()->finalizeFunc(func, *compiled);
     return true;
   }
