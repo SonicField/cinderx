@@ -371,6 +371,14 @@ class Context : public IJitContext {
       BorrowedRef<PyUnicodeObject> key,
       GlobalDeoptPatcher* patcher);
 
+  // Unregister a GlobalDeoptPatcher.  Called from the patcher destructor
+  // when a compiled function is destroyed (e.g., during recompilation)
+  // to prevent dangling pointers in global_deopt_patchers_.
+  void unwatchGlobal(
+      BorrowedRef<PyDictObject> globals,
+      BorrowedRef<PyUnicodeObject> key,
+      GlobalDeoptPatcher* patcher);
+
   // Callback from GlobalCacheManager::notifyDictUpdate when a watched
   // global changes.
   void notifyGlobalModified(

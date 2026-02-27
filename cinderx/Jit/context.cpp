@@ -14,6 +14,7 @@
 #include "cinderx/python_runtime.h"
 
 #include <sys/mman.h>
+#include <algorithm>
 
 #ifndef WIN32
 #include <dlfcn.h>
@@ -462,6 +463,22 @@ void Context::watchGlobal(
     GlobalDeoptPatcher* patcher) {
   ThreadedCompileSerialize guard;
   global_deopt_patchers_[{globals, key}].emplace_back(patcher);
+}
+
+void Context::unwatchGlobal(
+    BorrowedRef<PyDictObject> globals,
+    BorrowedRef<PyUnicodeObject> key,
+    GlobalDeoptPatcher* patcher) {
+  ThreadedCompileSerialize guard;
+  auto it = global_deopt_patchers_.find({globals, key});
+  if (it == global_deopt_patchers_.end()) {
+    return;
+  }
+  auto& vec = it->second;
+  vec.erase(std::remove(vec.begin(), vec.end(), patcher), vec.end());
+  if (vec.empty()) {
+    global_deopt_patchers_.erase(it);
+  }
 }
 
 void Context::notifyGlobalModified(

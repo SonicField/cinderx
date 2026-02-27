@@ -23,6 +23,7 @@ class GlobalDeoptPatcher : public JumpPatcher {
   // Called when a watched global changes.  If the new value differs from
   // the expected value, patch the compiled code to deopt.  Returns true if
   // the patcher fired (and should be removed from the watch list).
+  ~GlobalDeoptPatcher();
   bool maybePatch(BorrowedRef<> new_value);
 
   BorrowedRef<PyDictObject> globals() const { return globals_; }
