@@ -413,6 +413,21 @@ void Context::watchType(
       type->tp_name);
 }
 
+void Context::unwatchType(
+    BorrowedRef<PyTypeObject> type,
+    TypeDeoptPatcher* patcher) {
+  ThreadedCompileSerialize guard;
+  auto it = type_deopt_patchers_.find(type);
+  if (it == type_deopt_patchers_.end()) {
+    return;
+  }
+  auto& vec = it->second;
+  vec.erase(std::remove(vec.begin(), vec.end(), patcher), vec.end());
+  if (vec.empty()) {
+    type_deopt_patchers_.erase(it);
+  }
+}
+
 BorrowedRef<> Context::zero() {
   return zero_.get();
 }

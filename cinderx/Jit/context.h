@@ -363,6 +363,7 @@ class Context : public IJitContext {
   // When type is modified or an instance of type has __class__ assigned to,
   // call patcher->maybePatch(new_ty).
   void watchType(BorrowedRef<PyTypeObject> type, TypeDeoptPatcher* patcher);
+  void unwatchType(BorrowedRef<PyTypeObject> type, TypeDeoptPatcher* patcher);
 
   // Watch a module global for changes.  When the global (identified by
   // dict + key) changes from its expected value, the patcher fires.

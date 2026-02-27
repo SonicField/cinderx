@@ -20,7 +20,10 @@ GlobalDeoptPatcher::~GlobalDeoptPatcher() {
   // registered in global_deopt_patchers_ and must be unregistered to prevent
   // dangling pointers (e.g., when a function is recompiled during warmup).
   if (isLinked() && key_name_.get() != nullptr) {
-    getContext()->unwatchGlobal(globals_, key_name_, this);
+    Context* ctx = getContext();
+    if (ctx != nullptr) {
+      ctx->unwatchGlobal(globals_, key_name_, this);
+    }
   }
 }
 
