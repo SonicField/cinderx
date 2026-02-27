@@ -231,12 +231,50 @@ PyObject* JITRT_CallWithKeywordArgs(
     PyFunctionObject* func,
     PyObject** args,
     size_t nargsf,
-    PyObject* kwnames) {
+    PyObject* kwnames,
+    vectorcallfunc self_reentry) {
   PyCodeObject* co = (PyCodeObject*)func->func_code;
   const Py_ssize_t total_args = co->co_argcount + co->co_kwonlyargcount +
       ((co->co_flags & CO_VARKEYWORDS) ? 1 : 0) +
       ((co->co_flags & CO_VARARGS) ? 1 : 0);
-  auto arg_space = std::make_unique<PyObject*[]>(total_args);
+
+  // Fast path: when all args are keyword, in parameter order, with no
+  // varargs/varkeywords/kwonly, the args array is already correctly ordered.
+  // Bypass BindKeywordArgs entirely — it would just do an identity copy.
+  Py_ssize_t argcount = PyVectorcall_NARGS(nargsf);
+  if (kwnames != nullptr
+      && argcount == 0
+      && !(co->co_flags & (CO_VARARGS | CO_VARKEYWORDS))
+      && co->co_kwonlyargcount == 0
+      && PyTuple_GET_SIZE(kwnames) == co->co_argcount) {
+    bool identity = true;
+    for (Py_ssize_t i = 0; i < co->co_argcount; i++) {
+      if (PyTuple_GET_ITEM(kwnames, i) != jit::getVarname(co, i)) {
+        identity = false;
+        break;
+      }
+    }
+    if (identity) {
+      size_t new_nargsf = co->co_argcount;
+#if PY_VERSION_HEX < 0x030C0000
+      new_nargsf |= (nargsf & Ci_Py_AWAITED_CALL_MARKER);
+#endif
+      return self_reentry((PyObject*)func, args, new_nargsf, nullptr);
+    }
+  }
+
+  // Stack-allocate argument buffer for the common case (<=8 args).
+  // Avoids heap allocation on every interpreter→JIT kwargs call.
+  constexpr Py_ssize_t kStackArgLimit = 8;
+  PyObject* stack_args[kStackArgLimit];
+  std::unique_ptr<PyObject*[]> heap_args;
+  PyObject* *arg_space;
+  if (total_args <= kStackArgLimit) {
+    arg_space = stack_args;
+  } else {
+    heap_args = std::make_unique<PyObject*[]>(total_args);
+    arg_space = heap_args.get();
+  }
   Ref<PyObject> kwdict, varargs;
 
   if (JITRT_BindKeywordArgs(
@@ -244,7 +282,7 @@ PyObject* JITRT_CallWithKeywordArgs(
           args,
           nargsf,
           kwnames,
-          arg_space.get(),
+          arg_space,
           total_args,
           kwdict,
           varargs)) {
@@ -252,8 +290,8 @@ PyObject* JITRT_CallWithKeywordArgs(
 #if PY_VERSION_HEX < 0x030C0000
     new_nargsf |= (nargsf & Ci_Py_AWAITED_CALL_MARKER);
 #endif
-    return getJitReentry(func)(
-        (PyObject*)func, arg_space.get(), new_nargsf, nullptr);
+    return self_reentry(
+        (PyObject*)func, arg_space, new_nargsf, nullptr);
   }
 
   return Ci_PyFunction_Vectorcall((PyObject*)func, args, nargsf, kwnames);
@@ -2331,6 +2369,42 @@ PyObject JITRT_IterDoneSentinel = {
         _Py_IMMORTAL_REFCNT,
 #endif
     nullptr};
+
+// Range iterator fast path: directly access _PyRangeIterObject fields
+// instead of going through tp_iternext. Mirrors CPython's rangeiter_next
+// (Objects/rangeobject.c) but returns JITRT_IterDoneSentinel instead of
+// raising StopIteration, matching the JIT's sentinel protocol.
+//
+// Struct layout (from Include/internal/pycore_range.h):
+//   PyObject_HEAD
+//   long start;
+//   long step;
+//   long len;     // remaining iterations
+//
+// This must match the layout in the linked CPython. The function is only
+// called when the Simplify pass has verified the iterator is a
+// range_iterator via GuardType, so the cast is safe.
+namespace {
+struct RangeIterFields {
+  PyObject_HEAD
+  long start;
+  long step;
+  long len;
+};
+} // namespace
+
+PyObject* JITRT_RangeIterNext(PyObject* iterator) {
+  auto* r = reinterpret_cast<RangeIterFields*>(iterator);
+  if (r->len > 0) {
+    long result = r->start;
+    r->start = result + r->step;
+    r->len--;
+    return PyLong_FromLong(result);
+  }
+  // Iterator exhausted — return sentinel (no StopIteration exception)
+  Py_INCREF(&JITRT_IterDoneSentinel);
+  return &JITRT_IterDoneSentinel;
+}
 
 PyObject* JITRT_InvokeIterNext(PyObject* iterator) {
   // G1 fast path: inline send_core + jitgen_am_send for JIT generators.

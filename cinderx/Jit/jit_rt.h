@@ -99,7 +99,8 @@ PyObject* JITRT_CallWithKeywordArgs(
     PyFunctionObject* func,
     PyObject** args,
     size_t nargsf,
-    PyObject* kwnames);
+    PyObject* kwnames,
+    vectorcallfunc self_reentry);
 
 JITRT_StaticCallReturn JITRT_CallWithIncorrectArgcount(
     PyFunctionObject* func,
@@ -637,6 +638,14 @@ extern PyObject JITRT_IterDoneSentinel;
  * Returns the next value, or JITRT_IterDoneSentinel if the iterator is done.
  */
 PyObject* JITRT_InvokeIterNext(PyObject* iterator);
+
+/*
+ * Fast-path range iterator next. Directly accesses _PyRangeIterObject fields
+ * (start, step, len) instead of going through tp_iternext.
+ * Returns the next value, or JITRT_IterDoneSentinel if exhausted.
+ * Only safe to call on verified range_iterator objects (GuardType in HIR).
+ */
+PyObject* JITRT_RangeIterNext(PyObject* iterator);
 
 // Fast-path builtin next() wrapper. Routes through JITRT_InvokeIterNext
 // (G1 fast path for JIT generators), converts sentinel to next() semantics.

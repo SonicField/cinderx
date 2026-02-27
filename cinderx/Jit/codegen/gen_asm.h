@@ -135,7 +135,8 @@ class NativeGenerator {
   void generatePrologue(
       const FrameInfo& frame_info,
       asmjit::Label correct_arg_count,
-      asmjit::Label native_entry_point);
+      asmjit::Label native_entry_point,
+      asmjit::Label correct_args_entry);
   bool linkFrameNeedsSpill();
   void generateEpilogue(asmjit::BaseNode* epilogue_cursor);
   void generateDeoptExits(const asmjit::CodeHolder& code);
@@ -154,7 +155,9 @@ class NativeGenerator {
   void generateAssemblyBody(const asmjit::CodeHolder& code);
 
   void generatePrimitiveArgsPrologue();
-  void generateArgcountCheckPrologue(asmjit::Label correct_arg_count);
+  void generateArgcountCheckPrologue(
+      asmjit::Label correct_arg_count,
+      asmjit::Label correct_args_entry);
 
   // If the function returns a primitive, then in the generic (non-static) entry
   // path it needs to box it up.  Do this by generating a small wrapper

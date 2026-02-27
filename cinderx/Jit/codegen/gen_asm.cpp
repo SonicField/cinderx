@@ -1638,7 +1638,8 @@ bool NativeGenerator::linkFrameNeedsSpill() {
 void NativeGenerator::generatePrologue(
     const FrameInfo& frame_info,
     Label correct_arg_count,
-    Label finish_frame_setup) {
+    Label finish_frame_setup,
+    Label correct_args_entry) {
 #if defined(CINDER_X86_64)
   // The boxed return wrapper gets generated first, if it is necessary.
   auto [generic_entry_cursor, box_entry_cursor] = generateBoxedReturnWrapper();
@@ -1649,7 +1650,7 @@ void NativeGenerator::generatePrologue(
   if (func_->has_primitive_args) {
     generatePrimitiveArgsPrologue();
   } else {
-    generateArgcountCheckPrologue(correct_arg_count);
+    generateArgcountCheckPrologue(correct_arg_count, correct_args_entry);
   }
   as_->bind(correct_arg_count);
 
@@ -1744,7 +1745,7 @@ void NativeGenerator::generatePrologue(
   if (func_->has_primitive_args) {
     generatePrimitiveArgsPrologue();
   } else {
-    generateArgcountCheckPrologue(correct_arg_count);
+    generateArgcountCheckPrologue(correct_arg_count, correct_args_entry);
   }
   as_->bind(correct_arg_count);
 
@@ -2995,7 +2996,7 @@ void NativeGenerator::generateCode(CodeHolder& codeholder) {
   // vectorcall convention
   Label vectorcall_entry_label = as_->newLabel();
   as_->bind(vectorcall_entry_label);
-  generatePrologue(frame_info, correct_arg_count, finish_frame_setup);
+  generatePrologue(frame_info, correct_arg_count, finish_frame_setup, correct_args_entry);
 
   generateEpilogue(epilogue_cursor);
 
@@ -3339,7 +3340,9 @@ NativeGenerator::generateBoxedReturnWrapper() {
   return {as_->cursor(), entry_cursor};
 }
 
-void NativeGenerator::generateArgcountCheckPrologue(Label correct_arg_count) {
+void NativeGenerator::generateArgcountCheckPrologue(
+    Label correct_arg_count,
+    Label correct_args_entry) {
 #if defined(CINDER_X86_64)
   BorrowedRef<PyCodeObject> code = GetFunction()->code;
 
@@ -3366,6 +3369,9 @@ void NativeGenerator::generateArgcountCheckPrologue(Label correct_arg_count) {
   // never pass the empty tuple.  It is possible for odd callers to still pass
   // the empty tuple in which case we'll just go through the slow binding
   // path.
+  // Pass the correct_args_entry address as 5th arg (r8) so
+  // JITRT_CallWithKeywordArgs can re-enter the JIT without a hash map lookup.
+  as_->lea(x86::r8, x86::ptr(correct_args_entry));
   as_->call(reinterpret_cast<uint64_t>(JITRT_CallWithKeywordArgs));
   generateFunctionExit();
 
@@ -3413,6 +3419,9 @@ void NativeGenerator::generateArgcountCheckPrologue(Label correct_arg_count) {
   // never pass the empty tuple.  It is possible for odd callers to still pass
   // the empty tuple in which case we'll just go through the slow binding
   // path.
+  // Pass the correct_args_entry address as 5th arg (x4) so
+  // JITRT_CallWithKeywordArgs can re-enter the JIT without a hash map lookup.
+  as_->adr(a64::x4, correct_args_entry);
   as_->mov(arch::reg_scratch_br, JITRT_CallWithKeywordArgs);
   as_->blr(arch::reg_scratch_br);
   generateFunctionExit();
