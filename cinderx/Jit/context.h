@@ -457,15 +457,46 @@ class Context : public IJitContext {
   DeoptStats deopt_stats_;
   GuardFailureCallback guard_failure_callback_;
 
-  // Deopt backoff: after kDeoptBackoffThreshold runtime guard failures for a
-  // single CodeRuntime, set CI_CO_SUPPRESS_JIT on its code object. This
-  // prevents reoptFunc() (pyjit.cpp:798) and scheduleJitCompile()
-  // (pyjit.cpp:3892) from re-attaching JIT code that will just deopt again.
+  // Deopt backoff: suppress JIT for code objects that deopt repeatedly.
+  //
+  // After kDeoptBackoffThreshold runtime guard failures for a single
+  // CodeRuntime, set CI_CO_SUPPRESS_JIT on its code object. This prevents
+  // reoptFunc() (pyjit.cpp:798) and scheduleJitCompile() (pyjit.cpp:3892)
+  // from re-attaching JIT code that will just deopt again.
+  //
+  // CODE PATTERNS THAT TRIGGER DEOPT BACKOFF:
+  //   - Inner-class methods with polymorphic self (e.g. nn_module_forward:
+  //     multiple classes define forward(), GuardType on self fails when
+  //     different subclasses alternate). ~40K deopts per benchmark run.
+  //   - Deep inheritance __init__ chains (e.g. deep_class_super: 5-level
+  //     hierarchy where super().__init__() triggers GuardType failures on
+  //     each level). ~1.1M deopts per benchmark run.
+  //   - Decorator-wrapped functions (e.g. decorator_chain: GuardType on
+  //     class_op fails across decorated variants). ~50K deopts.
+  //
+  // THRESHOLD RATIONALE (1000):
+  //   Import-time deopts (e.g. Tokenizer.__next during json import) peak
+  //   at ~100 for simple imports, but complex import graphs (dozens of
+  //   modules) can exceed 1000. Runtime deopt loops are much larger:
+  //   40K+ (nn_module_forward), 50K+ (pytorch_cm, decorator_chain), 1.1M
+  //   (deep_class_super). A threshold of 100 crashed importlib when deopt
+  //   backoff detached JIT from Tokenizer.__next mid-import (spec_from_loader
+  //   interaction). Threshold 1000 prevents this for simple imports but
+  //   does NOT eliminate the need for -S (skip site.py) when the full
+  //   import graph exceeds 1000 deopts. The real fix is preventing JIT
+  //   activation during imports (via -S or deferred JIT init).
+  //
+  // MECHANISM: Vectorcall reset (pointer swap on PyFunctionObject), NOT
+  //   co_flags mutation on PyCodeObject. The v1 design used co_flags but
+  //   crashed because co_flags is shared across all function objects using
+  //   the same code object, and mutation during active execution is unsafe.
+  //
   // Separate from deopt_stats_ because deopt_stats_ can be cleared by
   // cinderjit.get_and_clear_runtime_stats().
-  // NOTE: Thread safety relies on GIL (Py_GIL_DISABLED is NOT defined in our
-  // build). If moving to nogil, this map needs a mutex.
-  static constexpr uint32_t kDeoptBackoffThreshold = 100;
+  //
+  // NOTE: Thread safety relies on GIL (Py_GIL_DISABLED is NOT defined in
+  // our build). If moving to nogil, this map needs a mutex.
+  static constexpr uint32_t kDeoptBackoffThreshold = 1000;
   UnorderedMap<const CodeRuntime*, uint32_t> deopt_backoff_counts_;
 
   // Check if a CodeRuntime has exceeded the deopt backoff threshold.

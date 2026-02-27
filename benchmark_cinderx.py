@@ -42,6 +42,23 @@ USAGE:
   python3 benchmark_cinderx.py --worker=jit --condition=on
 """
 
+# REQUIRED: cinderjit.auto() must precede all stdlib imports.
+#
+# Without this, site.py loads _cinderx.so which activates the JIT with
+# compile_after_n_calls=0 (compile everything immediately). Import-time
+# functions (e.g. Tokenizer.__next) get JIT-compiled, accumulate guard
+# failures, and trigger deopt backoff (kDeoptBackoffThreshold in context.h).
+# The backoff detaches JIT mid-import, causing SIGSEGV in importlib._get_spec
+# (spec_from_loader bug, exposed by commit 105ee2c6).
+#
+# cinderjit.auto() sets compile_after_n_calls=1000, preventing import-time
+# JIT compilation entirely. Must run before any stdlib imports to be
+# effective. The -S flag on subprocess workers serves the same purpose.
+try:
+    import cinderjit; cinderjit.auto()
+except ImportError:
+    pass
+
 import argparse
 import contextlib
 import functools
@@ -76,7 +93,12 @@ def init_cinderjit(compile_mode="force"):
     try:
         import cinderx
         if hasattr(cinderx, "init"):
-            cinderx.init()
+            # cinderx.init() skipped: Bug 8 SIGSEGV on aarch64.
+            # init() registers type watchers and the frame evaluator, which
+            # triggers a crash in resumeInInterpreter (f_globals corruption).
+            # The JIT works without init() -- cinderjit.auto() is sufficient.
+            # See: benchmark_results/21-02-2026-cinderx-bugs-found.md, Bug 8.
+            pass
         import cinderjit
 
         if compile_mode == "auto":
@@ -1561,7 +1583,11 @@ def _run_worker(python_cmd, condition, compile_mode):
         env.setdefault("PYTHONJITENABLEHIRINLINER", "1")
     else:
         env.pop("PYTHONJITENABLEHIRINLINER", None)
-    cmd = python_cmd + [
+    # -S flag: skip site.py to prevent _cinderx.so from loading at Python
+    # startup with compile_after_n_calls=0. Without -S, JIT activates before
+    # the worker script runs, causing deopt backoff crashes during import.
+    # The worker script calls cinderjit.auto() explicitly after startup.
+    cmd = python_cmd + ["-S",
         os.path.abspath(__file__),
         f"--worker=jit",
         f"--condition={condition}",
