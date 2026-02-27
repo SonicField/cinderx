@@ -115,6 +115,95 @@ def init_cinderjit(compile_mode="force"):
         return None
 
 
+
+def _check_preconditions():
+    """Verify benchmark environment is correctly configured.
+
+    Fails loudly if preconditions are not met, preventing silently
+    invalid results. Each check addresses a specific failure mode
+    observed in practice.
+    """
+    # 1. -S flag: prevents compile_after_n_calls=0 during _cinderx.so
+    #    loading via site.py, which causes SIGSEGV in spec_from_loader.
+    if "site" in sys.modules:
+        print(
+            "ERROR: benchmark requires python3 -S (skip site.py).\n"
+            "site.py loads _cinderx.so which activates JIT with\n"
+            "compile_after_n_calls=0, causing import-time SIGSEGV.\n"
+            "Run: python3 -S benchmark_cinderx.py ...",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # 2. cinderjit must be importable (PYTHONPATH includes CinderX).
+    try:
+        import cinderjit
+    except ImportError:
+        print(
+            "ERROR: cannot import cinderjit.\n"
+            "Set PYTHONPATH to include cinderx/PythonLib.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # 3. JIT must be functional after cinderjit.auto().
+    if not hasattr(cinderjit, "auto"):
+        print(
+            "ERROR: cinderjit.auto() not available — build may be "
+            "incomplete or corrupt.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # 4. Verify JIT is actually active (catches false-positive
+    #    configurations where cinderjit imports but JIT never engages).
+    try:
+        if hasattr(cinderjit, "is_enabled") and not cinderjit.is_enabled():
+            print(
+                "WARNING: cinderjit loaded but JIT is not enabled.\n"
+                "Results may not reflect JIT performance.",
+                file=sys.stderr,
+            )
+    except Exception:
+        pass  # is_enabled may not exist in all builds
+
+    print("Precondition checks: PASS")
+
+
+def verify_jit_preconditions(condition):
+    """Fail loudly if JIT preconditions are not met.
+
+    Prevents false positives: silently running without JIT produces
+    interpreter results labelled as JIT results. These assertions
+    convert institutional knowledge into executable invariants.
+    """
+    if condition != "on":
+        return  # No JIT needed for baseline/off conditions
+
+    # -S flag: site.py must not have loaded _cinderx.so early
+    # (compile_after_n_calls=0 causes SIGSEGV in spec_from_loader)
+    if "site" in sys.modules:
+        print("FATAL: Running without -S flag.", file=sys.stderr)
+        print("  site.py loads _cinderx.so with compile_after_n_calls=0,", file=sys.stderr)
+        print("  causing import-time JIT compilation and crashes.", file=sys.stderr)
+        print("  Run with: python3 -S benchmark_cinderx.py ...", file=sys.stderr)
+        sys.exit(1)
+
+    # cinderjit must be importable
+    try:
+        import cinderjit
+    except ImportError:
+        print("FATAL: cinderjit not importable.", file=sys.stderr)
+        print("  Is _cinderx.so on sys.path? Check PYTHONPATH.", file=sys.stderr)
+        print("  Expected: PYTHONPATH includes cinderx/PythonLib/", file=sys.stderr)
+        sys.exit(1)
+
+    # cinderjit.auto must exist (catches partial/broken builds)
+    if not hasattr(cinderjit, "auto"):
+        print("FATAL: cinderjit.auto() not available.", file=sys.stderr)
+        print("  Build may be incomplete or incompatible.", file=sys.stderr)
+        sys.exit(1)
+
 def warmup_function(func, iters=None):
     """Warmup a function with small inputs."""
     iters = iters or WARMUP_ITERS
@@ -1613,7 +1702,12 @@ def _worker_jit(args):
 
     cinderjit_mod = None
     if condition == "on":
+        verify_jit_preconditions(condition)
         cinderjit_mod = init_cinderjit(compile_mode)
+        if cinderjit_mod is None:
+            print("FATAL: JIT requested (condition=on) but cinderjit failed to initialise.", file=sys.stderr)
+            print("  init_cinderjit() returned None. Check build and PYTHONPATH.", file=sys.stderr)
+            sys.exit(1)
         if cinderjit_mod and compile_mode == "force":
             # Warmup for bytecode specialisation
             for _, func in JIT_BENCHMARKS:
@@ -2054,6 +2148,9 @@ Environment variables:
     if args.worker == "spec":
         _worker_spec(args)
         return
+
+    # Precondition checks — fail loudly if environment is wrong
+    _check_preconditions()
 
     # Normal mode — require subcommand
     if not args.subcommand:
