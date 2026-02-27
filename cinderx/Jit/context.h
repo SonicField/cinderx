@@ -24,6 +24,7 @@
 #include "cinderx/Jit/inline_cache.h"
 #include "cinderx/Jit/pyjit_result.h"
 #include "cinderx/Jit/type_deopt_patchers.h"
+#include "cinderx/Jit/global_deopt_patcher.h"
 
 #include <functional>
 #include <memory>
@@ -363,6 +364,20 @@ class Context : public IJitContext {
   // call patcher->maybePatch(new_ty).
   void watchType(BorrowedRef<PyTypeObject> type, TypeDeoptPatcher* patcher);
 
+  // Watch a module global for changes.  When the global (identified by
+  // dict + key) changes from its expected value, the patcher fires.
+  void watchGlobal(
+      BorrowedRef<PyDictObject> globals,
+      BorrowedRef<PyUnicodeObject> key,
+      GlobalDeoptPatcher* patcher);
+
+  // Callback from GlobalCacheManager::notifyDictUpdate when a watched
+  // global changes.
+  void notifyGlobalModified(
+      BorrowedRef<PyDictObject> dict,
+      BorrowedRef<PyUnicodeObject> key,
+      BorrowedRef<> new_value);
+
   // Callback for when a type is modified or destroyed. lookup_type should be
   // the type that triggered the call (the type that's being
   // modified/deleted/otherwise messed with), and new_type should be the "new"
@@ -524,6 +539,17 @@ class Context : public IJitContext {
 
   std::unordered_map<BorrowedRef<PyTypeObject>, std::vector<TypeDeoptPatcher*>>
       type_deopt_patchers_;
+
+  // Key: (dict, key_name) pair.  Value: list of patchers watching that global.
+  using GlobalWatchKey = std::pair<BorrowedRef<PyDictObject>, BorrowedRef<PyUnicodeObject>>;
+  struct GlobalWatchKeyHash {
+    size_t operator()(const GlobalWatchKey& k) const {
+      return std::hash<PyObject*>{}(reinterpret_cast<PyObject*>(k.first.get()))
+           ^ (std::hash<PyObject*>{}(reinterpret_cast<PyObject*>(k.second.get())) << 1);
+    }
+  };
+  std::unordered_map<GlobalWatchKey, std::vector<GlobalDeoptPatcher*>, GlobalWatchKeyHash>
+      global_deopt_patchers_;
 
   Ref<> zero_;
   Ref<> str_build_class_;

@@ -456,6 +456,38 @@ void Context::notifyTypeModified(
   }
 }
 
+void Context::watchGlobal(
+    BorrowedRef<PyDictObject> globals,
+    BorrowedRef<PyUnicodeObject> key,
+    GlobalDeoptPatcher* patcher) {
+  ThreadedCompileSerialize guard;
+  global_deopt_patchers_[{globals, key}].emplace_back(patcher);
+}
+
+void Context::notifyGlobalModified(
+    BorrowedRef<PyDictObject> dict,
+    BorrowedRef<PyUnicodeObject> key,
+    BorrowedRef<> new_value) {
+  ThreadedCompileSerialize guard;
+  auto it = global_deopt_patchers_.find({dict, key});
+  if (it == global_deopt_patchers_.end()) {
+    return;
+  }
+
+  std::vector<GlobalDeoptPatcher*> remaining_patchers;
+  for (GlobalDeoptPatcher* patcher : it->second) {
+    if (not patcher->maybePatch(new_value)) {
+      remaining_patchers.emplace_back(patcher);
+    }
+  }
+
+  if (remaining_patchers.empty()) {
+    global_deopt_patchers_.erase(it);
+  } else {
+    it->second = std::move(remaining_patchers);
+  }
+}
+
 bool Context::hasCompletedCompile(CompilationKey& key) {
   return completed_compiles_.contains(key);
 }
