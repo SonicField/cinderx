@@ -14,6 +14,7 @@ namespace jit {
 class TypeDeoptPatcher : public JumpPatcher {
  public:
   explicit TypeDeoptPatcher(BorrowedRef<PyTypeObject> type);
+  virtual ~TypeDeoptPatcher();
 
   virtual bool maybePatch(BorrowedRef<PyTypeObject> new_ty);
 

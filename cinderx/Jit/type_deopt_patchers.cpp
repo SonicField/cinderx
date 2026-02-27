@@ -1,6 +1,7 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 
 #include "cinderx/Jit/type_deopt_patchers.h"
+#include "cinderx/Jit/context.h"
 
 #include "cinderx/Common/type.h"
 #include "cinderx/Common/util.h"
@@ -28,6 +29,15 @@ bool shouldPatchForAttr(
   // we attempt to give the type a new version tag before declaring success.
   BorrowedRef<> attr{typeLookupSafe(new_ty, attr_name)};
   return body(attr) || !PyUnstable_Type_AssignVersionTag(new_ty);
+}
+
+TypeDeoptPatcher::~TypeDeoptPatcher() {
+  if (isLinked() && type_ != nullptr) {
+    Context* ctx = getContext();
+    if (ctx != nullptr) {
+      ctx->unwatchType(type_, this);
+    }
+  }
 }
 
 TypeDeoptPatcher::TypeDeoptPatcher(BorrowedRef<PyTypeObject> type)
