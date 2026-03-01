@@ -3292,8 +3292,17 @@ void HIRBuilder::emitLoadAttr(
         // the type hierarchy. One-time compile-time cost.
         PyTypeObject* slot_type = findTypeByVersionTag(type_version);
         if (slot_type != nullptr) {
-          Type type = Type::fromTypeExact(slot_type);
-          tc.emit<GuardType>(receiver, type, receiver);
+          // Skip exact-type guard for types with subclasses to prevent
+          // deopt cascade: when a subclass instance (e.g. Network) reaches
+          // code compiled for the parent (e.g. Layer), the exact-type guard
+          // fails repeatedly until deopt threshold triggers JIT detach.
+          // Without the guard, the JIT stays compiled and falls through to
+          // generic LoadAttr via CPython's inline cache.
+          if (slot_type->tp_subclasses == nullptr ||
+              PyDict_GET_SIZE(slot_type->tp_subclasses) == 0) {
+            Type type = Type::fromTypeExact(slot_type);
+            tc.emit<GuardType>(receiver, type, receiver);
+          }
         }
         break;
       }
