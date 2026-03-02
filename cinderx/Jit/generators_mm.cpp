@@ -19,7 +19,13 @@ namespace jit {
 
 namespace {
 
-static_assert(sizeof(GenDataFooter) == 80, "GenDataFooter size mismatch in generators_mm.cpp");
+#if defined(ENABLE_LIGHTWEIGHT_FRAMES) && defined(__aarch64__)
+static_assert(sizeof(GenDataFooter) == 80, "GenDataFooter size mismatch");
+#elif defined(ENABLE_LIGHTWEIGHT_FRAMES) || defined(__aarch64__)
+static_assert(sizeof(GenDataFooter) == 72, "GenDataFooter size mismatch");
+#else
+static_assert(sizeof(GenDataFooter) == 64, "GenDataFooter size mismatch");
+#endif
 
 size_t computeSlots(BorrowedRef<PyCodeObject> code, uint64_t jit_data_size) {
   // A "slot" is the size of PyObject* and we assume this just means 64 bits for

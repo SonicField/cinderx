@@ -5,7 +5,8 @@
 
 set -euo pipefail
 
-CINDERX_ROOT="$HOME/local/cinderx_dev/cinderx"
+CINDERX_ROOT="${CINDERX_ROOT:-$HOME/local/cinderx_dev/cinderx}"
+PYTHON_INSTALL="${PYTHON_INSTALL:-$HOME/local/cinderx_dev/python-install}"
 VENV="$HOME/local/cinderx_dev/venv"
 SO_NAME="_cinderx.cpython-312-aarch64-linux-gnu.so"
 OUTPUT_DIR="$CINDERX_ROOT/scratch/lib.linux-aarch64-cpython-312/cinderx"
@@ -30,8 +31,18 @@ cd "$CINDERX_ROOT"
 export CC=/opt/llvm/stable/Toolchains/llvm-sand.xctoolchain/usr/bin/clang
 export CXX=/opt/llvm/stable/Toolchains/llvm-sand.xctoolchain/usr/bin/clang++
 
+# Use python-install Python (pinned version, not fbcode platform Python which
+# may be updated by fbcode and break CinderX ABI compatibility).
+# Falls back to venv python if python-install is not available.
+BUILD_PYTHON="$PYTHON_INSTALL/bin/python3.12"
+if [ ! -x "$BUILD_PYTHON" ]; then
+    BUILD_PYTHON="$VENV/bin/python3"
+    echo "WARNING: python-install not found, falling back to venv Python"
+fi
+
 echo "=== Building with setup.py ==="
-"$VENV/bin/python3" setup.py build_ext --inplace 2>&1
+echo "Python: $BUILD_PYTHON ($($BUILD_PYTHON --version 2>&1))"
+"$BUILD_PYTHON" setup.py build_ext --inplace 2>&1
 
 # Copy to PythonLib
 if [ -f "$OUTPUT_DIR/$SO_NAME" ]; then

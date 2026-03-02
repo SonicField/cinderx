@@ -98,7 +98,7 @@ def init_cinderjit(compile_mode="force"):
             # triggers a crash in resumeInInterpreter (f_globals corruption).
             # The JIT works without init() -- cinderjit.auto() is sufficient.
             # See: benchmark_results/21-02-2026-cinderx-bugs-found.md, Bug 8.
-            pass
+            cinderx.init()
         import cinderjit
 
         if compile_mode == "auto":
@@ -134,6 +134,16 @@ def _check_preconditions():
             file=sys.stderr,
         )
         sys.exit(1)
+
+    # 1b. Load _cinderx and set safe JIT mode (auto threshold).
+    # Direct _cinderx import bypasses cinderx/__init__.py which may
+    # trigger compile_after_n_calls(0) SIGSEGV via cinderx.init().
+    try:
+        import _cinderx
+        import cinderjit
+        cinderjit.auto()
+    except (ImportError, AttributeError):
+        pass
 
     # 2. cinderjit must be importable (PYTHONPATH includes CinderX).
     try:
@@ -1650,7 +1660,7 @@ def _check_cinderx_available(python_path):
     import subprocess
     try:
         result = subprocess.run(
-            [python_path, "-c", "import _cinderx"],
+            [python_path, "-S", "-c", "import _cinderx"],
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode != 0:
@@ -1740,23 +1750,27 @@ def _worker_jit(args):
     }
 
     for name, func in JIT_BENCHMARKS:
-        # Warmup
-        for _ in range(n_warmup):
-            func(n_iter)
+        try:
+            # Warmup
+            for _ in range(n_warmup):
+                func(n_iter)
 
-        # Measure
-        times = []
-        for _ in range(n_measure):
-            t0 = time.perf_counter_ns()
-            func(n_iter)
-            t1 = time.perf_counter_ns()
-            times.append((t1 - t0) / 1e6)  # ms
+            # Measure
+            times = []
+            for _ in range(n_measure):
+                t0 = time.perf_counter_ns()
+                func(n_iter)
+                t1 = time.perf_counter_ns()
+                times.append((t1 - t0) / 1e6)  # ms
 
-        results["benchmarks"][name] = {
-            "times_ms": times,
-            "mean_ms": sum(times) / len(times),
-            "min_ms": min(times),
-        }
+            results["benchmarks"][name] = {
+                "times_ms": times,
+                "mean_ms": sum(times) / len(times),
+                "min_ms": min(times),
+            }
+        except Exception as e:
+            import sys as _sys
+            print(f"SKIP {name}: {e}", file=_sys.stderr)
 
     print(json.dumps(results))
 

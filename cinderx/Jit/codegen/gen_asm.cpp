@@ -2622,7 +2622,13 @@ void NativeGenerator::generateResumeEntry(const FrameInfo& frame_info) {
   // This must match the allocation in JITRT_AllocateAndLinkGenAndInterpreterFrame
   // and computeSlots() in generators_mm.cpp.
   {
-    static_assert(sizeof(GenDataFooter) == 80, "GenDataFooter size mismatch — check ENABLE_LIGHTWEIGHT_FRAMES and __aarch64__ defines");
+#if defined(ENABLE_LIGHTWEIGHT_FRAMES) && defined(__aarch64__)
+    static_assert(sizeof(GenDataFooter) == 80, "GenDataFooter size mismatch");
+#elif defined(ENABLE_LIGHTWEIGHT_FRAMES) || defined(__aarch64__)
+    static_assert(sizeof(GenDataFooter) == 72, "GenDataFooter size mismatch");
+#else
+    static_assert(sizeof(GenDataFooter) == 64, "GenDataFooter size mismatch");
+#endif
     auto gen_type = cinderx::getModuleState()->genType();
     Py_ssize_t python_frame_slots =
         _PyFrame_NumSlotsForCodeObject(GetFunction()->code);

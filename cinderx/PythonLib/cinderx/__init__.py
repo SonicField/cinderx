@@ -51,7 +51,7 @@ def is_supported_runtime() -> bool:
         # native extension doesn't support free-threading properly yet.
         return environ.get("PYTHON_GIL") != "0"
     if version == (3, 12):
-        return "+meta" in sys.version
+        return True
     if version == (3, 10):
         return "+cinder" in sys.version
     return False
@@ -580,7 +580,7 @@ def init() -> None:
     if _is_init:
         return
 
-    maybe_enable_parallel_gc()
+    # maybe_enable_parallel_gc()  # disabled for vanilla CPython
 
     _is_init = True
 

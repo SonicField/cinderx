@@ -11,6 +11,9 @@
 // clang-format off
 
 #include "cinderx/UpstreamBorrow/borrowed.h"
+
+// Definition of Cix_PyUnion_Type for runtime lookup (vanilla CPython compatibility).
+PyTypeObject* Cix_PyUnion_Type = NULL;
 #include "cinderx/module_c_state.h"
 
 // In 3.12 _PyAsyncGenValueWrapperNew needs thread-state. As this is used from
@@ -602,10 +605,21 @@ PyObject* Ci_Builtin_Next_Core(PyObject* it, PyObject* def) {
 }
 
 int init_upstream_borrow(void) {
-  // Nothing to do here; retained for consistency with 3.10
+  // Initialize the Cix_PyUnion_Type global reference via runtime lookup.
+  // This works with both Meta and vanilla CPython (where _PyUnion_Type has
+  // hidden visibility).
+  PyObject* unionobj =
+      PyNumber_Or((PyObject*)&PyLong_Type, (PyObject*)&PyUnicode_Type);
+  if (unionobj != NULL) {
+    Cix_PyUnion_Type = Py_TYPE(unionobj);
+    Py_DECREF(unionobj);
+  }
+  if (Cix_PyUnion_Type == NULL) {
+    return -1;
+  }
   return 0;
-}
 
+}
 // Internal dependencies for gen_dealloc.
 static inline PyCodeObject *
 _PyGen_GetCode(PyGenObject *gen) {
@@ -651,7 +665,9 @@ gen_dealloc(PyGenObject *gen)
     Py_CLEAR(gen->gi_name);
     Py_CLEAR(gen->gi_qualname);
     _PyErr_ClearExcState(&gen->gi_exc_state);
+#ifdef ENABLE_GENERATOR_AWAITER
     Py_CLEAR(gen->gi_ci_awaiter);
+#endif
     PyObject_GC_Del(gen);
 }
 #undef PyObject_GC_Del

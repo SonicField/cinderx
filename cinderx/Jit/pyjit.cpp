@@ -142,7 +142,7 @@ bool isPreloaded(BorrowedRef<PyFunctionObject> func) {
   return hir::preloaderManager().find(func) != nullptr;
 }
 
-void incrementShadowcodeCall([[maybe_unused]] BorrowedRef<PyCodeObject> code) {
+void incrementShadowcodeCall(BorrowedRef<PyCodeObject> code) {
 #if SHADOWCODE_SUPPORTED
   // The interpreter will only increment up to the shadowcode threshold
   // PYSHADOW_INIT_THRESHOLD. After that, it will stop incrementing. If someone
@@ -150,6 +150,13 @@ void incrementShadowcodeCall([[maybe_unused]] BorrowedRef<PyCodeObject> code) {
   // counting.
   if (code->co_mutable->ncalls > PYSHADOW_INIT_THRESHOLD) {
     code->co_mutable->ncalls++;
+  }
+#else
+  // On vanilla CPython 3.12+, shadow code is not available. Increment
+  // the call count via codeExtra, matching how countCalls() reads it.
+  auto extra = codeExtra(code);
+  if (extra != nullptr) {
+    Ci_code_extra_incr_calls(extra);
   }
 #endif
 }
