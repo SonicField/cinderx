@@ -203,6 +203,10 @@ UnitState getUnitState(_PyInterpreterFrame* frame) {
   //
   UnitState unit_state;
   unit_state.reserve(unit_frames.size());
+  if (unit_frames.empty()) {
+    JIT_LOG("getUnitState: no unit frames, returning empty");
+    return {};
+  }
   _PyInterpreterFrame* non_inlined_sf = unit_frames[0];
   CodeRuntime* code_rt = getCodeRuntime(non_inlined_sf);
   JIT_CHECK(code_rt != nullptr, "failed to find code runtime");
