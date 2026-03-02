@@ -436,7 +436,7 @@ class BuildExt(build_ext):
         set_option("ENABLE_GENERATOR_AWAITER", meta_312)
         set_option("ENABLE_INTERPRETER_LOOP", meta_312 or is_314plus)
         set_option("ENABLE_LAZY_IMPORTS", meta_312)
-        set_option("ENABLE_LIGHTWEIGHT_FRAMES", meta_312)
+        set_option("ENABLE_LIGHTWEIGHT_FRAMES", True)
         set_option("ENABLE_PARALLEL_GC", meta_312)
         set_option("ENABLE_PEP523_HOOK", meta_312 or is_314plus)
         set_option("ENABLE_PERF_TRAMPOLINE", meta_312)

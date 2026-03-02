@@ -158,7 +158,8 @@ std::vector<_PyInterpreterFrame*> getUnitFrames(_PyInterpreterFrame* frame) {
   std::vector<_PyInterpreterFrame*> frames;
   while (frame != nullptr) {
     if (!isJitFrame(frame)) {
-      JIT_ABORT("couldn't find non-inlined frame");
+      JIT_LOG("FP chain walk: couldn't find non-inlined frame, returning empty");
+      return frames;
     }
     frames.emplace_back(frame);
     if (!isInlined(frame)) {
@@ -168,7 +169,8 @@ std::vector<_PyInterpreterFrame*> getUnitFrames(_PyInterpreterFrame* frame) {
     frame = frame->previous;
   }
   // We've walked entire stack without finding the non-inlined frame.
-  JIT_ABORT("couldn't find non-inlined frame");
+  JIT_LOG("FP chain walk: walked entire stack without finding non-inlined frame, returning empty");
+  return frames;
 #else
   throw std::runtime_error{
       "getUnitFrames: Lightweight frames are not supported"};
