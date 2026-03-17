@@ -642,6 +642,12 @@ gen_dealloc(PyGenObject *gen)
 
     _PyObject_GC_TRACK(self);
 
+    // H5: Skip finalizer for suspended JIT generators to prevent SIGSEGV.
+    // The JIT frame cannot be safely re-entered by gen_close.
+    if (gen->gi_frame_state == FRAME_SUSPENDED) {
+        gen->gi_frame_state = FRAME_COMPLETED;
+    }
+
     if (PyObject_CallFinalizerFromDealloc(self))
         return;                     /* resurrected.  :( */
 
