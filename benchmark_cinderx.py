@@ -482,10 +482,12 @@ ABBA_BENCHMARKS = [
     ("issubclass",   make_issubclass),
     ("hasattr",      make_hasattr),
     ("getattr",      make_getattr_bench),
-    # SKIP: next and next_default crash with JIT force_compile on aarch64
-    # CinderX JIT bug: next() on generators produces invalid native code
-    # ("next",         make_next_bench),
-    # ("next_default", make_next_default),
+    ("next",         make_next_bench),
+    ("next_default", make_next_default),
+
+
+
+
     ("divmod",       make_divmod_bench),
 ]
 
@@ -1544,10 +1546,6 @@ def cmd_abba(args):
 
 def cmd_g1(args):
     """Run G1 fast path benchmark: JIT gen vs interp gen."""
-    # Skip on aarch64: JIT generator next() causes SIGSEGV (known bug).
-    if platform.machine() == "aarch64":
-        print("SKIPPING g1: JIT generator next() SIGSEGV on aarch64 (known bug)")
-        return
     print("=" * 72)
     print("G1 Fast Path ABBA Benchmark — JITRT_InvokeIterNext")
     print("=" * 72)
@@ -2093,7 +2091,7 @@ def cmd_all(args):
 
     cmd_abba(args)
     print()
-    print('SKIPPING g1: JIT generator next() SIGSEGV on aarch64 (known bug)')
+    cmd_g1(args)
     print()
     cmd_jit(args)
     print()
