@@ -1599,7 +1599,7 @@ PyObject* compile_after_n_calls(PyObject* /* self */, PyObject* arg) {
 
 PyObject* auto_jit(PyObject* /* self */, PyObject* /* arg */) {
   // Default value that works well for most applications.
-  if (compile_after_n_calls_impl(1000) < 0) {
+  if (compile_after_n_calls_impl(5000) < 0) {
     return nullptr;
   }
 
