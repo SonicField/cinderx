@@ -1725,6 +1725,91 @@ Register* simplifyCallMethod(Env& env, const CallMethod* instr) {
     }
   }
 
+  // Handle CallMethod whose func comes from LoadAttrSpecial for __exit__ or
+  // __aexit__. The with-statement bytecode calls __exit__ via CALL which the
+  // builder emits as CallMethod. simplifyVectorCallBoundMethod only handles
+  // VectorCall, so __exit__ calls are never simplified. This block resolves
+  // the bound method to a static VectorCall, enabling the inliner to inline
+  // it — same pattern as simplifyVectorCallBoundMethod for __enter__.
+#if PY_VERSION_HEX >= 0x030C0000
+  {
+    Register* func_reg = instr->func();
+    Instr* func_def = func_reg->instr();
+    if (func_def != nullptr && func_def->IsLoadAttrSpecial()) {
+      auto load_attr_special =
+          static_cast<const LoadAttrSpecial*>(func_def);
+      PyObject* attr_id = load_attr_special->id();
+
+      if (attr_id == &_Py_ID(__exit__) || attr_id == &_Py_ID(__aexit__)) {
+        Register* receiver = load_attr_special->GetOperand(0);
+        Type receiver_type = receiver->type();
+        BorrowedRef<PyTypeObject> py_type{receiver_type.runtimePyType()};
+
+        if (receiver_type.isExact() && py_type != nullptr &&
+            PyType_HasFeature(py_type, Py_TPFLAGS_READY)) {
+          bool version_ok = getThreadedCompileContext().compileRunning()
+              ? Ci_Type_HasValidVersionTag(py_type)
+              : ensureVersionTag(py_type);
+
+          if (version_ok) {
+            BorrowedRef<> method{typeLookupSafe(py_type, attr_id)};
+            if (method != nullptr && PyFunction_Check(method)) {
+              // Ensure a preloader exists for the resolved callee.
+              if (!getThreadedCompileContext().compileRunning()) {
+                BorrowedRef<PyFunctionObject> py_func{method};
+                if (preloaderManager().find(py_func) == nullptr) {
+                  auto callee_preloader =
+                      Preloader::makePreloader(py_func);
+                  if (callee_preloader) {
+                    preloaderManager().add(
+                        BorrowedRef<PyCodeObject>{py_func->func_code},
+                        std::move(callee_preloader));
+                  }
+                }
+              }
+
+              env.emitInstr<Snapshot>(*instr->frameState());
+
+              if (!_PyClassLoader_IsImmutable(py_type)) {
+                auto patchpoint = env.emitInstr<DeoptPatchpoint>(
+                    env.func.allocateCodePatcher<TypeAttrDeoptPatcher>(
+                        py_type,
+                        BorrowedRef<PyUnicodeObject>{attr_id},
+                        method));
+                patchpoint->setGuiltyReg(receiver);
+                patchpoint->setDescr("CallMethod __exit__ method resolution");
+              }
+              env.emit<UseType>(receiver, receiver_type.unspecialized());
+
+              Register* func_const = env.emit<LoadConst>(
+                  Type::fromObject(
+                      env.func.env.addReference(method.get())));
+
+              // Build VectorCall: resolved_func, receiver (self), then the
+              // original CallMethod operands (exc_type, exc_val, exc_tb).
+              // CallMethod operands 1..N are the args passed to the bound
+              // method — prepend the receiver as self for the static call.
+              size_t cm_noperands = instr->NumOperands();
+              auto new_call = env.emitRawInstr<VectorCall>(
+                  cm_noperands + 1,
+                  env.func.env.AllocateRegister(),
+                  CallFlags::Static,
+                  *instr->frameState());
+              new_call->SetOperand(0, func_const);
+              new_call->SetOperand(1, receiver);
+              for (size_t i = 1; i < cm_noperands; ++i) {
+                new_call->SetOperand(i + 1, instr->GetOperand(i));
+              }
+
+              return new_call->output();
+            }
+          }
+        }
+      }
+    }
+  }
+#endif
+
   return nullptr;
 }
 

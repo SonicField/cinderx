@@ -560,101 +560,30 @@ void InlineFunctionCalls::Run(Function& irfunc) {
               }
             }
             if (mono_type != nullptr) {
-              // PIC: Collect all observed types from IC entries.
-              std::vector<PyTypeObject*> pic_types;
-              for (const auto& entry : ic->entries()) {
-                if (entry.type != nullptr) {
-                  bool found = false;
-                  for (auto* t : pic_types) {
-                    if (t == entry.type) { found = true; break; }
-                  }
-                  if (!found) {
-                    pic_types.push_back(entry.type);
-                  }
-                }
-              }
-              // Also add subclasses of mono_type (for inheritance patterns
-              // like bench_deep_class where Network extends Layer).
-              if (mono_type->tp_subclasses != nullptr) {
-                PyObject* key;
-                PyObject* ref;
-                Py_ssize_t pos = 0;
-                while (PyDict_Next(
-                    mono_type->tp_subclasses, &pos, &key, &ref)) {
-                  PyObject* sub = PyWeakref_GetObject(ref);
-                  if (sub != Py_None && PyType_Check(sub)) {
-                    PyTypeObject* sub_type = (PyTypeObject*)sub;
-                    bool found = false;
-                    for (auto* t : pic_types) {
-                      if (t == sub_type) { found = true; break; }
-                    }
-                    if (!found) {
-                      pic_types.push_back(sub_type);
-                    }
-                  }
-                }
-              }
-
-              if (pic_types.size() == 1) {
-                // Monomorphic: use original exact guard (fast path).
-                auto& env = irfunc.env;
-                Register* guarded = env.AllocateRegister();
-                Type guard_type = Type::fromTypeExact(mono_type);
-                FrameState deopt_fs(*def->asDeoptBase()->frameState());
-                deopt_fs.stack.push(receiver);
-                auto* guard = GuardType::create(
-                    guarded, guard_type, receiver, deopt_fs);
-                auto* snapshot = Snapshot::create(deopt_fs);
-                snapshot->copyBytecodeOffset(*def);
-                snapshot->InsertBefore(*call.instr);
-                guard->InsertBefore(*call.instr);
-                LOG_INLINER(
-                    "Inserted GuardType for speculative inline, type={}",
-                    mono_type->tp_name);
-              } else if (pic_types.size() > 1) {
-                // Polymorphic: emit CondBranchCheckType chain.
-                // Each type gets its own branch; fallback skips inlining
-                // (no deopt, just generic call).
-                BasicBlock* inline_block = irfunc.cfg.AllocateBlock();
-                BasicBlock* fallback_block = irfunc.cfg.AllocateBlock();
-                BasicBlock* current_check = nullptr;
-
-                for (size_t i = 0; i < pic_types.size(); ++i) {
-                  Type check_type = Type::fromTypeExact(pic_types[i]);
-                  if (i == 0) {
-                    // First check: insert before call.instr in current block
-                    BasicBlock* next_check =
-                        (i + 1 < pic_types.size())
-                            ? irfunc.cfg.AllocateBlock()
-                            : fallback_block;
-                    auto* branch = CondBranchCheckType::create(
-                        receiver, check_type, inline_block, next_check);
-                    branch->InsertBefore(*call.instr);
-                    current_check = next_check;
-                  } else if (i < pic_types.size() - 1) {
-                    // Middle checks: in their own blocks
-                    BasicBlock* next_check = irfunc.cfg.AllocateBlock();
-                    current_check->push_back(
-                        *CondBranchCheckType::create(
-                            receiver, check_type, inline_block, next_check));
-                    current_check = next_check;
-                  } else {
-                    // Last check: fallback is the false branch
-                    current_check->push_back(
-                        *CondBranchCheckType::create(
-                            receiver, check_type, inline_block,
-                            fallback_block));
-                  }
-                }
-
-                // Fallback block: skip inlining, branch to after the call
-                // (the call instruction stays in the original block and
-                // will be moved to fallback during CFG restructuring).
-
-                LOG_INLINER(
-                    "Inserted PIC guard for speculative inline, {} types",
-                    pic_types.size());
-              }
+              auto& env = irfunc.env;
+              Register* guarded = env.AllocateRegister();
+              Type guard_type = Type::fromTypeExact(mono_type);
+              // Construct deopt FrameState at the LOAD_METHOD bytecode
+              // offset with the receiver on the operand stack.
+              // LoadMethodCached FrameState has the correct bytecodeOffset
+              // (LOAD_METHOD) but an empty stack because emitLoadMethod()
+              // pops the receiver before emitting the instruction. Clone
+              // the FrameState and push the receiver back so that deopt
+              // re-executes LOAD_METHOD from the correct interpreter state.
+              FrameState deopt_fs(*def->asDeoptBase()->frameState());
+              deopt_fs.stack.push(receiver);
+              auto* guard = GuardType::create(
+                  guarded, guard_type, receiver, deopt_fs);
+              // Insert Snapshot with the same corrected FrameState before
+              // the guard. refcount_insertion's snapshot resolution overwrites
+              // guard FrameStates with the dominating Snapshot's FrameState.
+              auto* snapshot = Snapshot::create(deopt_fs);
+              snapshot->copyBytecodeOffset(*def);
+              snapshot->InsertBefore(*call.instr);
+              guard->InsertBefore(*call.instr);
+              LOG_INLINER(
+                  "Inserted GuardType for speculative inline, type={}",
+                  mono_type->tp_name);
             }
           }
         }
