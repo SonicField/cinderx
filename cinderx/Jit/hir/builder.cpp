@@ -3442,11 +3442,11 @@ void HIRBuilder::emitLoadAttr(
         }
         break;
       }
-      case LOAD_ATTR_SLOT:
-      case LOAD_ATTR_INSTANCE_VALUE: {
-        // Read the type version from CPython's inline cache.
-        // The cache follows the instruction word in the bytecode array.
-        // Layout: _PyAttrCache { counter, version[2], index }
+      case LOAD_ATTR_SLOT: {
+        // LOAD_ATTR_SLOT direct LoadField specialisation.
+        // For __slots__ types, cache->index is the byte offset from the
+        // object pointer to the slot value. Emit GuardType + direct
+        // LoadField at that offset, bypassing the generic C API path.
         _Py_CODEUNIT* code_units = codeUnit(code_);
         int instr_idx = bc_instr.opcodeIndex().value();
         const _PyAttrCache* cache =
@@ -3454,16 +3454,122 @@ void HIRBuilder::emitLoadAttr(
         uint32_t type_version =
             cache->version[0] |
             (static_cast<uint32_t>(cache->version[1]) << 16);
-        // Find the PyTypeObject* matching this version tag by walking
-        // the type hierarchy. One-time compile-time cost.
+        uint16_t slot_offset = cache->index;
+
         PyTypeObject* slot_type = findTypeByVersionTag(type_version);
+        if (slot_type != nullptr &&
+            (slot_type->tp_subclasses == nullptr ||
+             PyDict_GET_SIZE(slot_type->tp_subclasses) == 0)) {
+          Type type = Type::fromTypeExact(slot_type);
+          tc.emit<GuardType>(receiver, type, receiver);
+
+          BorrowedRef<> attr_name =
+              PyTuple_GET_ITEM(code_->co_names, name_idx);
+
+          // Direct load at the slot byte offset.
+          // CPython LOAD_ATTR_SLOT does: *(PyObject**)((char*)owner + index)
+          Register* attr = temps_.AllocateStack();
+          tc.emit<LoadField>(
+              attr, receiver, "slot",
+              static_cast<int>(slot_offset), TOptObject);
+
+          // Check attribute is not NULL (uninitialised slot).
+          Register* result = temps_.AllocateStack();
+          auto cf = tc.emit<CheckField>(
+              result, attr, attr_name, tc.frame);
+          cf->setGuiltyReg(receiver);
+
+          tc.frame.stack.push(result);
+          return;
+        }
+        // Fallback: no type found or has subclasses — generic LoadAttr.
+        break;
+      }
+      case LOAD_ATTR_INSTANCE_VALUE: {
+        // LOAD_ATTR_INSTANCE_VALUE direct LoadField specialisation.
+        // Instead of falling through to generic LoadAttr (which goes through
+        // C++ inline cache -> dict lookup -> branch mispredictions), emit
+        // a direct field load at the cached offset from CPython's adaptive
+        // cache. This matches what simplifyLoadAttrSplitDict does in the
+        // Simplify pass, but at build time.
+        _Py_CODEUNIT* code_units = codeUnit(code_);
+        int instr_idx = bc_instr.opcodeIndex().value();
+        const _PyAttrCache* cache =
+            reinterpret_cast<const _PyAttrCache*>(&code_units[instr_idx + 1]);
+        uint32_t type_version =
+            cache->version[0] |
+            (static_cast<uint32_t>(cache->version[1]) << 16);
+        uint16_t index = cache->index;
+
+        PyTypeObject* slot_type = findTypeByVersionTag(type_version);
+        if (slot_type != nullptr &&
+            (slot_type->tp_subclasses == nullptr ||
+             PyDict_GET_SIZE(slot_type->tp_subclasses) == 0) &&
+            PyType_HasFeature(slot_type, Py_TPFLAGS_MANAGED_DICT)) {
+
+          BorrowedRef<PyHeapTypeObject> ht(reinterpret_cast<PyHeapTypeObject*>(slot_type));
+          if (ht->ht_cached_keys != nullptr) {
+            Type type = Type::fromTypeExact(slot_type);
+            tc.emit<GuardType>(receiver, type, receiver);
+
+            BorrowedRef<> attr_name =
+                PyTuple_GET_ITEM(code_->co_names, name_idx);
+
+            // Load PyDictOrValues from managed dict slot (offset -3).
+            // In CPython 3.12, managed dict pointer is at
+            // -3 * sizeof(PyObject*) from the object.
+            Register* dorv = temps_.AllocateStack();
+            tc.emit<LoadField>(
+                dorv, receiver, "__dict__",
+                -3 * static_cast<int>(sizeof(PyObject*)), TOptDict);
+
+            // Check dorv is not NULL (object has dict/values allocated).
+            Register* checked_dorv = temps_.AllocateStack();
+            auto cf = tc.emit<CheckField>(
+                checked_dorv, dorv, attr_name, tc.frame);
+            cf->setGuiltyReg(receiver);
+
+            // Check low bit: 1 means inline values, 0 means regular dict.
+            Register* one = temps_.AllocateStack();
+            tc.emit<LoadConst>(one, Type::fromCUInt(1, TCUInt64));
+            Register* dorv_int = temps_.AllocateStack();
+            tc.emit<BitCast>(dorv_int, checked_dorv, TCUInt64);
+            Register* is_values = temps_.AllocateStack();
+            tc.emit<IntBinaryOp>(
+                is_values, BinaryOpKind::kAnd, dorv_int, one);
+            auto guard = tc.emit<Guard>(is_values, tc.frame);
+            guard->setGuiltyReg(receiver);
+            guard->setDescr("dict values check");
+
+            // Get values pointer: dorv + 1 (see simplifyLoadAttrSplitDict).
+            // The tagged pointer layout makes dorv+1 point to the start
+            // of the values array for LoadField indexing.
+            Register* values_ptr = temps_.AllocateStack();
+            tc.emit<IntBinaryOp>(
+                values_ptr, BinaryOpKind::kAdd, dorv_int, one);
+            Register* values_obj = temps_.AllocateStack();
+            tc.emit<BitCast>(values_obj, values_ptr, TOptObject);
+
+            // Load attribute at cached index.
+            Register* attr = temps_.AllocateStack();
+            tc.emit<LoadField>(
+                attr, values_obj, "attr",
+                static_cast<int>(index) * static_cast<int>(sizeof(PyObject*)),
+                TOptObject);
+
+            // Check attribute is not NULL (not deleted).
+            Register* result = temps_.AllocateStack();
+            auto cf2 = tc.emit<CheckField>(
+                result, attr, attr_name, tc.frame);
+            cf2->setGuiltyReg(receiver);
+
+            tc.frame.stack.push(result);
+            return;
+          }
+        }
+        // Fallback: emit GuardType only if we found the type but couldn't
+        // do the direct load (e.g., no MANAGED_DICT, has subclasses).
         if (slot_type != nullptr) {
-          // Skip exact-type guard for types with subclasses to prevent
-          // deopt cascade: when a subclass instance (e.g. Network) reaches
-          // code compiled for the parent (e.g. Layer), the exact-type guard
-          // fails repeatedly until deopt threshold triggers JIT detach.
-          // Without the guard, the JIT stays compiled and falls through to
-          // generic LoadAttr via CPython's inline cache.
           if (slot_type->tp_subclasses == nullptr ||
               PyDict_GET_SIZE(slot_type->tp_subclasses) == 0) {
             Type type = Type::fromTypeExact(slot_type);
