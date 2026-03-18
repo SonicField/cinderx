@@ -320,12 +320,7 @@ void TranslateGuard(Environ* env, const Instruction* instr) {
         }
         break;
       case kNotNegative: {
-        // Ideally we'd do but we don't know if we're outside the 32kb
-        // displacement limit as->tbnz(reg, sign_bit, deopt_label);
-        auto skip = as->newLabel();
-        as->tbz(reg, sign_bit, skip);
-        as->b(deopt_label);
-        as->bind(skip);
+        as->tbnz(reg, sign_bit, deopt_label);
         break;
       }
       case kZero:
