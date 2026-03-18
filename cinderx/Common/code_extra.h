@@ -16,6 +16,10 @@ typedef struct CodeExtra {
     // Used for unallocated free list code extras
     struct CodeExtra* next;
   };
+  // Set by scheduleJitCompile when this code is registered for JIT.
+  // Ci_EvalFrame checks this at start_frame to install jitVectorcall
+  // when the call count reaches the compilation threshold.
+  bool jit_eligible;
 } CodeExtra;
 
 // Thread-safe accessors for CodeExtra::calls.

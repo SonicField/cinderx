@@ -42,22 +42,25 @@ USAGE:
   python3 benchmark_cinderx.py --worker=jit --condition=on
 """
 
-# REQUIRED: cinderjit.auto() must precede all stdlib imports.
+# GUARD: cinderjit.auto() must precede all stdlib imports to prevent SIGSEGV.
 #
 # Without this, site.py loads _cinderx.so which activates the JIT with
 # compile_after_n_calls=0 (compile everything immediately). Import-time
-# functions (e.g. Tokenizer.__next) get JIT-compiled, accumulate guard
-# failures, and trigger deopt backoff (kDeoptBackoffThreshold in context.h).
-# The backoff detaches JIT mid-import, causing SIGSEGV in importlib._get_spec
-# (spec_from_loader bug, exposed by commit 105ee2c6).
+# functions get JIT-compiled, accumulate guard failures, and trigger deopt
+# backoff → SIGSEGV in importlib._get_spec.
 #
 # cinderjit.auto() sets compile_after_n_calls=1000, preventing import-time
-# JIT compilation entirely. Must run before any stdlib imports to be
-# effective. The -S flag on subprocess workers serves the same purpose.
-try:
-    import cinderjit; cinderjit.auto()
-except ImportError:
-    pass
+# JIT compilation. Workers use -S flag and call init_cinderjit() explicitly.
+#
+# GATED behind __name__ == "__main__": importing this module from external
+# code must NOT activate JIT. Previous unconditional activation caused six
+# measurement reversals (D-1773813690). JIT is always active for direct
+# execution — no PYTHONJIT env var required.
+if __name__ == "__main__":
+    try:
+        import cinderjit; cinderjit.auto()
+    except ImportError:
+        pass
 
 import argparse
 import contextlib
@@ -71,8 +74,6 @@ import statistics
 import subprocess
 import sys
 import time
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # Configuration defaults
 # ═══════════════════════════════════════════════════════════════════════════
@@ -82,8 +83,6 @@ BENCH_ITERS = 50_000
 INNER_ITERS = 100
 WARMUP_ITERS = 5_000
 COMPILE_THRESHOLD = 999_999_999  # Prevent auto-compilation when not wanted
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # CinderX helpers
 # ═══════════════════════════════════════════════════════════════════════════
@@ -92,13 +91,7 @@ def init_cinderjit(compile_mode="force"):
     """Initialise CinderX JIT. Returns cinderjit module or None."""
     try:
         import cinderx
-        if hasattr(cinderx, "init"):
-            # cinderx.init() skipped: Bug 8 SIGSEGV on aarch64.
-            # init() registers type watchers and the frame evaluator, which
-            # triggers a crash in resumeInInterpreter (f_globals corruption).
-            # The JIT works without init() -- cinderjit.auto() is sufficient.
-            # See: benchmark_results/21-02-2026-cinderx-bugs-found.md, Bug 8.
-            cinderx.init()
+        cinderx.init()  # Registers cinderjit module; Bug 8 fixed by disabling maybe_enable_parallel_gc
         import cinderjit
 
         if compile_mode == "auto":
@@ -113,8 +106,6 @@ def init_cinderjit(compile_mode="force"):
         return cinderjit
     except (ImportError, AttributeError):
         return None
-
-
 
 def _check_preconditions():
     """Verify benchmark environment is correctly configured.
@@ -135,29 +126,34 @@ def _check_preconditions():
         )
         sys.exit(1)
 
-    # 1b. Load _cinderx and set safe JIT mode (auto threshold).
-    # Direct _cinderx import bypasses cinderx/__init__.py which may
-    # trigger compile_after_n_calls(0) SIGSEGV via cinderx.init().
+    # 2. Initialise CinderX before importing cinderjit.
+    #    cinderjit is registered as a module during cinderx.init().
+    #    With -S, site.py does not auto-load _cinderx.so, so we must
+    #    init explicitly here.
     try:
-        import _cinderx
-        import cinderjit
-        cinderjit.auto()
-    except (ImportError, AttributeError):
-        pass
+        import cinderx
+        cinderx.init()
+    except (ImportError, AttributeError) as e:
+        print(
+            f"ERROR: cannot initialise cinderx: {e}\n"
+            "Set PYTHONPATH to include cinderx/PythonLib.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
-    # 2. cinderjit must be importable (PYTHONPATH includes CinderX).
-# SKIP:     try:
-# SKIP:         import cinderjit
-# SKIP:     except ImportError:
-# SKIP:         print(
-# SKIP:             "ERROR: cannot import cinderjit.\n"
-# SKIP:             "Set PYTHONPATH to include cinderx/PythonLib.",
-# SKIP:             file=sys.stderr,
-# SKIP:         )
-# SKIP:         sys.exit(1)
-# SKIP: 
-# SKIP:     # 3. JIT must be functional after cinderjit.auto().
-# SKIP:     if not hasattr(cinderjit, "auto"):
+    # 3. cinderjit must be importable (registered by cinderx.init()).
+    try:
+        import cinderjit
+    except ImportError:
+        print(
+            "ERROR: cannot import cinderjit after cinderx.init().\n"
+            "CinderX may not have been built with JIT support.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # 4. JIT must be functional after cinderjit.auto().
+    if not hasattr(cinderjit, "auto"):
         print(
             "ERROR: cinderjit.auto() not available — build may be "
             "incomplete or corrupt.",
@@ -165,7 +161,7 @@ def _check_preconditions():
         )
         sys.exit(1)
 
-    # 4. Verify JIT is actually active (catches false-positive
+    # 5. Verify JIT is actually active (catches false-positive
     #    configurations where cinderjit imports but JIT never engages).
     try:
         if hasattr(cinderjit, "is_enabled") and not cinderjit.is_enabled():
@@ -178,8 +174,6 @@ def _check_preconditions():
         pass  # is_enabled may not exist in all builds
 
     print("Precondition checks: PASS")
-
-
 def verify_jit_preconditions(condition):
     """Fail loudly if JIT preconditions are not met.
 
@@ -199,10 +193,12 @@ def verify_jit_preconditions(condition):
         print("  Run with: python3 -S benchmark_cinderx.py ...", file=sys.stderr)
         sys.exit(1)
 
-    # Load _cinderx to register cinderjit module
+    # Ensure cinderx.init() has been called (registers cinderjit module).
+    # With -S flag, site.py doesn't auto-load _cinderx.so.
     try:
-        import _cinderx
-    except ImportError:
+        import cinderx
+        cinderx.init()
+    except (ImportError, AttributeError):
         pass
 
     # cinderjit must be importable
@@ -225,8 +221,6 @@ def warmup_function(func, iters=None):
     iters = iters or WARMUP_ITERS
     for _ in range(iters):
         func(1)
-
-
 def force_compile(func, cinderjit_mod):
     """Force JIT-compile a function. Returns True if compiled."""
     if not cinderjit_mod:
@@ -236,8 +230,6 @@ def force_compile(func, cinderjit_mod):
         return is_compiled(func, cinderjit_mod)
     except Exception:
         return False
-
-
 def is_compiled(func, cinderjit_mod):
     """Check if function is JIT-compiled."""
     if not cinderjit_mod:
@@ -249,8 +241,6 @@ def is_compiled(func, cinderjit_mod):
             return cinderjit_mod.is_jit_compiled(func)
         except Exception:
             return False
-
-
 def enable_specialised_opcodes(cinderjit_mod):
     """Enable specialised opcodes if available."""
     if not cinderjit_mod:
@@ -260,8 +250,6 @@ def enable_specialised_opcodes(cinderjit_mod):
         return True
     except (AttributeError, Exception):
         return False
-
-
 def print_config_header(args):
     """Print configuration and comparability warning."""
     print(f"Compile mode: {args.compile}")
@@ -273,8 +261,6 @@ def print_config_header(args):
     print(f"Current: --compile={args.compile}  --reps={args.reps}  "
           f"--iters={args.iters}  --blocks={args.blocks}")
     print()
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # ABBA engine (shared by all subcommands)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -285,8 +271,6 @@ def time_one(func, n):
     func(n)
     t1 = time.perf_counter()
     return t1 - t0
-
-
 def run_abba(func_a, func_b, n_blocks, bench_iters):
     """Run ABBA interleaved comparison.
 
@@ -346,8 +330,6 @@ def run_abba(func_a, func_b, n_blocks, bench_iters):
         "significant": significant,
         "pct_improvement": pct,
     }
-
-
 def print_abba_results(results, labels=("A", "B")):
     """Print a table of ABBA results."""
     label_a, label_b = labels
@@ -381,8 +363,6 @@ def print_abba_results(results, labels=("A", "B")):
         label = r.get("label", "?")[:20]
         print(f"  {label:20s} [{', '.join(deltas_ms)}]")
     print()
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # Benchmark definitions
 # ═══════════════════════════════════════════════════════════════════════════
@@ -405,8 +385,6 @@ class _Dog(_Animal):
 def _gen():
     while True:
         yield 1
-
-
 def make_isinstance():
     def bench(n):
         obj = _Dog()
@@ -475,8 +453,6 @@ def make_divmod_bench():
                 total += q
         return total
     return bench, None
-
-
 ABBA_BENCHMARKS = [
     ("isinstance",   make_isinstance),
     ("issubclass",   make_issubclass),
@@ -484,14 +460,8 @@ ABBA_BENCHMARKS = [
     ("getattr",      make_getattr_bench),
     ("next",         make_next_bench),
     ("next_default", make_next_default),
-
-
-
-
     ("divmod",       make_divmod_bench),
 ]
-
-
 # --- G1 fast path targets ---
 
 def _gen_jit():
@@ -514,8 +484,6 @@ def make_g1_caller(gen_func):
                 total += next(g)
         return total
     return bench
-
-
 # --- JIT vs vanilla benchmark functions ---
 # These are used by the subprocess worker mode.
 
@@ -561,16 +529,12 @@ def _spectral_mul_Atv(v):
 
 def _spectral_mul_AtAv(v):
     return _spectral_mul_Atv(_spectral_mul_Av(v))
-
-
 def bench_fibonacci(n_iter):
     """Recursive fibonacci — tests function call overhead."""
     total = 0
     for _ in range(n_iter // 10):
         total += _fib(20)
     return total
-
-
 # --- Richards OS task scheduler benchmark ---
 
 class _Packet:
@@ -873,8 +837,6 @@ def bench_func_calls(n_iter):
         total += add3(i, i + 1, i + 2)
     return total
 
-
-
 # --- Inlining frontier benchmark helpers ---
 # Module-level callees so they can be force-compiled independently.
 
@@ -889,8 +851,6 @@ def _callee_with_try():
         return 42
     except Exception:
         return -1
-
-
 def bench_import_callee(n_iter):
     """Hot loop calling callee with import -- EAGER_IMPORT_NAME inlining."""
     total = 0
@@ -926,8 +886,6 @@ def bench_int_arith(n_iter):
         a = (a + 1) % 127
         b = (b + 3) % 131
     return total
-
-
 
 # --- Adversarial benchmarks (CinderX known weak spots) ---
 
@@ -995,8 +953,6 @@ def bench_dunder_protocol(n_iter):
         if (i % 10) in obj:
             total += 1
     return total
-
-
 # --- N-body simulation (pyperformance-derived) ---
 # Float-heavy, tuple-heavy. Good test for EA/SR: intermediate
 # coordinate differences are temporary tuples that never escape.
@@ -1129,8 +1085,6 @@ def bench_deep_class(n_iter):
         _ = net.training
         _ = net.in_features
     return total
-
-
 # --- Decorator chain benchmark (functools.wraps, closure capture) ---
 # Exercises: wrapper function dispatch through stacked decorators,
 # closure variable capture, @staticmethod/@classmethod resolution,
@@ -1222,8 +1176,6 @@ def bench_decorator_chain(n_iter):
             total = adder(total % 100)
         total = total % 10000.0
     return total
-
-
 # --- Deep class with super() chains (5-level MRO) ---
 # Exercises: super().__init__() through a 5-level hierarchy (PyTorch
 # nn.Module pattern), MRO method resolution, isinstance checks across
@@ -1320,8 +1272,6 @@ def bench_deep_class_super(n_iter):
         total += len(params) * 0.001
         _ = repr(model)
     return total
-
-
 # --- PyTorch-style context managers (nested, contextlib, state toggle) ---
 # Exercises: __enter__/__exit__ dispatch through nested with-statements,
 # @contextlib.contextmanager (generator-based CM), class-variable state
@@ -1399,8 +1349,6 @@ def bench_pytorch_cm(n_iter):
             with _ProfileScope(f'layer_{j}'):
                 total = (total + float(j)) % 10000
     return total
-
-
 JIT_BENCHMARKS = [
     ("fibonacci",       bench_fibonacci),
     ("richards_full",   bench_richards_full),
@@ -1439,8 +1387,6 @@ _JIT_COMPILABLE = [
     _nbody_advance, _nbody_energy, _nbody_make_bodies,
     _make_adder, _training_mode,
 ]
-
-
 # --- Specialisation benchmark targets ---
 # Selected to exercise LOAD_ATTR_INSTANCE_VALUE, STORE_ATTR, LOAD_ATTR_MODULE
 
@@ -1464,8 +1410,6 @@ def bench_module_attr(n_iter):
     for _ in range(n_iter):
         total += math.pi + math.e
     return total
-
-
 SPEC_BENCHMARKS = [
     ("deep_class",     bench_deep_class),
     ("attr_access",    bench_attr_access),
@@ -1474,8 +1418,6 @@ SPEC_BENCHMARKS = [
     ("func_calls",     bench_func_calls),
     ("list_comp",      bench_list_comp),
 ]
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # Subcommand: abba
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1538,8 +1480,6 @@ def cmd_abba(args):
 
     print_abba_results(all_results, labels=("JIT", "Interp"))
     print("=" * 72)
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # Subcommand: g1
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1636,13 +1576,9 @@ def cmd_g1(args):
     print(f"Raw per-block deltas (ms): [{', '.join(deltas_ms)}]")
     print()
     print("=" * 72)
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # Subcommand: jit (subprocess isolation)
 # ═══════════════════════════════════════════════════════════════════════════
-
-
 def _resolve_cinderx_python():
     """Resolve the CinderX Python executable.
 
@@ -1659,8 +1595,6 @@ def _resolve_cinderx_python():
     if venv:
         return os.path.join(venv, "bin/python3")
     return sys.executable
-
-
 def _check_cinderx_available(python_path):
     """Check that the given Python can import _cinderx.
 
@@ -1670,7 +1604,7 @@ def _check_cinderx_available(python_path):
     import subprocess
     try:
         result = subprocess.run(
-            [python_path, "-S", "-c", "import _cinderx"],
+            [python_path, "-c", "import _cinderx"],
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode != 0:
@@ -1681,8 +1615,6 @@ def _check_cinderx_available(python_path):
     except Exception as e:
         print(f"WARNING: Failed to check _cinderx availability: {e}")
         return False
-
-
 def _run_worker(python_cmd, condition, compile_mode):
     """Run this script as a subprocess worker, return JSON results."""
     env = os.environ.copy()
@@ -1713,8 +1645,6 @@ def _run_worker(python_cmd, condition, compile_mode):
     except (subprocess.TimeoutExpired, json.JSONDecodeError) as e:
         print(f"  Worker error: {e}")
         return None
-
-
 def _worker_jit(args):
     """Worker mode: run JIT benchmarks, output JSON."""
     condition = args.condition
@@ -1760,31 +1690,25 @@ def _worker_jit(args):
     }
 
     for name, func in JIT_BENCHMARKS:
-        try:
-            # Warmup
-            for _ in range(n_warmup):
-                func(n_iter)
+        # Warmup
+        for _ in range(n_warmup):
+            func(n_iter)
 
-            # Measure
-            times = []
-            for _ in range(n_measure):
-                t0 = time.perf_counter_ns()
-                func(n_iter)
-                t1 = time.perf_counter_ns()
-                times.append((t1 - t0) / 1e6)  # ms
+        # Measure
+        times = []
+        for _ in range(n_measure):
+            t0 = time.perf_counter_ns()
+            func(n_iter)
+            t1 = time.perf_counter_ns()
+            times.append((t1 - t0) / 1e6)  # ms
 
-            results["benchmarks"][name] = {
-                "times_ms": times,
-                "mean_ms": sum(times) / len(times),
-                "min_ms": min(times),
-            }
-        except Exception as e:
-            import sys as _sys
-            print(f"SKIP {name}: {e}", file=_sys.stderr)
+        results["benchmarks"][name] = {
+            "times_ms": times,
+            "mean_ms": sum(times) / len(times),
+            "min_ms": min(times),
+        }
 
     print(json.dumps(results))
-
-
 def _worker_spec(args):
     """Worker mode: run spec benchmarks, output JSON."""
     condition = args.condition
@@ -1828,8 +1752,6 @@ def _worker_spec(args):
         }
 
     print(json.dumps(results))
-
-
 def cmd_jit(args):
     """Run JIT vs vanilla Python benchmarks (subprocess isolated)."""
     print("=" * 72)
@@ -1957,8 +1879,6 @@ def cmd_jit(args):
     print()
     print("** = JIT >5% faster   !! = JIT >5% slower")
     print()
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # Subcommand: spec (subprocess isolation)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2078,8 +1998,6 @@ def cmd_spec(args):
     print()
     print("Ratio > 1.0 = spec ON is faster. Ratio ≈ 1.0 = neutral.")
     print()
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # Subcommand: all
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2096,8 +2014,6 @@ def cmd_all(args):
     cmd_jit(args)
     print()
     cmd_spec(args)
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2174,8 +2090,7 @@ Environment variables:
         return
 
     # Precondition checks — fail loudly if environment is wrong
-    if "--worker=jit" not in str(sys.argv) and "--worker=spec" not in str(sys.argv):
-        _check_preconditions()
+    _check_preconditions()
 
     # Normal mode — require subcommand
     if not args.subcommand:
@@ -2199,7 +2114,5 @@ Environment variables:
     }
 
     dispatch[args.subcommand](args)
-
-
 if __name__ == "__main__":
     main()

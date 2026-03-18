@@ -814,6 +814,155 @@ void HIRBuilder::emitInlineExceptionMatch(
   tc.emit<RefineType>(result, TObject, result);
 }
 
+void HIRBuilder::emitCallExceptionHandler(
+    CFG& cfg,
+    TranslationContext& tc,
+    const jit::BytecodeInstruction& bc_instr,
+    const ExceptionTableEntry& handler,
+    const SimpleExceptInfo& info,
+    DeoptBase* call_instr,
+    Register* result) {
+  // Suppress the auto null-check deopt in LIR codegen. We handle
+  // exceptions inline via CondBranch instead. FrameState is preserved
+  // for Simplify, register allocation, and other deopt paths.
+  call_instr->setSuppressExceptionDeopt(true);
+
+  // Pop the result that emitAnyCall pushed onto the stack.
+  tc.frame.stack.pop();
+
+  BasicBlock* ok_block = cfg.AllocateBlock();
+  BasicBlock* exc_match_block = cfg.AllocateBlock();
+
+  // Branch: non-null -> success, null -> exception path
+  tc.emit<CondBranch>(result, ok_block, exc_match_block);
+
+  // === Exception match block ===
+  {
+    TranslationContext exc_tc{exc_match_block, tc.frame};
+
+    // Decref stack items above handler depth.
+    while (static_cast<int>(exc_tc.frame.stack.size()) > handler.depth) {
+      Register* excess = exc_tc.frame.stack.pop();
+      exc_tc.emit<Decref>(excess);
+    }
+
+    // Load exception type as a constant (resolved at compile time).
+    Register* exc_type_reg = temps_.AllocateNonStack();
+    exc_tc.emit<LoadConst>(exc_type_reg, Type::fromObject(info.exc_type));
+
+    // Call JITRT_MatchAndClearException(exc_type) via CallStatic.
+    // Returns int (TCInt32): 1 = matched, 0 = no match.
+    Register* match_result = temps_.AllocateNonStack();
+    auto match_call = exc_tc.emit<CallStatic>(
+        1, match_result,
+        reinterpret_cast<void*>(JITRT_MatchAndClearException),
+        TCInt32);
+    match_call->SetOperand(0, exc_type_reg);
+
+    BasicBlock* match_block = cfg.AllocateBlock();
+    BasicBlock* deopt_block = cfg.AllocateBlock();
+    exc_tc.emit<CondBranch>(match_result, match_block, deopt_block);
+
+    // === Match block: emit except body bytecodes inline ===
+    {
+      TranslationContext match_tc{match_block, exc_tc.frame};
+      match_tc.frame.cur_instr_offs = info.except_body;
+
+      BytecodeInstruction ebc{code_, info.except_body};
+      bool emitted_terminator = false;
+
+      while (!emitted_terminator) {
+        switch (ebc.opcode()) {
+          case POP_EXCEPT:
+            break;
+
+          case POP_TOP:
+            match_tc.frame.stack.pop();
+            break;
+
+          case LOAD_FAST:
+          case LOAD_FAST_CHECK:
+          case LOAD_FAST_AND_CLEAR:
+            emitLoadFast(match_tc, ebc);
+            break;
+
+          case LOAD_CONST: {
+            Register* reg = temps_.AllocateStack();
+            Type type = Type::fromObject(
+                PyTuple_GET_ITEM(code_->co_consts, ebc.oparg()));
+            match_tc.emit<LoadConst>(reg, type);
+            match_tc.frame.stack.push(reg);
+            break;
+          }
+
+          case STORE_FAST:
+            emitStoreFast(match_tc, ebc);
+            break;
+
+          case BINARY_OP:
+            emitBinaryOp(cfg, match_tc, ebc);
+            break;
+
+          case RETURN_CONST: {
+            Register* ret_reg = temps_.AllocateStack();
+            Type type = Type::fromObject(
+                PyTuple_GET_ITEM(code_->co_consts, ebc.oparg()));
+            match_tc.emit<LoadConst>(ret_reg, type);
+            match_tc.emit<Return>(ret_reg, type);
+            emitted_terminator = true;
+            break;
+          }
+
+          case RETURN_VALUE: {
+            Register* ret_val = match_tc.frame.stack.pop();
+            match_tc.emit<Return>(ret_val, preloader_.returnType());
+            emitted_terminator = true;
+            break;
+          }
+
+          case JUMP_BACKWARD:
+          case JUMP_BACKWARD_NO_INTERRUPT: {
+            BCOffset target = ebc.getJumpTarget();
+            auto* target_block = getBlockAtOff(target);
+            match_tc.emit<Branch>(target_block);
+            emitted_terminator = true;
+            break;
+          }
+
+          default:
+            // Unsupported opcode: deopt to interpreter.
+            match_tc.frame.cur_instr_offs = ebc.baseOffset();
+            match_tc.emitSnapshot();
+            match_tc.emit<Deopt>();
+            emitted_terminator = true;
+            break;
+        }
+
+        if (!emitted_terminator) {
+          ebc = ebc.nextInstr();
+        }
+      }
+    }
+
+    // === Deopt block (no match -- let interpreter handle) ===
+    // JITRT_MatchAndClearException returned 0 and restored the pending
+    // exception. Deopt back to the interpreter at the CALL offset.
+    // The interpreter calls exception_unwind, walks co_exceptiontable,
+    // and finds the correct handler.
+    {
+      TranslationContext deopt_tc{deopt_block, tc.frame};
+      deopt_tc.frame.cur_instr_offs = bc_instr.baseOffset();
+      deopt_tc.emitSnapshot();
+      deopt_tc.emit<Deopt>();
+    }
+  }
+
+  // === OK block (no exception, result is non-null) ===
+  tc.block = ok_block;
+  tc.emit<RefineType>(result, TObject, result);
+  tc.frame.stack.push(result);
+}
+
 BasicBlock* HIRBuilder::getBlockAtOff(BCOffset off) {
   auto it = block_map_.blocks.find(off);
   JIT_DCHECK(it != block_map_.blocks.end(), "No block for offset {}", off);
@@ -2271,6 +2420,23 @@ void HIRBuilder::emitAnyCall(
       call->setFrameState(tc.frame);
 
       tc.frame.stack.push(out);
+
+      // B2: If this CALL is inside a try block with a simple except pattern,
+      // inline the exception handler instead of deopting on exception.
+      // This prevents the deopt cascade that occurs when JIT-compiled
+      // functions raise caught exceptions (e.g. StopIteration from next()
+      // in contextlib._GeneratorContextManager.__exit__).
+      {
+        BCOffset cur_off = bc_instr.baseOffset();
+        auto* handler = findExceptionHandler(cur_off);
+        if (handler != nullptr) {
+          SimpleExceptInfo info;
+          if (getSimpleExceptInfo(*handler, info)) {
+            emitCallExceptionHandler(
+                cfg, tc, bc_instr, *handler, info, call, out);
+          }
+        }
+      }
       break;
     }
     case INVOKE_FUNCTION: {

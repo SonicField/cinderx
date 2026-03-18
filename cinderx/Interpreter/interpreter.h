@@ -71,6 +71,16 @@ void Ci_InitOpcodes();
 extern bool Ci_DelayAdaptiveCode;
 extern uint64_t Ci_AdaptiveThreshold;
 
+/*
+ * JIT auto-compilation threshold and vectorcall entry point.
+ * Set by cinderjit.auto() / compile_after_n_calls(). Ci_EvalFrame checks
+ * these at start_frame to install jitVectorcall when a function's call
+ * count reaches the threshold, avoiding per-call overhead for
+ * below-threshold functions.
+ */
+extern uint64_t Ci_JitCompileThreshold;
+extern vectorcallfunc Ci_JitVectorcall;
+
 #ifdef __cplusplus
 }
 #endif

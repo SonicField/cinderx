@@ -326,6 +326,12 @@ class DeoptBase : public Instr {
   Register* guiltyReg() const;
   void setGuiltyReg(Register* reg);
 
+  // When set, the LIR generator skips the auto null-check deopt for this
+  // instruction. Used when an inline exception handler (CondBranch on null)
+  // replaces the default deopt-on-exception path.
+  bool suppressExceptionDeopt() const { return suppress_exception_deopt_; }
+  void setSuppressExceptionDeopt(bool v) { suppress_exception_deopt_ = v; }
+
  private:
   std::vector<RegState> live_regs_;
   std::unique_ptr<FrameState> frame_state_{nullptr};
@@ -335,6 +341,8 @@ class DeoptBase : public Instr {
   int nonce_{-1};
   // A human-readable description of why this instruction might deopt.
   std::string descr_;
+  // When true, LIR generator skips emitExceptionCheck for this instruction.
+  bool suppress_exception_deopt_{false};
 };
 
 // This pile of template metaprogramming provides a convenient way to define

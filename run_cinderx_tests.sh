@@ -243,7 +243,7 @@ echo "---"
 # by compiling a test function and checking is_jit_compiled().
 echo -n "Verifying CinderX JIT... "
 CINDERX_CHECK=$(python3 -c "
-import cinderjit
+import cinderx; cinderx.init(); import cinderjit
 def _gate(): return 42
 cinderjit.force_compile(_gate)
 assert cinderjit.is_jit_compiled(_gate), 'force_compile ran but function not JIT-compiled'

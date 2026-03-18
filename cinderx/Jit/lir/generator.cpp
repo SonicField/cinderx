@@ -3628,7 +3628,9 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
           break;
         }
         default: {
-          emitExceptionCheck(*db, bbb);
+          if (!db->suppressExceptionDeopt()) {
+            emitExceptionCheck(*db, bbb);
+          }
           break;
         }
       }

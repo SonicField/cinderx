@@ -597,6 +597,20 @@ class HIRBuilder {
       Register* right,
       Register* result);
 
+  // B2: Emit inline exception handler for CALL inside try block.
+  // Unlike emitInlineExceptionMatch (which replaces the operation with a
+  // CallStatic), this works with an already-emitted call instruction.
+  // It takes the FrameState from the call (preventing auto-deopt) and
+  // emits a CondBranch on the call result to inline the exception handler.
+  void emitCallExceptionHandler(
+      CFG& cfg,
+      TranslationContext& tc,
+      const jit::BytecodeInstruction& bc_instr,
+      const ExceptionTableEntry& handler,
+      const SimpleExceptInfo& info,
+      DeoptBase* call_instr,
+      Register* result);
+
   const Preloader& preloader_;
 
   TempAllocator temps_{nullptr};

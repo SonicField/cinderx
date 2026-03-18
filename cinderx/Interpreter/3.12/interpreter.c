@@ -5,6 +5,7 @@
 #define CINDERX_INTERPRETER
 
 #include "cinderx/Common/code.h"
+#include "cinderx/Interpreter/interpreter.h"
 
 // Must come after pycore_opcode, we want to get the exported ones.
 #define NEED_OPCODE_NAMES
@@ -414,12 +415,27 @@ Py_ssize_t load_method_static_cached_oparg_slot(int oparg) {
 
 #define CI_SET_ADAPTIVE_INTERPRETER_ENABLED_STATE \
     PyCodeObject* code = frame->f_code; \
-    CodeExtra *extra = codeExtra(code); \
-    adaptive_enabled = extra != NULL && is_adaptive_enabled(extra);
+    if (code->co_flags & CI_CO_SUPPRESS_JIT) { \
+        adaptive_enabled = false; \
+    } else { \
+        CodeExtra *extra = codeExtra(code); \
+        adaptive_enabled = extra != NULL && is_adaptive_enabled(extra); \
+    }
 
 PyObject* _Py_HOT_FUNCTION
 Ci_EvalFrame(PyThreadState *tstate, _PyInterpreterFrame *frame, int throwflag)
 {
+    // PEP 523 bypass: after deopt backoff, delegate to vanilla CPython eval
+    // for non-Static-Python functions. This eliminates per-opcode overhead
+    // from CinderX shadow code dispatch on backed-off code objects.
+    {
+        int flags = frame->f_code->co_flags;
+        if ((flags & CI_CO_SUPPRESS_JIT) &&
+            !(flags & CI_CO_STATICALLY_COMPILED)) {
+            return _PyEval_EvalFrameDefault(tstate, frame, throwflag);
+        }
+    }
+
     _Py_EnsureTstateNotNULL(tstate);
     CALL_STAT_INC(pyeval_calls);
 
@@ -509,12 +525,30 @@ start_frame:
     // Update call count.
     {
         PyCodeObject* code = frame->f_code;
-        CodeExtra *extra = codeExtra(code);
-        if (extra != NULL) {
-            extra->calls += 1;
-            adaptive_enabled = is_adaptive_enabled(extra);
-        } else {
+        // Skip shadow code overhead for backed-off functions.
+        // After deopt backoff, CI_CO_SUPPRESS_JIT is set but codeExtra
+        // remains, causing per-opcode overhead from adaptive dispatch.
+        if (code->co_flags & CI_CO_SUPPRESS_JIT) {
             adaptive_enabled = false;
+        } else {
+            CodeExtra *extra = codeExtra(code);
+            if (extra != NULL) {
+                extra->calls += 1;
+                adaptive_enabled = is_adaptive_enabled(extra);
+                // When call count reaches JIT compilation threshold,
+                // install jitVectorcall so the next call triggers compilation.
+                if (extra->jit_eligible &&
+                    Ci_JitVectorcall != NULL &&
+                    extra->calls == Ci_JitCompileThreshold) {
+                    PyObject *funcobj = frame->f_funcobj;
+                    if (funcobj != NULL && PyFunction_Check(funcobj)) {
+                        ((PyFunctionObject *)funcobj)->vectorcall =
+                            Ci_JitVectorcall;
+                    }
+                }
+            } else {
+                adaptive_enabled = false;
+            }
         }
     }
 

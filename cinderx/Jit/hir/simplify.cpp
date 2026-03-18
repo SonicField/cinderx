@@ -1686,6 +1686,7 @@ Register* simplifyCallMethod(Env& env, const CallMethod* instr) {
           env.func.env.AllocateRegister(),
           instr->flags(),
           *instr->frameState());
+      call->setSuppressExceptionDeopt(instr->suppressExceptionDeopt());
       call->SetOperand(0, instr->GetOperand(0));
       for (size_t i = 2; i < instr->NumOperands(); ++i) {
         call->SetOperand(i - 1, instr->GetOperand(i));
@@ -1700,6 +1701,7 @@ Register* simplifyCallMethod(Env& env, const CallMethod* instr) {
           env.func.env.AllocateRegister(),
           instr->flags(),
           *instr->frameState());
+      call->setSuppressExceptionDeopt(instr->suppressExceptionDeopt());
       for (size_t i = 1; i < instr->NumOperands(); ++i) {
         call->SetOperand(i - 1, instr->GetOperand(i));
       }
@@ -1795,6 +1797,7 @@ Register* simplifyCallMethod(Env& env, const CallMethod* instr) {
                   env.func.env.AllocateRegister(),
                   CallFlags::Static,
                   *instr->frameState());
+              new_call->setSuppressExceptionDeopt(instr->suppressExceptionDeopt());
               new_call->SetOperand(0, func_const);
               new_call->SetOperand(1, receiver);
               for (size_t i = 1; i < cm_noperands; ++i) {

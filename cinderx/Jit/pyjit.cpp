@@ -232,6 +232,12 @@ PyObject* jitVectorcall(
   return forcedJitVectorcall(func_obj, stack, nargsf, kwnames);
 }
 
+// Exported to C code (interpreter.c) for threshold-based compilation
+// trigger. Ci_EvalFrame checks these at start_frame to install
+// jitVectorcall when the call count reaches the threshold.
+extern "C" uint64_t Ci_JitCompileThreshold = 0;
+extern "C" vectorcallfunc Ci_JitVectorcall = nullptr;
+
 void setJitLogFile(const std::string& log_filename) {
   // Redirect logging to a file if configured.
   const char* kPidMarker = "{pid}";
@@ -1559,6 +1565,8 @@ int compile_after_n_calls_impl(uint32_t calls) {
   }
 
   getMutableConfig().compile_after_n_calls = calls;
+  Ci_JitCompileThreshold = calls;
+  Ci_JitVectorcall = jitVectorcall;
 
   // Schedule all pre-existing functions for compilation.
   walkFunctionObjects(
