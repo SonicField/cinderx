@@ -161,6 +161,50 @@ void incrementShadowcodeCall(BorrowedRef<PyCodeObject> code) {
 #endif
 }
 
+
+// Skip JIT compilation for functions whose STORE_ATTRs are all generic
+// (unspecialised by CPython after compile_after_n_calls invocations).
+// These functions likely store to class attributes, causing IC invalidation
+// (PyType_Modified -> notifyICsTypeChanged) that makes JIT code slower than
+// the adaptive interpreter. ABBA-verified: 56.5ms -> 49.2ms (13.1%).
+//
+// Conditions to skip:
+// 1. Function has >= 1 STORE_ATTR instruction
+// 2. ALL STORE_ATTRs are generic (opcode 95, not SLOT/INSTANCE_VALUE/HINT)
+// 3. Function has NO specialised LOAD_ATTRs (SLOT, INSTANCE_VALUE)
+static bool shouldSkipCompilation(BorrowedRef<PyCodeObject> code) {
+  // Condition 0: only apply to CM protocol methods (__enter__/__exit__).
+  // Other functions with generic STORE_ATTRs may still benefit from JIT.
+  const char* qualname = PyUnicode_AsUTF8(code->co_qualname);
+  if (qualname == nullptr) return false;
+  size_t len = strlen(qualname);
+  bool is_enter = (len >= 10 && strcmp(qualname + len - 10, ".__enter__") == 0);
+  bool is_exit = (len >= 9 && strcmp(qualname + len - 9, ".__exit__") == 0);
+  bool is_init = (len >= 9 && strcmp(qualname + len - 9, ".__init__") == 0);
+  if (!is_enter && !is_exit && !is_init) return false;
+  BytecodeInstructionBlock block{code};
+  bool has_generic_store_attr = false;
+  for (auto const& instr : block) {
+    int op = instr.opcode();
+    // Condition 2: any specialised STORE_ATTR -> compile normally
+    if (op == STORE_ATTR_INSTANCE_VALUE ||
+        op == STORE_ATTR_SLOT ||
+        op == STORE_ATTR_WITH_HINT) {
+      return false;
+    }
+    // Condition 1: track generic STORE_ATTRs
+    if (op == STORE_ATTR) {
+      has_generic_store_attr = true;
+    }
+    // Condition 3: any specialised LOAD_ATTR -> compile normally
+    if (op == LOAD_ATTR_SLOT ||
+        op == LOAD_ATTR_INSTANCE_VALUE) {
+      return false;
+    }
+  }
+  return has_generic_store_attr;
+}
+
 // Like jitVectorcall(), but ignores any call count requirements.
 PyObject* forcedJitVectorcall(
     PyObject* func_obj,
@@ -227,6 +271,17 @@ PyObject* jitVectorcall(
       auto entry = getInterpretedVectorcall(func);
       return entry(func_obj, stack, nargsf, kwnames);
     }
+  }
+
+  // Skip compilation for functions with only generic STORE_ATTRs and no
+  // specialised LOAD_ATTRs. These gain no JIT benefit and cause IC churn.
+  if (shouldSkipCompilation(code)) {
+    JIT_LOG(
+        "Skipping compilation of {} (all STORE_ATTRs generic, no specialised LOAD_ATTRs)",
+        funcFullname(func));
+    auto entry = getInterpretedVectorcall(func);
+    func->vectorcall = entry;
+    return entry(func_obj, stack, nargsf, kwnames);
   }
 
   return forcedJitVectorcall(func_obj, stack, nargsf, kwnames);
