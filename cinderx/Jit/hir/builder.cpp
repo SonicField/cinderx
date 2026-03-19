@@ -102,7 +102,9 @@ bool isSupportedOpcode(int opcode) {
     case DICT_UPDATE:
     case DUP_TOP:
     case DUP_TOP_TWO:
-    case EAGER_IMPORT_NAME:
+    // EAGER_IMPORT_NAME: disabled — JIT does not set up frame globals
+    // correctly for PyImport_Import, causing SIGSEGV or TypeError.
+    // case EAGER_IMPORT_NAME:
     case END_ASYNC_FOR:
     case END_FOR:
     case END_SEND:
@@ -125,7 +127,9 @@ bool isSupportedOpcode(int opcode) {
       // (added in 3.14) or the_PyImport_ImportFrom function that's only added
       // by Lazy Imports.
 #endif
-    case IMPORT_NAME:
+    // IMPORT_NAME: disabled — JIT does not set up frame globals
+    // correctly for PyImport_Import, causing SIGSEGV or TypeError.
+    // case IMPORT_NAME:
     case INPLACE_ADD:
     case INPLACE_AND:
     case INPLACE_FLOOR_DIVIDE:
