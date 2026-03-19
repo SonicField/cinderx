@@ -181,19 +181,23 @@ static bool shouldSkipCompilation(BorrowedRef<PyCodeObject> code) {
   bool is_enter = (len >= 10 && strcmp(qualname + len - 10, ".__enter__") == 0);
   bool is_exit = (len >= 9 && strcmp(qualname + len - 9, ".__exit__") == 0);
   bool is_init = (len >= 9 && strcmp(qualname + len - 9, ".__init__") == 0);
-  if (!is_enter && !is_exit && !is_init) return false;
+  // Unconditionally skip __enter__ and __exit__ — JIT code for CM protocol
+  // methods is always slower than interpreter due to guard overhead.
+  if (is_enter || is_exit) return true;
+  // Only __init__ goes through the STORE_ATTR specialisation check below.
+  if (!is_init) return false;
   BytecodeInstructionBlock block{code};
   bool has_generic_store_attr = false;
   for (auto const& instr : block) {
     int op = instr.specializedOpcode();
-    // Condition 2: any specialised STORE_ATTR -> compile normally
-    if (op == STORE_ATTR_INSTANCE_VALUE ||
-        op == STORE_ATTR_SLOT ||
-        op == STORE_ATTR_WITH_HINT) {
+    // Condition 2: only STORE_ATTR_SLOT triggers compilation (JIT can
+    // inline it). STORE_ATTR_INSTANCE_VALUE and WITH_HINT are still
+    // generic C API paths in JIT — slower than interpreter.
+    if (op == STORE_ATTR_SLOT) {
       return false;
     }
-    // Condition 1: track generic STORE_ATTRs
-    if (op == STORE_ATTR) {
+    // Condition 1: track STORE_ATTRs that JIT cannot inline
+    if (op == STORE_ATTR || op == STORE_ATTR_INSTANCE_VALUE || op == STORE_ATTR_WITH_HINT) {
       has_generic_store_attr = true;
     }
     // Condition 3: any specialised LOAD_ATTR -> compile normally
