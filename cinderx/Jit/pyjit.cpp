@@ -172,18 +172,35 @@ void incrementShadowcodeCall(BorrowedRef<PyCodeObject> code) {
 // 1. Function has >= 1 STORE_ATTR instruction
 // 2. ALL STORE_ATTRs are generic (opcode 95, not SLOT/INSTANCE_VALUE/HINT)
 // 3. Function has NO specialised LOAD_ATTRs (SLOT, INSTANCE_VALUE)
-static bool shouldSkipCompilation(BorrowedRef<PyCodeObject> code) {
-  // Condition 0: only apply to CM protocol methods (__enter__/__exit__).
-  // Other functions with generic STORE_ATTRs may still benefit from JIT.
+// Static skip checks that don't depend on bytecode specialisation.
+// Safe to call at registration time (before function is ever called).
+static bool shouldSkipCompilationStatic(BorrowedRef<PyCodeObject> code) {
+  // Skip functions with **kwargs — JIT generates worse code for these
+  // (PyDict_New + JITRT_BindKeywordArgs on every call, even with zero
+  // keyword args). ABBA-verified: kwargs_dispatch 0.77x, decorator_chain
+  // 0.92x with JIT. Skipping keeps them on the CPython fast path.
+  if (code->co_flags & CO_VARKEYWORDS) {
+    return true;
+  }
   const char* qualname = PyUnicode_AsUTF8(code->co_qualname);
   if (qualname == nullptr) return false;
   size_t len = strlen(qualname);
   bool is_enter = (len >= 10 && strcmp(qualname + len - 10, ".__enter__") == 0);
   bool is_exit = (len >= 9 && strcmp(qualname + len - 9, ".__exit__") == 0);
-  bool is_init = (len >= 9 && strcmp(qualname + len - 9, ".__init__") == 0);
   // Unconditionally skip __enter__ and __exit__ — JIT code for CM protocol
   // methods is always slower than interpreter due to guard overhead.
   if (is_enter || is_exit) return true;
+  return false;
+}
+
+// Full skip check including bytecode specialisation analysis.
+// Only valid after compile_after_n_calls invocations (bytecodes specialised).
+static bool shouldSkipCompilation(BorrowedRef<PyCodeObject> code) {
+  if (shouldSkipCompilationStatic(code)) return true;
+  const char* qualname = PyUnicode_AsUTF8(code->co_qualname);
+  if (qualname == nullptr) return false;
+  size_t len = strlen(qualname);
+  bool is_init = (len >= 9 && strcmp(qualname + len - 9, ".__init__") == 0);
   // Only __init__ goes through the STORE_ATTR specialisation check below.
   if (!is_init) return false;
   BytecodeInstructionBlock block{code};
@@ -3759,6 +3776,14 @@ bool scheduleJitCompile(BorrowedRef<PyFunctionObject> func) {
   }
 
   if (!isJitUsable()) {
+    return false;
+  }
+
+  // Skip functions that are known at registration time to produce worse
+  // JIT code than the interpreter. These keep their original vectorcall
+  // and never pay the jitVectorcall per-call overhead.
+  BorrowedRef<PyCodeObject> code{func->func_code};
+  if (shouldSkipCompilationStatic(code)) {
     return false;
   }
 
