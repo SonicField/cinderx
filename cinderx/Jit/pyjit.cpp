@@ -185,7 +185,7 @@ static bool shouldSkipCompilation(BorrowedRef<PyCodeObject> code) {
   BytecodeInstructionBlock block{code};
   bool has_generic_store_attr = false;
   for (auto const& instr : block) {
-    int op = instr.opcode();
+    int op = instr.specializedOpcode();
     // Condition 2: any specialised STORE_ATTR -> compile normally
     if (op == STORE_ATTR_INSTANCE_VALUE ||
         op == STORE_ATTR_SLOT ||
