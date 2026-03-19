@@ -173,6 +173,17 @@ void incrementShadowcodeCall(BorrowedRef<PyCodeObject> code) {
 // 2. ALL STORE_ATTRs are generic (opcode 95, not SLOT/INSTANCE_VALUE/HINT)
 // 3. Function has NO specialised LOAD_ATTRs (SLOT, INSTANCE_VALUE)
 static bool shouldSkipCompilation(BorrowedRef<PyCodeObject> code) {
+  // Skip functions containing IMPORT_NAME — the JIT does not set up
+  // frame globals correctly for PyImport_Import, causing SIGSEGV.
+  // Bail out to interpreter which handles imports correctly.
+  {
+    BytecodeInstructionBlock block{code};
+    for (auto const& instr : block) {
+      if (instr.opcode() == IMPORT_NAME) {
+        return true;
+      }
+    }
+  }
   // Condition 0: only apply to CM protocol methods (__enter__/__exit__).
   // Other functions with generic STORE_ATTRs may still benefit from JIT.
   const char* qualname = PyUnicode_AsUTF8(code->co_qualname);
@@ -3770,6 +3781,17 @@ bool scheduleJitCompile(BorrowedRef<PyFunctionObject> func) {
   {
     BorrowedRef<PyCodeObject> code{func->func_code};
     bool should_skip = false;
+    // Check for IMPORT_NAME — JIT does not set up frame globals
+    // correctly for PyImport_Import, causing SIGSEGV.
+    if (!should_skip) {
+      BytecodeInstructionBlock block{code};
+      for (auto const& instr : block) {
+        if (instr.opcode() == IMPORT_NAME) {
+          should_skip = true;
+          break;
+        }
+      }
+    }
     if (code->co_flags & CO_VARKEYWORDS) {
       should_skip = true;
     } else {
