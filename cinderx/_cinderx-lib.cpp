@@ -5,6 +5,7 @@
 #include "internal/pycore_pystate.h"
 
 #include "cinderx/CachedProperties/cached_properties.h"
+#include "cinderx/Common/code.h"
 #include "cinderx/Common/log.h"
 #include "cinderx/Common/py-portability.h"
 #include "cinderx/Common/util.h"
@@ -800,12 +801,23 @@ int cinderx_func_watcher(
     PyFunctionObject* func,
     PyObject* new_value) {
   switch (event) {
-    case PyFunction_EVENT_CREATE:
+    case PyFunction_EVENT_CREATE: {
+      // Fast path: if this code object was already analysed and marked as
+      // skipped, leave vectorcall unchanged. This avoids the overhead of
+      // getInterpretedVectorcall + scheduleCompile on every function
+      // creation for code objects that will never be JIT-compiled.
+      auto* code = reinterpret_cast<PyCodeObject*>(
+          PyFunction_GET_CODE(func));
+      auto* extra = tryGetCodeExtra(code);
+      if (extra != nullptr && extra->skipped) {
+        break;
+      }
       // Update the new function's vectorcall to have it run with Static Python
       // if it needs to.
       func->vectorcall = getInterpretedVectorcall(func);
       scheduleCompile(func);
       break;
+    }
     case PyFunction_EVENT_MODIFY_CODE:
       jit::funcModified(func);
       // having deopted the func, we want to immediately consider recompiling.

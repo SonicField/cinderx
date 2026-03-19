@@ -20,6 +20,11 @@ typedef struct CodeExtra {
   // Ci_EvalFrame checks this at start_frame to install jitVectorcall
   // when the call count reaches the compilation threshold.
   bool jit_eligible;
+  // Set by scheduleJitCompile when shouldSkipCompilationStatic returns true.
+  // cinderx_func_watcher checks this on re-encounter to avoid repeating
+  // skip analysis and to leave vectorcall unchanged (no jitVectorcall stamp).
+  // Initialised to false by PyMem_Calloc in codeExtra().
+  bool skipped;
 } CodeExtra;
 
 // Thread-safe accessors for CodeExtra::calls.

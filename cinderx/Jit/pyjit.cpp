@@ -3762,6 +3762,35 @@ bool scheduleJitCompile(BorrowedRef<PyFunctionObject> func) {
     return false;
   }
 
+  // Skip functions that are known at registration time to produce worse
+  // JIT code than the interpreter. These keep their original vectorcall
+  // and never pay the jitVectorcall per-call overhead.
+  // Cache the skip decision in CodeExtra so cinderx_func_watcher can
+  // short-circuit on re-encounter without repeating the analysis.
+  {
+    BorrowedRef<PyCodeObject> code{func->func_code};
+    bool should_skip = false;
+    if (code->co_flags & CO_VARKEYWORDS) {
+      should_skip = true;
+    } else {
+      const char* qualname = PyUnicode_AsUTF8(code->co_qualname);
+      if (qualname != nullptr) {
+        size_t len = strlen(qualname);
+        if ((len >= 10 && strcmp(qualname + len - 10, ".__enter__") == 0) ||
+            (len >= 9 && strcmp(qualname + len - 9, ".__exit__") == 0)) {
+          should_skip = true;
+        }
+      }
+    }
+    if (should_skip) {
+      auto* extra = codeExtra(code);
+      if (extra != nullptr) {
+        extra->skipped = true;
+      }
+      return false;
+    }
+  }
+
   func->vectorcall = jitVectorcall;
   if (!registerFunction(func)) {
     func->vectorcall = getInterpretedVectorcall(func);

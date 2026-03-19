@@ -260,6 +260,25 @@ CodeExtra* codeExtra(PyCodeObject* code) {
   return extra;
 }
 
+CodeExtra* tryGetCodeExtra(PyCodeObject* code) {
+  if constexpr (!USE_CODE_EXTRA) {
+    return nullptr;
+  }
+
+  if (code_extra_index == -1) {
+    return nullptr;
+  }
+
+  auto code_obj = reinterpret_cast<PyObject*>(code);
+
+  void* data_ptr = nullptr;
+  if (PyUnstable_Code_GetExtra(code_obj, code_extra_index, &data_ptr) < 0) {
+    PyErr_Clear();
+    return nullptr;
+  }
+  return reinterpret_cast<CodeExtra*>(data_ptr);
+}
+
 int numLocals(PyCodeObject* code) {
   return code->co_nlocals;
 }

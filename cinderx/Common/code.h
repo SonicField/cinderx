@@ -128,6 +128,11 @@ void finiCodeExtraIndex();
 // Python error set.
 CodeExtra* codeExtra(PyCodeObject* code);
 
+// Non-allocating lookup: returns existing CodeExtra or nullptr if none has
+// been created yet. Used by cinderx_func_watcher fast path to avoid
+// allocating CodeExtra for every function creation event.
+CodeExtra* tryGetCodeExtra(PyCodeObject* code);
+
 // Count the various frame variables that a code object will use.
 int numLocals(PyCodeObject* code);
 int numCellvars(PyCodeObject* code);
