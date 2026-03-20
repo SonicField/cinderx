@@ -1,6 +1,9 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 
+#include "cinderx/Common/code.h"
 #include "cinderx/Common/extra-py-flags.h"
+
+#include "internal/pycore_pystate.h"
 #include "cinderx/Interpreter/interpreter.h"
 #include "cinderx/UpstreamBorrow/borrowed.h"
 
@@ -26,6 +29,29 @@ vectorcallfunc getInterpretedVectorcall(
 #endif
 }
 
+// Lightweight counting eval frame hook. Counts calls per code object
+// via codeExtra and stamps jitVectorcall when the threshold is reached.
+// Delegates ALL interpretation to CPython's vanilla eval loop — no Meta
+// dependencies, no bytecodes.c, no lazy imports.
+static PyObject* Ci_CountingEvalFrame(
+    PyThreadState* tstate,
+    _PyInterpreterFrame* frame,
+    int throwflag) {
+  PyCodeObject* code = frame->f_code;
+  CodeExtra* extra = tryGetCodeExtra(code);
+  if (extra != nullptr && extra->jit_eligible &&
+      Ci_JitVectorcall != nullptr) {
+    Ci_code_extra_incr_calls(extra);
+    if (Ci_code_extra_get_calls(extra) == Ci_JitCompileThreshold) {
+      PyObject* funcobj = frame->f_funcobj;
+      if (funcobj != nullptr && PyFunction_Check(funcobj)) {
+        ((PyFunctionObject*)funcobj)->vectorcall = Ci_JitVectorcall;
+      }
+    }
+  }
+  return _PyEval_EvalFrameDefault(tstate, frame, throwflag);
+}
+
 int Ci_InitFrameEvalFunc() {
 #ifdef ENABLE_INTERPRETER_LOOP
 #ifdef ENABLE_EVAL_HOOK
@@ -49,6 +75,17 @@ int Ci_InitFrameEvalFunc() {
 
   _PyInterpreterState_SetEvalFrameFunc(interp, Ci_EvalFrame);
 #endif
+#else
+  // Lightweight counting hook: count calls via codeExtra, stamp
+  // jitVectorcall when hot. No CinderX interpreter — delegates to
+  // CPython's vanilla eval loop.
+  {
+    auto interp = _PyInterpreterState_GET();
+    auto current = _PyInterpreterState_GetEvalFrameFunc(interp);
+    if (current == nullptr || current == _PyEval_EvalFrameDefault) {
+      _PyInterpreterState_SetEvalFrameFunc(interp, Ci_CountingEvalFrame);
+    }
+  }
 #endif
 
   return 0;
@@ -61,6 +98,9 @@ void Ci_FiniFrameEvalFunc() {
 #elif defined(ENABLE_PEP523_HOOK)
   _PyInterpreterState_SetEvalFrameFunc(_PyInterpreterState_GET(), nullptr);
 #endif
+#else
+  _PyInterpreterState_SetEvalFrameFunc(
+      _PyInterpreterState_GET(), _PyEval_EvalFrameDefault);
 #endif
 }
 

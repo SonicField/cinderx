@@ -3813,9 +3813,18 @@ bool scheduleJitCompile(BorrowedRef<PyFunctionObject> func) {
     }
   }
 
-  func->vectorcall = jitVectorcall;
+  // Mark the code object as eligible for JIT compilation.
+  // The Ci_CountingEvalFrame hook counts calls and stamps jitVectorcall
+  // when the threshold is reached. Do NOT stamp jitVectorcall eagerly —
+  // this eliminates per-creation dispatch overhead for cold functions.
+  {
+    BorrowedRef<PyCodeObject> eligible_code{func->func_code};
+    auto* extra = codeExtra(eligible_code);
+    if (extra != nullptr) {
+      extra->jit_eligible = true;
+    }
+  }
   if (!registerFunction(func)) {
-    func->vectorcall = getInterpretedVectorcall(func);
     return false;
   }
 
