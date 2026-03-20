@@ -264,6 +264,43 @@ PyObject* forcedJitVectorcall(
   return interp_entry(func_obj, stack, nargsf, kwnames);
 }
 
+
+// Forward declaration — jitCountingTrampoline needs to call jitVectorcall
+// when threshold is reached.
+static PyObject* jitVectorcall(
+    PyObject* func_obj,
+    PyObject* const* stack,
+    size_t nargsf,
+    PyObject* kwnames);
+
+// Lightweight counting trampoline — minimal overhead for below-threshold calls.
+// Does: load CodeExtra, increment call count, check threshold.
+// When threshold is reached, stamps jitVectorcall and delegates to it.
+// Otherwise delegates directly to interpreter vectorcall (no shouldSkipCompilation,
+// no JIT_DCHECK, no config lookup on the hot path).
+static PyObject* jitCountingTrampoline(
+    PyObject* func_obj,
+    PyObject* const* stack,
+    size_t nargsf,
+    PyObject* kwnames) {
+  auto func = reinterpret_cast<PyFunctionObject*>(func_obj);
+  auto code = reinterpret_cast<PyCodeObject*>(func->func_code);
+  auto limit = getConfig().compile_after_n_calls;
+  if (limit.has_value()) {
+    auto calls = countCalls(code);
+    if (calls >= *limit) {
+      // Threshold reached — switch to full jitVectorcall for compilation
+      func->vectorcall = jitVectorcall;
+      return jitVectorcall(func_obj, stack, nargsf, kwnames);
+    }
+    incrementShadowcodeCall(code);
+  }
+
+  // Below threshold — delegate directly to interpreter, no JIT overhead
+  auto entry = getInterpretedVectorcall(func);
+  return entry(func_obj, stack, nargsf, kwnames);
+}
+
 // Python function entry point when the JIT is enabled.
 PyObject* jitVectorcall(
     PyObject* func_obj,
@@ -3813,7 +3850,7 @@ bool scheduleJitCompile(BorrowedRef<PyFunctionObject> func) {
     }
   }
 
-  func->vectorcall = jitVectorcall;
+  func->vectorcall = jitCountingTrampoline;
   if (!registerFunction(func)) {
     func->vectorcall = getInterpretedVectorcall(func);
     return false;
