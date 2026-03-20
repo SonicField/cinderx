@@ -195,23 +195,6 @@ static bool shouldSkipCompilation(BorrowedRef<PyCodeObject> code) {
   // Unconditionally skip __enter__ and __exit__ — JIT code for CM protocol
   // methods is always slower than interpreter due to guard overhead.
   if (is_enter || is_exit) return true;
-  // Skip @classmethod (first parameter named "cls") — monomorphic type
-  // profiler causes repeated guard failures on polymorphic call sites.
-  if (code->co_argcount >= 1) {
-    PyObject* varnames = PyCode_GetVarnames(code);
-    if (varnames != nullptr) {
-      bool is_cls = false;
-      if (PyTuple_GET_SIZE(varnames) >= 1) {
-        PyObject* first_arg = PyTuple_GET_ITEM(varnames, 0);
-        if (PyUnicode_Check(first_arg) &&
-            PyUnicode_CompareWithASCIIString(first_arg, "cls") == 0) {
-          is_cls = true;
-        }
-      }
-      Py_DECREF(varnames);
-      if (is_cls) return true;
-    }
-  }
   // Only __init__ goes through the STORE_ATTR specialisation check below.
   if (!is_init) return false;
   BytecodeInstructionBlock block{code};
@@ -3819,25 +3802,6 @@ bool scheduleJitCompile(BorrowedRef<PyFunctionObject> func) {
             (len >= 9 && strcmp(qualname + len - 9, ".__exit__") == 0)) {
           should_skip = true;
         }
-      }
-    }
-    // Skip @classmethod functions — the monomorphic type profiler records
-    // a single type for the first non-cls argument, but classmethods are
-    // often called with varying types. This causes repeated guard failures
-    // (up to kDeoptBackoffThreshold) before the JIT detaches, wasting
-    // cycles on deopt+reinterpret per call. Convention: first parameter
-    // named "cls" indicates @classmethod.
-    if (!should_skip && code->co_argcount >= 1) {
-      PyObject* varnames = PyCode_GetVarnames(code);
-      if (varnames != nullptr) {
-        if (PyTuple_GET_SIZE(varnames) >= 1) {
-          PyObject* first_arg = PyTuple_GET_ITEM(varnames, 0);
-          if (PyUnicode_Check(first_arg) &&
-              PyUnicode_CompareWithASCIIString(first_arg, "cls") == 0) {
-            should_skip = true;
-          }
-        }
-        Py_DECREF(varnames);
       }
     }
     if (should_skip) {
