@@ -59,8 +59,20 @@ export LD_LIBRARY_PATH="${CINDERX_DEV}/python-install/lib"
 export PYTHONJIT=1
 export CINDERX_PYTHON="${PYTHON}"
 
-# VANILLA_PYTHON: default to fbcode system python3.12 if not set
-export VANILLA_PYTHON="${VANILLA_PYTHON:-/usr/local/fbcode/platform010-aarch64/bin/python3.12}"
+# VANILLA_PYTHON: default to same binary as CINDERX_PYTHON (same-binary comparison).
+# Override with VANILLA_PYTHON env var for explicit cross-binary comparison.
+export VANILLA_PYTHON="${VANILLA_PYTHON:-${PYTHON}}"
+
+# Same-binary assertion: abort if binaries differ.
+VANILLA_MD5=$(md5sum "$VANILLA_PYTHON" | cut -d" " -f1)
+CINDERX_MD5=$(md5sum "$CINDERX_PYTHON" | cut -d" " -f1)
+if [ "$VANILLA_MD5" != "$CINDERX_MD5" ]; then
+  echo "ABORT: Cross-binary comparison detected." >&2
+  echo "  CINDERX_PYTHON: $CINDERX_PYTHON ($CINDERX_MD5)" >&2
+  echo "  VANILLA_PYTHON: $VANILLA_PYTHON ($VANILLA_MD5)" >&2
+  echo "  Export NBS_ALLOW_CROSS_BINARY=1 to override." >&2
+  [ "${NBS_ALLOW_CROSS_BINARY:-}" = "1" ] || exit 1
+fi
 
 # --- Run benchmark ---
 # -S skips site.py, which would activate JIT with compile_after_n_calls=0
