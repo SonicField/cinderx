@@ -4497,17 +4497,20 @@ void HIRBuilder::emitGetIter(
         jit::g_range_iterator_type != nullptr) {
       Type range_iter_type =
           Type::fromTypeExact(jit::g_range_iterator_type);
-      tc.emit<GuardType>(result, range_iter_type, result, tc.frame);
+      tc.emit<GuardType>(result, range_iter_type, result, tc.frame)
+          ->setIterGuard(true);
     } else if (next_opcode == FOR_ITER_LIST &&
                jit::g_list_iterator_type != nullptr) {
       Type list_iter_type =
           Type::fromTypeExact(jit::g_list_iterator_type);
-      tc.emit<GuardType>(result, list_iter_type, result, tc.frame);
+      tc.emit<GuardType>(result, list_iter_type, result, tc.frame)
+          ->setIterGuard(true);
     } else if (next_opcode == FOR_ITER_TUPLE &&
                jit::g_tuple_iterator_type != nullptr) {
       Type tuple_iter_type =
           Type::fromTypeExact(jit::g_tuple_iterator_type);
-      tc.emit<GuardType>(result, tuple_iter_type, result, tc.frame);
+      tc.emit<GuardType>(result, tuple_iter_type, result, tc.frame)
+          ->setIterGuard(true);
     }
     tc.frame.cur_instr_offs = saved_offs;  // restore for subsequent processing
     // result already pushed above - do NOT push again

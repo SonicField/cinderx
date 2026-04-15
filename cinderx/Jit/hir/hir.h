@@ -3408,8 +3408,19 @@ class INSTR_CLASS(GuardType, (TObject), HasOutput, Operands<1>, DeoptBase) {
     return target_;
   }
 
+  // Mark this guard as a FOR_ITER dispatch guard (type mismatch =
+  // loop exhaustion, not a type error). Speculative expansion skips
+  // these because deopting on loop end is incorrect behavior.
+  void setIterGuard(bool v) {
+    is_iter_guard_ = v;
+  }
+  bool isIterGuard() const {
+    return is_iter_guard_;
+  }
+
  private:
   Type target_;
+  bool is_iter_guard_{false};
 };
 
 using ProfiledTypes = std::vector<std::vector<Type>>;

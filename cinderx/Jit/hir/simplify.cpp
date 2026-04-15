@@ -300,6 +300,74 @@ Register* simplifyGuardType(Env& env, const GuardType* instr) {
   if (type == TNoneType) {
     return env.emit<GuardIs>(Py_None, input);
   }
+
+  // Speculative bypass: CondBranchCheckType → fast path / deopt dead end.
+  // No Phi needed — deopt path never returns, tail has single predecessor.
+  if (type.isExact() && instr->frameState()) {
+    // Only expand guards on user-defined heap types. This safely
+    // excludes guards on builtin types (int/float/str) that can see
+    // FOR_ITER sentinel values. Expanding those causes incorrect
+    // deopt behavior when the sentinel flows through binary ops.
+    {
+      PyTypeObject* py_type = type.uniquePyType();
+      if (py_type == nullptr && type.hasTypeSpec()) {
+        py_type = type.typeSpec();
+      }
+      if (py_type == nullptr || !(py_type->tp_flags & Py_TPFLAGS_HEAPTYPE)) {
+        return nullptr;
+      }
+    }
+    // Find Snapshot for deopt block
+    const FrameState* snapshot_fs = nullptr;
+    for (auto it = env.block->rbegin(); it != env.block->rend(); ++it) {
+      if (it->IsSnapshot()) {
+        snapshot_fs = static_cast<const Snapshot&>(*it).frameState();
+        break;
+      }
+    }
+    if (!snapshot_fs) {
+      return nullptr;
+    }
+
+    env.new_blocks += 1;
+
+    // Create dead-end deopt block using the GuardType's own FrameState
+    BasicBlock* deopt_bb = env.func.cfg.AllocateBlock();
+    auto* snapshot = Snapshot::create(*instr->frameState());
+    snapshot->setBytecodeOffset(env.bc_off);
+    deopt_bb->Append(snapshot);
+    auto* deopt_instr = Deopt::create();
+    deopt_instr->setBytecodeOffset(env.bc_off);
+    deopt_instr->setFrameState(*instr->frameState());
+    deopt_bb->Append(deopt_instr);
+
+    // Emit CondBranchCheckType: true → continue (fast), false → deopt
+    auto* branch = env.emitInstr<CondBranchCheckType>(
+        input, type,
+        static_cast<BasicBlock*>(nullptr),
+        deopt_bb);
+
+    // splitAfter: tail block gets remaining instructions (including
+    // the original GuardType). Tail has SINGLE predecessor (original
+    // block via true edge) — no liveness issues.
+    BasicBlock* fast_bb = env.func.cfg.splitAfter(*branch);
+    branch->set_true_bb(fast_bb);
+    env.new_blocks += 1;
+
+    // Move to fast_bb. The original GuardType is the first instruction.
+    env.block = fast_bb;
+    // Set cursor to the GuardType (satisfies the Simplify cursor contract)
+    env.cursor = fast_bb->iterator_to(*const_cast<GuardType*>(instr));
+
+    // Insert Snapshot BEFORE the GuardType for tail block's DeoptBase needs
+    auto* tail_snapshot = Snapshot::create(*instr->frameState());
+    tail_snapshot->setBytecodeOffset(env.bc_off);
+    fast_bb->insert(tail_snapshot, env.cursor);
+
+    // Emit RefineType before the GuardType to replace it.
+    return env.emit<RefineType>(type, input);
+  }
+
   return nullptr;
 }
 
