@@ -1639,7 +1639,8 @@ def _worker_jit(args):
             enable_specialised_opcodes(cinderjit_mod)
 
     n_iter = 10_000 if filter_set else 100_000
-    n_warmup = 2 if filter_set else 3
+    # Auto-compile needs more warmup runs to trigger compilation
+    n_warmup = 5 if (filter_set and compile_mode == "auto") else (2 if filter_set else 3)
     n_measure = 3 if filter_set else 5
 
     results = {
@@ -1986,7 +1987,10 @@ def cmd_target(args):
     print(f"Platform:     {platform.machine()}")
     print(f"Reps:         {args.reps} (= {args.reps * 4} runs, "
           f"{args.reps * 2} per condition)")
-    print(f"Compile mode: {args.compile}")
+    # Target benchmark always uses auto-compile (not force_compile)
+    compile_mode = "auto"
+
+    print(f"Compile mode: {compile_mode}")
     print()
 
     # Determine Python commands
@@ -2027,7 +2031,7 @@ def cmd_target(args):
             )
 
             result = _run_worker(
-                cmd, condition, args.compile,
+                cmd, condition, compile_mode,
                 filter_benchmarks=TARGET_BENCH_NAMES,
             )
             if result:
