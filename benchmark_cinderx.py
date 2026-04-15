@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Consolidated CinderX benchmark suite for aarch64.
+"""Consolidated CinderX benchmark suite.
 
 Replaces: benchmark_abba.py, benchmark_g1_next_abba.py,
           cinderx_jit_benchmark.sh, benchmark_specialisation.sh
@@ -28,7 +28,7 @@ FALSIFICATION:
   - Raw block deltas printed for manual drift inspection
 
 USAGE:
-  # On devgpu (aarch64) with CinderX venv:
+  # With CinderX venv:
   PYTHONJIT=1 /path/to/venv/bin/python3 benchmark_cinderx.py abba
   PYTHONJIT=1 /path/to/venv/bin/python3 benchmark_cinderx.py all
   PYTHONJIT=1 /path/to/venv/bin/python3 benchmark_cinderx.py jit --reps=3
@@ -512,6 +512,469 @@ def bench_func_calls(n_iter):
     return total
 
 
+def bench_nbody(n_iter):
+    """N-body simulation — float arithmetic, list mutation."""
+    bodies = [
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 39.47841760435743],
+        [4.84, -1.16, -0.10, 0.00166, 0.00769, -0.0000690, 0.000954],
+        [8.34, 4.12, -0.40, -0.00276, 0.00499, 0.0000230, 0.000286],
+        [12.89, -15.11, -0.22, 0.00296, 0.00237, -0.0000296, 0.0000437],
+        [15.38, -25.92, 0.179, 0.00268, 0.00162, -0.0000951, 0.0000517],
+    ]
+    dt = 0.01
+    for _ in range(n_iter // 100):
+        for i in range(len(bodies)):
+            bi = bodies[i]
+            for j in range(i + 1, len(bodies)):
+                bj = bodies[j]
+                dx = bi[0] - bj[0]
+                dy = bi[1] - bj[1]
+                dz = bi[2] - bj[2]
+                dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+                mag = dt / (dist * dist * dist)
+                bi[3] -= dx * bj[6] * mag
+                bi[4] -= dy * bj[6] * mag
+                bi[5] -= dz * bj[6] * mag
+                bj[3] += dx * bi[6] * mag
+                bj[4] += dy * bi[6] * mag
+                bj[5] += dz * bi[6] * mag
+        for b in bodies:
+            b[0] += dt * b[3]
+            b[1] += dt * b[4]
+            b[2] += dt * b[5]
+    return bodies[0][0]
+
+
+def _fannkuch(n):
+    perm = list(range(n))
+    count = [0] * n
+    max_flips = 0
+    r = n
+    while True:
+        while r != 1:
+            count[r - 1] = r
+            r -= 1
+        if perm[0] != 0 and perm[n - 1] != n - 1:
+            perm2 = list(perm)
+            flips = 0
+            k = perm2[0]
+            while k:
+                perm2[:k + 1] = perm2[k::-1]
+                flips += 1
+                k = perm2[0]
+            if flips > max_flips:
+                max_flips = flips
+        while r != n:
+            perm.insert(r, perm.pop(0))
+            count[r] -= 1
+            if count[r] > 0:
+                break
+            r += 1
+        else:
+            return max_flips
+    return max_flips
+
+
+def bench_fannkuch(n_iter):
+    """Fannkuch benchmark — permutation + reversal."""
+    return _fannkuch(9)
+
+
+def bench_chaos_game(n_iter):
+    """Chaos game / fractal — float ops, tuple indexing."""
+    vertices = [(0.0, 0.0), (1.0, 0.0), (0.5, math.sqrt(3) / 2)]
+    x, y = 0.5, 0.5
+    total = 0.0
+    r = 0
+    for _ in range(n_iter):
+        r = (r * 1103515245 + 12345) & 0x7FFFFFFF
+        v = vertices[r % 3]
+        x = (x + v[0]) / 2
+        y = (y + v[1]) / 2
+        total += x + y
+    return total
+
+
+def bench_coroutine_chain(n_iter):
+    """Generator pipeline — chained yield stages."""
+    def stage1(n):
+        total = 0.0
+        for i in range(n):
+            total += i * 0.1
+            yield total
+    def stage2(source):
+        for val in source:
+            yield val * 0.99
+    def stage3(source):
+        for val in source:
+            yield val + 1.0
+    total = 0.0
+    for _ in range(n_iter // 1000):
+        pipeline = stage3(stage2(stage1(1000)))
+        for val in pipeline:
+            total = (total + val) % 10000
+    return total
+
+
+def bench_exceptions(n_iter):
+    """Exception handling — try/except in hot loop."""
+    d = {i: i * 2 for i in range(0, 1000, 2)}
+    total = 0
+    for i in range(n_iter):
+        try:
+            total += d[i % 1000]
+        except KeyError:
+            total += 1
+    return total
+
+
+class _MethodPoint:
+    __slots__ = ("x", "y")
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+    def distance_to(self, other):
+        dx = self.x - other.x
+        dy = self.y - other.y
+        return (dx * dx + dy * dy) ** 0.5
+    def translate(self, dx, dy):
+        return _MethodPoint(self.x + dx, self.y + dy)
+
+
+def bench_method_calls(n_iter):
+    """Class method dispatch overhead."""
+    points = [_MethodPoint(i * 0.1, i * 0.2) for i in range(100)]
+    total = 0.0
+    for _ in range(n_iter // 100):
+        for i in range(len(points) - 1):
+            total += points[i].distance_to(points[i + 1])
+            points[i] = points[i].translate(0.01, 0.02)
+    return total
+
+
+def bench_string_ops(n_iter):
+    """String manipulation — join, split, replace, case conversion."""
+    words = [f"word_{i}" for i in range(100)]
+    total = 0
+    for _ in range(n_iter // 100):
+        s = " ".join(words)
+        parts = s.split(" ")
+        s2 = "-".join(reversed(parts))
+        total += len(s2)
+        s3 = s.upper().lower().replace("word", "item")
+        total += s3.count("item")
+    return total
+
+
+def bench_unpack_seq(n_iter):
+    """Tuple/list unpacking in tight loops."""
+    pairs = [(i, i + 1) for i in range(100)]
+    triples = [(i, i + 1, i + 2) for i in range(100)]
+    total = 0
+    for _ in range(n_iter // 100):
+        for a, b in pairs:
+            total += a + b
+        for a, b, c in triples:
+            total += a + b + c
+    return total
+
+
+def bench_json_roundtrip(n_iter):
+    """JSON serialisation/deserialisation."""
+    data = {
+        "users": [
+            {"id": i, "name": f"user_{i}", "scores": [j * 1.1 for j in range(10)],
+             "active": i % 2 == 0, "tags": [f"tag_{k}" for k in range(5)]}
+            for i in range(50)
+        ],
+        "metadata": {"version": 1, "count": 50},
+    }
+    total = 0
+    for _ in range(n_iter // 1000):
+        s = json.dumps(data)
+        d = json.loads(s)
+        total += len(d["users"])
+    return total
+
+
+def bench_yield_from_chain(n_iter):
+    """yield-from delegation chain."""
+    def bottom(n):
+        for i in range(n):
+            yield i
+    def mid(n):
+        yield from bottom(n)
+    def top(n):
+        yield from mid(n)
+    total = 0
+    for val in top(n_iter):
+        total += val
+    return total
+
+
+# --- Specialisation-specific benchmark targets (from benchmark_specialisation.sh) ---
+
+class _Parameter:
+    def __init__(self, data):
+        self.data = data
+        self.grad = None
+        self.requires_grad = True
+
+
+class _Module:
+    def __init__(self):
+        object.__setattr__(self, "_parameters", {})
+        object.__setattr__(self, "_modules", {})
+        object.__setattr__(self, "training", True)
+    def __getattr__(self, name):
+        _parameters = self.__dict__.get("_parameters", {})
+        if name in _parameters:
+            return _parameters[name]
+        _modules = self.__dict__.get("_modules", {})
+        if name in _modules:
+            return _modules[name]
+        raise AttributeError(f"'{type(self).__name__}' has no attribute '{name}'")
+    def __setattr__(self, name, value):
+        if isinstance(value, _Parameter):
+            self.__dict__.setdefault("_parameters", {})[name] = value
+        elif isinstance(value, _Module):
+            self.__dict__.setdefault("_modules", {})[name] = value
+        else:
+            object.__setattr__(self, name, value)
+    def __call__(self, *args, **kwargs):
+        return self.forward(*args, **kwargs)
+    def parameters(self):
+        for p in self._parameters.values():
+            yield p
+        for m in self._modules.values():
+            yield from m.parameters()
+    def train(self, mode=True):
+        self.training = mode
+        for m in self._modules.values():
+            m.train(mode)
+        return self
+    def eval(self):
+        return self.train(False)
+
+
+class _Linear(_Module):
+    def __init__(self, in_features, out_features, bias=True):
+        _Module.__init__(self)
+        self.in_features = in_features
+        self.out_features = out_features
+        self.weight = _Parameter(0.01 * in_features * out_features)
+        if bias:
+            self.bias = _Parameter(0.01 * out_features)
+    def forward(self, x):
+        result = x * self.weight.data
+        if hasattr(self, "bias"):
+            result += self.bias.data
+        return result
+
+
+class _ReLU(_Module):
+    def forward(self, x):
+        return max(0.0, x)
+
+
+class _Sequential(_Module):
+    def __init__(self, *modules):
+        _Module.__init__(self)
+        for i, module in enumerate(modules):
+            self._modules[str(i)] = module
+    def forward(self, x):
+        for module in self._modules.values():
+            x = module(x)
+        return x
+
+
+class _SimpleNet(_Module):
+    def __init__(self):
+        _Module.__init__(self)
+        self.features = _Sequential(
+            _Linear(64, 128), _ReLU(),
+            _Linear(128, 64), _ReLU(),
+        )
+        self.classifier = _Linear(64, 10)
+    def forward(self, x):
+        x = self.features(x)
+        x = self.classifier(x)
+        return x
+
+
+def bench_nn_module(n_iter):
+    """nn.Module-style forward pass — heavy __getattr__/__setattr__."""
+    model = _SimpleNet()
+    model.train()
+    total = 0.0
+    for i in range(n_iter // 100):
+        x = float(i % 100) * 0.01
+        output = model(x)
+        total += output % 1000.0
+        for p in model.parameters():
+            total += p.data * 0.0001
+        if i % 100 == 0:
+            if model.training:
+                model.eval()
+            else:
+                model.train()
+        total = total % 10000.0
+    return total
+
+
+def bench_kwargs_dispatch(n_iter):
+    """Keyword argument dispatch and class init — STORE_ATTR heavy."""
+    class Layer:
+        def __init__(self, in_f=64, out_f=64, bias=True, dtype="float32",
+                     device="cpu", requires_grad=True):
+            self.in_f = in_f
+            self.out_f = out_f
+            self.has_bias = bias
+            self.dtype = dtype
+            self.device = device
+            self.requires_grad = requires_grad
+            self.weight = 0.01 * in_f
+        def forward(self, x, *, training=True, mask=None):
+            result = x * self.weight
+            if self.has_bias:
+                result += 0.01
+            return result
+
+    def compute(x, y, z=0.0, scale=1.0, bias=0.0, inplace=False):
+        result = (x * y + z) * scale + bias
+        return result if inplace else result * 1.0
+
+    layers = [Layer(in_f=i * 8 + 8, out_f=(i + 1) * 8 + 8) for i in range(5)]
+    total = 0.0
+    for i in range(n_iter // 100):
+        total += compute(total % 100, 0.5, z=0.1, scale=0.99, bias=0.001)
+        for layer in layers:
+            total = layer.forward(total % 100, training=(i % 2 == 0))
+        total = total % 10000.0
+    return total
+
+
+def bench_context_manager(n_iter):
+    """Nested context managers — __enter__/__exit__ protocol."""
+    class NoGrad:
+        _enabled = True
+        def __enter__(self):
+            self._prev = NoGrad._enabled
+            NoGrad._enabled = False
+            return self
+        def __exit__(self, *args):
+            NoGrad._enabled = self._prev
+            return False
+    class Autocast:
+        _mode = "float32"
+        def __init__(self, mode="float16"):
+            self._target = mode
+        def __enter__(self):
+            self._prev = Autocast._mode
+            Autocast._mode = self._target
+            return self
+        def __exit__(self, *args):
+            Autocast._mode = self._prev
+            return False
+
+    model = {"training": True, "weight": 1.0, "bias": 0.0}
+    total = 0.0
+    for i in range(n_iter // 100):
+        with NoGrad():
+            total += model["weight"] * float(i % 100) + model["bias"]
+        with NoGrad():
+            with Autocast("float16"):
+                total += total % 1000 * 0.99
+        total = total % 10000.0
+    return total
+
+
+def bench_decorator_chain(n_iter):
+    """Decorated function dispatch — functools.wraps overhead."""
+    import functools
+    def timer(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            return func(*args, **kwargs)
+        return wrapper
+    def validator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            return func(*args, **kwargs)
+        return wrapper
+    class Compute:
+        @timer
+        @validator
+        def add(self, a, b):
+            return a + b
+        @timer
+        @validator
+        def multiply(self, a, b):
+            return a * b
+    comp = Compute()
+    total = 0.0
+    for i in range(n_iter // 10):
+        total += comp.add(total % 100, float(i % 50))
+        total += comp.multiply(total % 100, 0.99)
+        total = total % 10000.0
+    return total
+
+
+def bench_dunder_protocol(n_iter):
+    """Dunder method dispatch — __getattr__, __setattr__, __call__, etc."""
+    class DModule:
+        def __init__(self, name):
+            object.__setattr__(self, "_parameters", {})
+            object.__setattr__(self, "_name", name)
+            for i in range(5):
+                self._parameters[f"weight_{i}"] = float(i) * 0.1
+        def __getattr__(self, name):
+            if name in self.__dict__.get("_parameters", {}):
+                return self._parameters[name]
+            raise AttributeError(name)
+        def __setattr__(self, name, value):
+            if isinstance(value, float):
+                self.__dict__.setdefault("_parameters", {})[name] = value
+            else:
+                object.__setattr__(self, name, value)
+        def __call__(self, x):
+            return x + self._parameters.get("weight_0", 0.0)
+        def __repr__(self):
+            return f"DModule({self._name}, params={len(self._parameters)})"
+        def __bool__(self):
+            return True
+    model = DModule("root")
+    total = 0.0
+    for _ in range(n_iter // 100):
+        w0 = model.weight_0
+        w1 = model.weight_1
+        total += w0 + w1
+        model.weight_0 = w0 * 0.99
+        result = model(total)
+        total = result % 1000.0
+        _ = repr(model)
+        if model:
+            total += 0.0001
+    return total
+
+
+class _Accumulator:
+    def __init__(self):
+        self.value = 0.0
+        self.count = 0
+
+
+def bench_store_then_use(n_iter):
+    """Store-then-load pattern — isolates STORE_ATTR downstream benefit."""
+    acc = _Accumulator()
+    total = 0.0
+    for _ in range(n_iter):
+        acc.value = 1.0
+        acc.count = acc.count + 1
+        total += acc.value * 2.0 + acc.count
+    return total
+
+
 JIT_BENCHMARKS = [
     ("fibonacci",       bench_fibonacci),
     ("richards_slots",  bench_richards_slots),
@@ -523,12 +986,23 @@ JIT_BENCHMARKS = [
     ("list_comp",       bench_list_comp),
     ("dict_ops",        bench_dict_ops),
     ("func_calls",      bench_func_calls),
+    ("nbody",           bench_nbody),
+    ("fannkuch",        bench_fannkuch),
+    ("chaos_game",      bench_chaos_game),
+    ("coroutine_chain", bench_coroutine_chain),
+    ("exceptions",      bench_exceptions),
+    ("method_calls",    bench_method_calls),
+    ("string_ops",      bench_string_ops),
+    ("unpack_seq",      bench_unpack_seq),
+    ("json_roundtrip",  bench_json_roundtrip),
+    ("yield_from",      bench_yield_from_chain),
 ]
 
 # Functions to force-compile for JIT benchmarks
 _JIT_COMPILABLE = [
     _fib, _nqueens_solve, _spectral_A, _spectral_mul_Av,
-    _spectral_mul_Atv, _spectral_mul_AtAv,
+    _spectral_mul_Atv, _spectral_mul_AtAv, _fannkuch,
+    _MethodPoint.__init__, _MethodPoint.distance_to, _MethodPoint.translate,
 ]
 
 
@@ -594,12 +1068,23 @@ def bench_module_attr(n_iter):
 
 
 SPEC_BENCHMARKS = [
-    ("deep_class",     bench_deep_class),
-    ("attr_access",    bench_attr_access),
-    ("module_attr",    bench_module_attr),
-    ("richards_slots", bench_richards_slots),
-    ("func_calls",     bench_func_calls),
-    ("list_comp",      bench_list_comp),
+    ("deep_class",        bench_deep_class),
+    ("attr_access",       bench_attr_access),
+    ("module_attr",       bench_module_attr),
+    ("richards_slots",    bench_richards_slots),
+    ("func_calls",        bench_func_calls),
+    ("list_comp",         bench_list_comp),
+    ("nn_module",         bench_nn_module),
+    ("kwargs_dispatch",   bench_kwargs_dispatch),
+    ("context_manager",   bench_context_manager),
+    ("decorator_chain",   bench_decorator_chain),
+    ("dunder_protocol",   bench_dunder_protocol),
+    ("store_then_use",    bench_store_then_use),
+    ("nbody",             bench_nbody),
+    ("chaos_game",        bench_chaos_game),
+    ("coroutine_chain",   bench_coroutine_chain),
+    ("exceptions",        bench_exceptions),
+    ("method_calls",      bench_method_calls),
 ]
 
 
@@ -920,7 +1405,7 @@ def cmd_jit(args):
     )
     vanilla_python = os.environ.get(
         "VANILLA_PYTHON",
-        "/usr/local/fbcode/platform010-aarch64/bin/python3.12",
+        "/data/users/alexturner/cpython312-vanilla/bin/python3.12",
     )
 
     # Check availability
@@ -969,7 +1454,7 @@ def cmd_jit(args):
     # Comparison table
     print()
     print("=" * 75)
-    print("CinderX JIT Performance Comparison (aarch64)")
+    print("CinderX JIT Performance Comparison")
     print("=" * 75)
     print(f"JIT ON runs:  {len(on_results)}")
     print(f"JIT OFF runs: {len(off_results)}")
@@ -1110,7 +1595,7 @@ def cmd_spec(args):
     # Comparison
     print()
     print("=" * 75)
-    print("Specialisation Effect (aarch64)")
+    print("Specialisation Effect")
     print("=" * 75)
     print()
 
@@ -1179,7 +1664,7 @@ def cmd_all(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Consolidated CinderX benchmark suite for aarch64.",
+        description="Consolidated CinderX benchmark suite.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -1249,14 +1734,6 @@ Environment variables:
     if not args.subcommand:
         parser.print_help()
         sys.exit(1)
-
-    # Architecture check
-    if platform.machine() != "aarch64":
-        print(
-            f"WARNING: Running on {platform.machine()}, "
-            f"designed for aarch64. Results may differ."
-        )
-        print()
 
     dispatch = {
         "abba": cmd_abba,

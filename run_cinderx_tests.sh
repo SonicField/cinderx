@@ -1,7 +1,6 @@
 #!/bin/bash
-# run_cinderx_tests.sh — Canonical CinderX JIT test runner for aarch64
+# run_cinderx_tests.sh — Canonical CinderX JIT test runner
 #
-# THE single test runner for CinderX on devgpu004/devgpu009.
 # Runs CinderX test suites and CPython regression tests.
 #
 # Usage:
@@ -19,15 +18,16 @@
 # Environment:
 #   PYTHONPATH is set to include PythonLib for the opcode module.
 #   CinderX tests use force_compile() internally — no JIT env var needed.
-#   CINDERX_ROOT defaults to ~/local/cinderx_dev/cinderx
+#   CINDERX_ROOT defaults to the directory containing this script.
 #
 # Gate: Aborts immediately if CinderX JIT is not importable or not enabled.
 #       Will NOT silently run tests on stock Python.
 
 set -uo pipefail
 
-CINDERX_ROOT="${CINDERX_ROOT:-$HOME/local/cinderx_dev/cinderx}"
-CINDERX_VENV="${CINDERX_VENV:-$HOME/local/cinderx_dev/venv}"
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CINDERX_ROOT="${CINDERX_ROOT:-$_SCRIPT_DIR}"
+CINDERX_VENV="${CINDERX_VENV:-$(cd "$_SCRIPT_DIR/.." && pwd)/venv}"
 PYTHONLIB="$CINDERX_ROOT/cinderx/PythonLib"
 TEST_DIR="$PYTHONLIB/test_cinderx"
 RESULTS_FILE="/tmp/cinderx_test_results_$(date +%Y%m%d_%H%M%S).txt"
