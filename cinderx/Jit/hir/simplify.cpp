@@ -304,19 +304,36 @@ Register* simplifyGuardType(Env& env, const GuardType* instr) {
   // Speculative expansion with C-API slow path (no deopt).
   // Only expand GuardType + LoadAttr pairs: the next instruction must
   // be a LoadAttr that uses the guard's output.
-  if (type.isExact() && !instr->isIterGuard() && instr->frameState()) {
-    // Peek at the next instruction — must be LoadAttr using guard output
-    auto next_it = std::next(env.cursor);
-    if (next_it == env.block->end() || !next_it->IsLoadAttr()) {
+  if (getenv("SPECEXP_LOG")) {
+    fprintf(stderr, "SPECEXP: visit %s guard exact=%d iter=%d fs=%d\n",
+            env.func.fullname.c_str(),
+            type.isExact(), instr->isIterGuard(),
+            instr->frameState() != nullptr);
+  }
+  if (type.isExact() && !instr->isIterGuard()) {
+    // Find a LoadAttr that uses the guard output (may be cross-block)
+    RegUses reg_uses = collectDirectRegUses(env.func);
+    LoadAttr* target_load_attr = nullptr;
+    auto it = reg_uses.find(instr->output());
+    if (it != reg_uses.end()) {
+      for (Instr* use : it->second) {
+        if (use->IsLoadAttr()) {
+          auto* la = static_cast<LoadAttr*>(use);
+          if (!la->alreadyOptimized() && la->frameState()) {
+            target_load_attr = la;
+            break;
+          }
+        }
+        if (getenv("SPECEXP_LOG")) {
+          fprintf(stderr, "SPECEXP: guard used by %s in %s\n",
+                  use->opname(), env.func.fullname.c_str());
+        }
+      }
+    }
+    if (!target_load_attr) {
       return nullptr;
     }
-    auto& load_attr = static_cast<LoadAttr&>(*next_it);
-    if (load_attr.GetOperand(0) != instr->output()) {
-      return nullptr;
-    }
-    if (load_attr.alreadyOptimized() || !load_attr.frameState()) {
-      return nullptr;
-    }
+    auto& load_attr = *target_load_attr;
 
     // Get attribute name for C-API slow path
     int name_idx = load_attr.name_idx();
@@ -324,8 +341,11 @@ Register* simplifyGuardType(Env& env, const GuardType* instr) {
     BorrowedRef<> attr_name = PyTuple_GET_ITEM(code->co_names, name_idx);
     const FrameState& fs = *load_attr.frameState();
 
-    // emitCond: fast = type matches → LoadAttr with refined type
-    //           slow = type mismatch → CallStatic PyObject_GetAttr (C-API, no deopt)
+    if (getenv("SPECEXP_LOG")) {
+      fprintf(stderr, "SPECEXP: EXPAND %s GuardType+LoadAttr target=%s\n",
+              env.func.fullname.c_str(),
+              fmt::format("{}", type).c_str());
+    }
     return env.emitCond(
         [&](BasicBlock* fast_bb, BasicBlock* slow_bb) {
           env.emitInstr<CondBranchCheckType>(input, type, fast_bb, slow_bb);
