@@ -396,6 +396,304 @@ def _nqueens_solve(n, row=0, cols=0, diag1=0, diag2=0):
         )
     return count
 
+
+# --- Richards full (pyperformance variant) ---
+# Polymorphic task dispatch, no __slots__, linked-list packets.
+
+_RICHARDS_BUFSIZE = 4
+_RICHARDS_I_IDLE = 1
+_RICHARDS_I_WORK = 2
+_RICHARDS_I_HANDLERA = 3
+_RICHARDS_I_HANDLERB = 4
+_RICHARDS_I_DEVA = 5
+_RICHARDS_I_DEVB = 6
+_RICHARDS_K_DEV = 1000
+_RICHARDS_K_WORK = 1001
+
+
+class _RPacket:
+    def __init__(self, l, i, k):
+        self.link = l
+        self.ident = i
+        self.kind = k
+        self.datum = 0
+        self.data = [0] * _RICHARDS_BUFSIZE
+
+    def append_to(self, lst):
+        self.link = None
+        if lst is None:
+            return self
+        p = lst
+        nxt = p.link
+        while nxt is not None:
+            p = nxt
+            nxt = p.link
+        p.link = self
+        return lst
+
+
+class _RTaskState:
+    def __init__(self):
+        self.packet_pending = True
+        self.task_waiting = False
+        self.task_holding = False
+
+    def packetPending(self):
+        self.packet_pending = True
+        self.task_waiting = False
+        self.task_holding = False
+        return self
+
+    def waiting(self):
+        self.packet_pending = False
+        self.task_waiting = True
+        self.task_holding = False
+        return self
+
+    def running(self):
+        self.packet_pending = False
+        self.task_waiting = False
+        self.task_holding = False
+        return self
+
+    def waitingWithPacket(self):
+        self.packet_pending = True
+        self.task_waiting = True
+        self.task_holding = False
+        return self
+
+    def isPacketPending(self):
+        return self.packet_pending
+
+    def isTaskWaiting(self):
+        return self.task_waiting
+
+    def isTaskHolding(self):
+        return self.task_holding
+
+    def isTaskHoldingOrWaiting(self):
+        return self.task_holding or (
+            not self.packet_pending and self.task_waiting
+        )
+
+    def isWaitingWithPacket(self):
+        return (
+            self.packet_pending and self.task_waiting and not self.task_holding
+        )
+
+
+class _RTaskWorkArea:
+    def __init__(self):
+        self.taskTab = [None] * 10
+        self.taskList = None
+        self.holdCount = 0
+        self.qpktCount = 0
+
+
+class _RTask(_RTaskState):
+    def __init__(self, wa, i, p, w, initialState, r):
+        self.link = wa.taskList
+        self.ident = i
+        self.priority = p
+        self.input = w
+        self.packet_pending = initialState.isPacketPending()
+        self.task_waiting = initialState.isTaskWaiting()
+        self.task_holding = initialState.isTaskHolding()
+        self.handle = r
+        wa.taskList = self
+        wa.taskTab[i] = self
+        self._wa = wa
+
+    def fn(self, pkt, r):
+        raise NotImplementedError
+
+    def addPacket(self, p, old):
+        if self.input is None:
+            self.input = p
+            self.packet_pending = True
+            if self.priority > old.priority:
+                return self
+        else:
+            p.append_to(self.input)
+        return old
+
+    def runTask(self):
+        if self.isWaitingWithPacket():
+            msg = self.input
+            self.input = msg.link
+            if self.input is None:
+                self.running()
+            else:
+                self.packetPending()
+        else:
+            msg = None
+        return self.fn(msg, self.handle)
+
+    def waitTask(self):
+        self.task_waiting = True
+        return self
+
+    def hold(self):
+        self._wa.holdCount += 1
+        self.task_holding = True
+        return self.link
+
+    def release(self, i):
+        t = self._wa.taskTab[i]
+        t.task_holding = False
+        if t.priority > self.priority:
+            return t
+        return self
+
+    def qpkt(self, pkt):
+        t = self._wa.taskTab[pkt.ident]
+        self._wa.qpktCount += 1
+        pkt.link = None
+        pkt.ident = self.ident
+        return t.addPacket(pkt, self)
+
+
+class _RDeviceTask(_RTask):
+    def fn(self, pkt, r):
+        if pkt is None:
+            pkt = r.pending
+            if pkt is None:
+                return self.waitTask()
+            r.pending = None
+            return self.qpkt(pkt)
+        r.pending = pkt
+        return self.hold()
+
+
+class _RHandlerTask(_RTask):
+    def fn(self, pkt, r):
+        if pkt is not None:
+            if pkt.kind == _RICHARDS_K_WORK:
+                r.work_in = pkt.append_to(r.work_in)
+            else:
+                r.device_in = pkt.append_to(r.device_in)
+        work = r.work_in
+        if work is None:
+            return self.waitTask()
+        count = work.datum
+        if count >= _RICHARDS_BUFSIZE:
+            r.work_in = work.link
+            return self.qpkt(work)
+        dev = r.device_in
+        if dev is None:
+            return self.waitTask()
+        r.device_in = dev.link
+        dev.datum = work.data[count]
+        work.datum = count + 1
+        return self.qpkt(dev)
+
+
+class _RIdleTask(_RTask):
+    def __init__(self, wa, i, p, w, s, r):
+        _RTask.__init__(self, wa, i, 0, None, s, r)
+
+    def fn(self, pkt, r):
+        r.count -= 1
+        if r.count == 0:
+            return self.hold()
+        if r.control & 1 == 0:
+            r.control //= 2
+            return self.release(_RICHARDS_I_DEVA)
+        r.control = r.control // 2 ^ 0xD008
+        return self.release(_RICHARDS_I_DEVB)
+
+
+class _RWorkTask(_RTask):
+    def fn(self, pkt, r):
+        if pkt is None:
+            return self.waitTask()
+        dest = (
+            _RICHARDS_I_HANDLERB
+            if r.destination == _RICHARDS_I_HANDLERA
+            else _RICHARDS_I_HANDLERA
+        )
+        r.destination = dest
+        pkt.ident = dest
+        pkt.datum = 0
+        for i in range(_RICHARDS_BUFSIZE):
+            r.count += 1
+            if r.count > 26:
+                r.count = 1
+            pkt.data[i] = ord("A") + r.count - 1
+        return self.qpkt(pkt)
+
+
+class _RDeviceTaskRec:
+    def __init__(self):
+        self.pending = None
+
+
+class _RIdleTaskRec:
+    def __init__(self):
+        self.control = 1
+        self.count = 10000
+
+
+class _RHandlerTaskRec:
+    def __init__(self):
+        self.work_in = None
+        self.device_in = None
+
+
+class _RWorkerTaskRec:
+    def __init__(self):
+        self.destination = _RICHARDS_I_HANDLERA
+        self.count = 0
+
+
+def _richards_schedule(wa):
+    t = wa.taskList
+    while t is not None:
+        if t.isTaskHoldingOrWaiting():
+            t = t.link
+        else:
+            t = t.runTask()
+
+
+def _richards_run_once(wa):
+    wa.holdCount = 0
+    wa.qpktCount = 0
+    _RIdleTask(
+        wa, _RICHARDS_I_IDLE, 1, 10000,
+        _RTaskState().running(), _RIdleTaskRec(),
+    )
+    wkq = _RPacket(None, 0, _RICHARDS_K_WORK)
+    wkq = _RPacket(wkq, 0, _RICHARDS_K_WORK)
+    _RWorkTask(
+        wa, _RICHARDS_I_WORK, 1000, wkq,
+        _RTaskState().waitingWithPacket(), _RWorkerTaskRec(),
+    )
+    wkq = _RPacket(None, _RICHARDS_I_DEVA, _RICHARDS_K_DEV)
+    wkq = _RPacket(wkq, _RICHARDS_I_DEVA, _RICHARDS_K_DEV)
+    wkq = _RPacket(wkq, _RICHARDS_I_DEVA, _RICHARDS_K_DEV)
+    _RHandlerTask(
+        wa, _RICHARDS_I_HANDLERA, 2000, wkq,
+        _RTaskState().waitingWithPacket(), _RHandlerTaskRec(),
+    )
+    wkq = _RPacket(None, _RICHARDS_I_DEVB, _RICHARDS_K_DEV)
+    wkq = _RPacket(wkq, _RICHARDS_I_DEVB, _RICHARDS_K_DEV)
+    wkq = _RPacket(wkq, _RICHARDS_I_DEVB, _RICHARDS_K_DEV)
+    _RHandlerTask(
+        wa, _RICHARDS_I_HANDLERB, 3000, wkq,
+        _RTaskState().waitingWithPacket(), _RHandlerTaskRec(),
+    )
+    _RDeviceTask(
+        wa, _RICHARDS_I_DEVA, 4000, None,
+        _RTaskState().waiting(), _RDeviceTaskRec(),
+    )
+    _RDeviceTask(
+        wa, _RICHARDS_I_DEVB, 5000, None,
+        _RTaskState().waiting(), _RDeviceTaskRec(),
+    )
+    _richards_schedule(wa)
+    return wa.holdCount == 9297 and wa.qpktCount == 23246
+
+
 _SPECTRAL_N = 100
 
 def _spectral_A(i, j):
@@ -432,6 +730,19 @@ def bench_richards_slots(n_iter):
             total += t.pri
             t = t.nxt
     return total
+
+
+def bench_richards_full(n_iter):
+    """Richards benchmark (proper pyperformance variant).
+    Polymorphic task dispatch, no __slots__, linked-list packets."""
+    n = max(1, n_iter // 10000)
+    wa = _RTaskWorkArea()
+    for _ in range(n):
+        wa.taskTab = [None] * 10
+        wa.taskList = None
+        ok = _richards_run_once(wa)
+        assert ok, f"Richards validation failed: hold={wa.holdCount} qpkt={wa.qpktCount}"
+    return n
 
 def bench_nqueens(n_iter):
     """N-queens solver — recursive backtracking, bit operations."""
@@ -978,6 +1289,7 @@ def bench_store_then_use(n_iter):
 JIT_BENCHMARKS = [
     ("fibonacci",       bench_fibonacci),
     ("richards_slots",  bench_richards_slots),
+    ("richards_full",   bench_richards_full),
     ("nqueens",         bench_nqueens),
     ("spectral_norm",   bench_spectral_norm),
     ("float_arith",     bench_float_arith),
@@ -1003,6 +1315,14 @@ _JIT_COMPILABLE = [
     _fib, _nqueens_solve, _spectral_A, _spectral_mul_Av,
     _spectral_mul_Atv, _spectral_mul_AtAv, _fannkuch,
     _MethodPoint.__init__, _MethodPoint.distance_to, _MethodPoint.translate,
+    _richards_schedule, _richards_run_once,
+    _RPacket.__init__, _RPacket.append_to,
+    _RTaskState.__init__, _RTaskState.packetPending, _RTaskState.waiting,
+    _RTaskState.running, _RTaskState.waitingWithPacket,
+    _RTask.__init__, _RTask.addPacket, _RTask.runTask,
+    _RTask.waitTask, _RTask.hold, _RTask.release, _RTask.qpkt,
+    _RDeviceTask.fn, _RHandlerTask.fn,
+    _RIdleTask.__init__, _RIdleTask.fn, _RWorkTask.fn,
 ]
 
 
@@ -1403,10 +1723,11 @@ def cmd_jit(args):
             "bin/python3",
         ),
     )
-    vanilla_python = os.environ.get(
-        "VANILLA_PYTHON",
-        "/data/users/alexturner/cpython312-vanilla/bin/python3.12",
-    )
+    vanilla_python = os.environ.get("VANILLA_PYTHON", "")
+    if not vanilla_python:
+        # Try to find python3.12 on PATH
+        import shutil
+        vanilla_python = shutil.which("python3.12") or "python3.12"
 
     # Check availability
     venv_cmd = [venv_python]
