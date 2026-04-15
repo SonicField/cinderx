@@ -1308,6 +1308,7 @@ JIT_BENCHMARKS = [
     ("unpack_seq",      bench_unpack_seq),
     ("json_roundtrip",  bench_json_roundtrip),
     ("yield_from",      bench_yield_from_chain),
+    ("nn_module",       bench_nn_module),
 ]
 
 # Functions to force-compile for JIT benchmarks
