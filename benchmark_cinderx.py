@@ -1577,7 +1577,7 @@ def cmd_g1(args):
 # Subcommand: jit (subprocess isolation)
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _run_worker(python_cmd, condition, compile_mode):
+def _run_worker(python_cmd, condition, compile_mode, filter_benchmarks=None):
     """Run this script as a subprocess worker, return JSON results."""
     env = os.environ.copy()
     cmd = python_cmd + [
@@ -1586,6 +1586,8 @@ def _run_worker(python_cmd, condition, compile_mode):
         f"--condition={condition}",
         f"--compile={compile_mode}",
     ]
+    if filter_benchmarks:
+        cmd.append(f"--filter={','.join(filter_benchmarks)}")
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=300, env=env,
@@ -1603,13 +1605,20 @@ def _worker_jit(args):
     """Worker mode: run JIT benchmarks, output JSON."""
     condition = args.condition
     compile_mode = args.compile
+    filter_set = set(args.filter.split(",")) if args.filter else None
+
+    # Select benchmarks to run
+    benchmarks = [
+        (name, func) for name, func in JIT_BENCHMARKS
+        if filter_set is None or name in filter_set
+    ]
 
     cinderjit_mod = None
     if condition == "on":
         cinderjit_mod = init_cinderjit(compile_mode)
         if cinderjit_mod and compile_mode == "force":
             # Warmup for bytecode specialisation
-            for _, func in JIT_BENCHMARKS:
+            for _, func in benchmarks:
                 for _ in range(10):
                     try:
                         func(100)
@@ -1621,7 +1630,7 @@ def _worker_jit(args):
                     cinderjit_mod.force_compile(func)
                 except Exception:
                     pass
-            for _, func in JIT_BENCHMARKS:
+            for _, func in benchmarks:
                 try:
                     cinderjit_mod.force_compile(func)
                 except Exception:
@@ -1629,16 +1638,16 @@ def _worker_jit(args):
         if cinderjit_mod:
             enable_specialised_opcodes(cinderjit_mod)
 
-    n_iter = 100_000
-    n_warmup = 3
-    n_measure = 5
+    n_iter = 10_000 if filter_set else 100_000
+    n_warmup = 2 if filter_set else 3
+    n_measure = 3 if filter_set else 5
 
     results = {
         "condition": condition,
         "benchmarks": {},
     }
 
-    for name, func in JIT_BENCHMARKS:
+    for name, func in benchmarks:
         # Warmup
         for _ in range(n_warmup):
             func(n_iter)
@@ -1966,6 +1975,142 @@ def cmd_spec(args):
 # Subcommand: all
 # ═══════════════════════════════════════════════════════════════════════════
 
+TARGET_BENCH_NAMES = {"nn_module", "richards_full"}
+
+
+def cmd_target(args):
+    """Run Phase 2 target benchmarks: nn_module + richards_full (subprocess ABBA)."""
+    print("=" * 72)
+    print("Phase 2 Target Benchmark — nn_module + richards_full")
+    print("=" * 72)
+    print(f"Platform:     {platform.machine()}")
+    print(f"Reps:         {args.reps} (= {args.reps * 4} runs, "
+          f"{args.reps * 2} per condition)")
+    print(f"Compile mode: {args.compile}")
+    print()
+
+    # Determine Python commands
+    venv_python = os.environ.get(
+        "CINDERX_PYTHON",
+        os.path.join(
+            os.environ.get("CINDERX_VENV", ""),
+            "bin/python3",
+        ),
+    )
+    vanilla_python = os.environ.get("VANILLA_PYTHON", "")
+    if not vanilla_python:
+        import shutil
+        vanilla_python = shutil.which("python3.12") or "python3.12"
+
+    venv_cmd = [venv_python]
+    vanilla_cmd = [vanilla_python, "-I"]
+
+    print(f"JIT ON:  {venv_python}")
+    print(f"JIT OFF: {vanilla_python} -I")
+    print(f"Targets: {', '.join(sorted(TARGET_BENCH_NAMES))}")
+    print()
+
+    # ABBA runs
+    on_results = []
+    off_results = []
+
+    run_num = 0
+    for rep in range(1, args.reps + 1):
+        for condition in ["on", "off", "off", "on"]:
+            run_num += 1
+            cmd = venv_cmd if condition == "on" else vanilla_cmd
+            print(
+                f"  Run {run_num}/{args.reps * 4}: "
+                f"JIT_{'ON' if condition == 'on' else 'OFF'} "
+                f"(rep {rep}) ... ",
+                end="", flush=True,
+            )
+
+            result = _run_worker(
+                cmd, condition, args.compile,
+                filter_benchmarks=TARGET_BENCH_NAMES,
+            )
+            if result:
+                target_ms = sum(
+                    b["mean_ms"]
+                    for name, b in result["benchmarks"].items()
+                    if name in TARGET_BENCH_NAMES
+                )
+                print(f"{target_ms:.1f}ms")
+                if condition == "on":
+                    on_results.append(result)
+                else:
+                    off_results.append(result)
+            else:
+                print("FAILED")
+
+            time.sleep(1)
+
+    if not on_results or not off_results:
+        print("\nERROR: Not enough results for comparison.")
+        return
+
+    # Comparison table (filtered to targets only)
+    print()
+    print("=" * 75)
+    print("Phase 2 Target Performance (nn_module + richards_full)")
+    print("=" * 75)
+    print(f"JIT ON runs:  {len(on_results)}")
+    print(f"JIT OFF runs: {len(off_results)}")
+    print()
+
+    print(
+        f"{'Benchmark':<22} {'Vanilla':>10} {'CinderX':>10} "
+        f"{'Speedup':>9} {'Δ%':>7}"
+    )
+    print("-" * 65)
+
+    total_on = 0
+    total_off = 0
+
+    for b in sorted(TARGET_BENCH_NAMES):
+        on_means = [
+            r["benchmarks"][b]["mean_ms"]
+            for r in on_results if b in r["benchmarks"]
+        ]
+        off_means = [
+            r["benchmarks"][b]["mean_ms"]
+            for r in off_results if b in r["benchmarks"]
+        ]
+
+        on_mean = sum(on_means) / len(on_means) if on_means else 0
+        off_mean = sum(off_means) / len(off_means) if off_means else 0
+
+        total_on += on_mean
+        total_off += off_mean
+
+        if on_mean > 0:
+            speedup = off_mean / on_mean
+            delta_pct = ((off_mean - on_mean) / off_mean) * 100
+        else:
+            speedup = 0
+            delta_pct = 0
+
+        marker = "**" if speedup > 1.05 else ("!!" if speedup < 0.95 else "  ")
+        print(
+            f"  {b:<20} {off_mean:>8.2f}ms {on_mean:>8.2f}ms "
+            f"{speedup:>8.2f}x {delta_pct:>6.1f}% {marker}"
+        )
+
+    print("-" * 65)
+    if total_on > 0:
+        overall = total_off / total_on
+        overall_pct = ((total_off - total_on) / total_off) * 100
+        print(
+            f"  {'TOTAL':<20} {total_off:>8.2f}ms {total_on:>8.2f}ms "
+            f"{overall:>8.2f}x {overall_pct:>6.1f}%"
+        )
+    print("=" * 75)
+    print()
+    print("** = JIT >5% faster   !! = JIT >5% slower")
+    print()
+
+
 def cmd_all(args):
     """Run all benchmark suites."""
     print("Running all benchmark suites...")
@@ -1994,6 +2139,7 @@ Examples:
   benchmark_cinderx.py g1                # G1 fast path
   benchmark_cinderx.py jit --reps=3      # JIT vs vanilla (3 ABBA cycles)
   benchmark_cinderx.py spec --compile=auto  # Spec ON vs OFF, auto-compile
+  benchmark_cinderx.py target            # Phase 2 targets: nn_module + richards_full
   benchmark_cinderx.py all               # Run everything
 
 Environment variables:
@@ -2010,6 +2156,10 @@ Environment variables:
     )
     parser.add_argument(
         "--condition", choices=["on", "off"],
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--filter", default=None,
         help=argparse.SUPPRESS,
     )
 
@@ -2038,7 +2188,7 @@ Environment variables:
     # Subcommand (positional, optional — worker mode has no subcommand)
     parser.add_argument(
         "subcommand", nargs="?",
-        choices=["abba", "g1", "jit", "spec", "all"],
+        choices=["abba", "g1", "jit", "spec", "target", "all"],
         help="Benchmark suite to run",
     )
 
@@ -2062,6 +2212,7 @@ Environment variables:
         "g1": cmd_g1,
         "jit": cmd_jit,
         "spec": cmd_spec,
+        "target": cmd_target,
         "all": cmd_all,
     }
 
