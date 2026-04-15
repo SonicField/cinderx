@@ -301,71 +301,51 @@ Register* simplifyGuardType(Env& env, const GuardType* instr) {
     return env.emit<GuardIs>(Py_None, input);
   }
 
-  // Speculative bypass: CondBranchCheckType → fast path / deopt dead end.
-  // No Phi needed — deopt path never returns, tail has single predecessor.
-  if (type.isExact() && instr->frameState()) {
-    // Only expand guards on user-defined heap types. This safely
-    // excludes guards on builtin types (int/float/str) that can see
-    // FOR_ITER sentinel values. Expanding those causes incorrect
-    // deopt behavior when the sentinel flows through binary ops.
-    {
-      PyTypeObject* py_type = type.uniquePyType();
-      if (py_type == nullptr && type.hasTypeSpec()) {
-        py_type = type.typeSpec();
-      }
-      if (py_type == nullptr || !(py_type->tp_flags & Py_TPFLAGS_HEAPTYPE)) {
-        return nullptr;
-      }
+  // Speculative expansion with C-API slow path (no deopt).
+  // Only expand GuardType + LoadAttr pairs: the next instruction must
+  // be a LoadAttr that uses the guard's output.
+  if (type.isExact() && !instr->isIterGuard() && instr->frameState()) {
+    // Peek at the next instruction — must be LoadAttr using guard output
+    auto next_it = std::next(env.cursor);
+    if (next_it == env.block->end() || !next_it->IsLoadAttr()) {
+      return nullptr;
     }
-    // Find Snapshot for deopt block
-    const FrameState* snapshot_fs = nullptr;
-    for (auto it = env.block->rbegin(); it != env.block->rend(); ++it) {
-      if (it->IsSnapshot()) {
-        snapshot_fs = static_cast<const Snapshot&>(*it).frameState();
-        break;
-      }
+    auto& load_attr = static_cast<LoadAttr&>(*next_it);
+    if (load_attr.GetOperand(0) != instr->output()) {
+      return nullptr;
     }
-    if (!snapshot_fs) {
+    if (load_attr.alreadyOptimized() || !load_attr.frameState()) {
       return nullptr;
     }
 
-    env.new_blocks += 1;
+    // Get attribute name for C-API slow path
+    int name_idx = load_attr.name_idx();
+    BorrowedRef<PyCodeObject> code = load_attr.frameState()->code;
+    BorrowedRef<> attr_name = PyTuple_GET_ITEM(code->co_names, name_idx);
+    const FrameState& fs = *load_attr.frameState();
 
-    // Create dead-end deopt block using the GuardType's own FrameState
-    BasicBlock* deopt_bb = env.func.cfg.AllocateBlock();
-    auto* snapshot = Snapshot::create(*instr->frameState());
-    snapshot->setBytecodeOffset(env.bc_off);
-    deopt_bb->Append(snapshot);
-    auto* deopt_instr = Deopt::create();
-    deopt_instr->setBytecodeOffset(env.bc_off);
-    deopt_instr->setFrameState(*instr->frameState());
-    deopt_bb->Append(deopt_instr);
-
-    // Emit CondBranchCheckType: true → continue (fast), false → deopt
-    auto* branch = env.emitInstr<CondBranchCheckType>(
-        input, type,
-        static_cast<BasicBlock*>(nullptr),
-        deopt_bb);
-
-    // splitAfter: tail block gets remaining instructions (including
-    // the original GuardType). Tail has SINGLE predecessor (original
-    // block via true edge) — no liveness issues.
-    BasicBlock* fast_bb = env.func.cfg.splitAfter(*branch);
-    branch->set_true_bb(fast_bb);
-    env.new_blocks += 1;
-
-    // Move to fast_bb. The original GuardType is the first instruction.
-    env.block = fast_bb;
-    // Set cursor to the GuardType (satisfies the Simplify cursor contract)
-    env.cursor = fast_bb->iterator_to(*const_cast<GuardType*>(instr));
-
-    // Insert Snapshot BEFORE the GuardType for tail block's DeoptBase needs
-    auto* tail_snapshot = Snapshot::create(*instr->frameState());
-    tail_snapshot->setBytecodeOffset(env.bc_off);
-    fast_bb->insert(tail_snapshot, env.cursor);
-
-    // Emit RefineType before the GuardType to replace it.
-    return env.emit<RefineType>(type, input);
+    // emitCond: fast = type matches → LoadAttr with refined type
+    //           slow = type mismatch → CallStatic PyObject_GetAttr (C-API, no deopt)
+    return env.emitCond(
+        [&](BasicBlock* fast_bb, BasicBlock* slow_bb) {
+          env.emitInstr<CondBranchCheckType>(input, type, fast_bb, slow_bb);
+        },
+        [&]() -> Register* {
+          // Fast path: RefineType + LoadAttr (type-specialized)
+          Register* refined = env.emit<RefineType>(type, input);
+          return env.emit<LoadAttr>(refined, name_idx, fs, true);
+        },
+        [&]() -> Register* {
+          // Slow path: C-API PyObject_GetAttr (no deopt, no interpreter)
+          Register* name_reg = env.emit<LoadConst>(
+              Type::fromObject(env.func.env.addReference(attr_name)));
+          Register* result = env.emitVariadic<CallStatic>(
+              2,
+              reinterpret_cast<void*>(&PyObject_GetAttr),
+              TOptObject,
+              input, name_reg);
+          return env.emit<CheckExc>(result, fs);
+        });
   }
 
   return nullptr;
