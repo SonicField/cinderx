@@ -68,8 +68,9 @@ fi
 # setup.py reads FETCHCONTENT_SOURCE_DIR_* from environment directly.
 export FETCHCONTENT_SOURCE_DIR_ASMJIT="$SCRIPT_DIR/deps/asmjit-src"
 export FETCHCONTENT_SOURCE_DIR_FMT="$SCRIPT_DIR/deps/fmt-src"
-export "FETCHCONTENT_SOURCE_DIR_PARALLEL-HASHMAP=$SCRIPT_DIR/deps/parallel-hashmap-src"
 export FETCHCONTENT_SOURCE_DIR_USDT="$SCRIPT_DIR/deps/usdt-src"
+# Hyphenated name cannot be an env var; pass via CMAKE_ARGS instead
+export CMAKE_ARGS="${CMAKE_ARGS:-} -DFETCHCONTENT_SOURCE_DIR_PARALLEL-HASHMAP=$SCRIPT_DIR/deps/parallel-hashmap-src"
 
 echo "Building CinderX..."
 echo "  Local deps: asmjit, fmt, parallel-hashmap, usdt"
