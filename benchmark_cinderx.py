@@ -1639,8 +1639,10 @@ def _worker_jit(args):
             enable_specialised_opcodes(cinderjit_mod)
 
     n_iter = 10_000 if filter_set else 100_000
-    # Auto-compile needs more warmup runs to trigger compilation
+    # Auto-compile needs heavy warmup to trigger compilation of all methods.
+    # 50K iterations ensures inner methods hit the compilation threshold.
     n_warmup = 5 if (filter_set and compile_mode == "auto") else (2 if filter_set else 3)
+    warmup_iter = 50_000 if (filter_set and compile_mode == "auto") else n_iter
     n_measure = 3 if filter_set else 5
 
     results = {
@@ -1649,9 +1651,9 @@ def _worker_jit(args):
     }
 
     for name, func in benchmarks:
-        # Warmup
+        # Warmup — use warmup_iter to ensure auto-compile triggers
         for _ in range(n_warmup):
-            func(n_iter)
+            func(warmup_iter)
 
         # Measure
         times = []
