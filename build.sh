@@ -57,7 +57,7 @@ echo "Python: $(python3 --version) ($CINDERX_VENV)"
 # --- Clean if requested ---
 if [ -n "$CLEAN" ]; then
     echo "Cleaning build artefacts..."
-    rm -rf build/ scratch/ *.egg-info/
+    rm -rf scratch/ *.egg-info/
     find . -name '*.so' -path './cinderx/*' -delete 2>/dev/null || true
     echo "Clean done."
 fi
