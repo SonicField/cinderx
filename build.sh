@@ -65,15 +65,14 @@ fi
 # --- Local dependency overrides ---
 # These tell cmake's FetchContent to use vendored sources instead of
 # fetching from GitHub (which is blocked behind the proxy).
-export CMAKE_ARGS="${CMAKE_ARGS:-}"
-CMAKE_ARGS="$CMAKE_ARGS -DFETCHCONTENT_SOURCE_DIR_ASMJIT=$SCRIPT_DIR/deps/asmjit-src"
-CMAKE_ARGS="$CMAKE_ARGS -DFETCHCONTENT_SOURCE_DIR_FMT=$SCRIPT_DIR/deps/fmt-src"
-CMAKE_ARGS="$CMAKE_ARGS -DFETCHCONTENT_SOURCE_DIR_PARALLEL-HASHMAP=$SCRIPT_DIR/deps/parallel-hashmap-src"
-CMAKE_ARGS="$CMAKE_ARGS -DFETCHCONTENT_SOURCE_DIR_USDT=$SCRIPT_DIR/deps/usdt-src"
-export CMAKE_ARGS
+# setup.py reads FETCHCONTENT_SOURCE_DIR_* from environment directly.
+export FETCHCONTENT_SOURCE_DIR_ASMJIT="$SCRIPT_DIR/deps/asmjit-src"
+export FETCHCONTENT_SOURCE_DIR_FMT="$SCRIPT_DIR/deps/fmt-src"
+export "FETCHCONTENT_SOURCE_DIR_PARALLEL-HASHMAP=$SCRIPT_DIR/deps/parallel-hashmap-src"
+export FETCHCONTENT_SOURCE_DIR_USDT="$SCRIPT_DIR/deps/usdt-src"
 
 echo "Building CinderX..."
-echo "  CMAKE_ARGS: $CMAKE_ARGS"
+echo "  Local deps: asmjit, fmt, parallel-hashmap, usdt"
 echo ""
 
 # --- Build ---

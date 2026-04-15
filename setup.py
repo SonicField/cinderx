@@ -447,6 +447,15 @@ class BuildExt(build_ext):
         for name, value in options.items():
             cmake_args.append(f"-D{name}={value}")
 
+        # Pass through FETCHCONTENT_SOURCE_DIR_* and CMAKE_ARGS from environment
+        for env_key, env_val in os.environ.items():
+            if env_key.startswith("FETCHCONTENT_SOURCE_DIR_"):
+                cmake_args.append(f"-D{env_key}={env_val}")
+        extra_cmake = os.environ.get("CMAKE_ARGS", "")
+        if extra_cmake:
+            import shlex
+            cmake_args.extend(shlex.split(extra_cmake))
+
         build_args = [
             "--config",
             build_type,
