@@ -903,6 +903,7 @@ void HIRBuilder::emitTypeAnnotationGuards(TranslationContext& tc) {
 BasicBlock* HIRBuilder::buildHIRImpl(
     Function* irfunc,
     FrameState* frame_state) {
+  irfunc_ = irfunc;
   temps_ = TempAllocator(&irfunc->env);
 
   BytecodeInstructionBlock bc_instrs{code_};
@@ -3289,6 +3290,45 @@ void HIRBuilder::emitLoadAttr(
         PyTypeObject* slot_type = findTypeByVersionTag(type_version);
         if (slot_type != nullptr) {
           Type type = Type::fromTypeExact(slot_type);
+          // Speculative dispatch with function filter for debugging
+          const char* filter = getenv("SPECEXP_FUNC");
+          // Only expand on first compilation — skip on recompilation
+          // to avoid stale inline cache type issues
+          static std::unordered_set<PyCodeObject*> expanded_codes;
+          bool expand = irfunc_ != nullptr &&
+                        expanded_codes.find(code_) == expanded_codes.end();
+          if (expand) expanded_codes.insert(code_);
+          if (expand) {
+            BasicBlock* fast_bb = irfunc_->cfg.AllocateBlock();
+            BasicBlock* slow_bb = irfunc_->cfg.AllocateBlock();
+            BasicBlock* merge_bb = irfunc_->cfg.AllocateBlock();
+            Register* result = temps_.AllocateStack();
+            FrameState saved_frame = tc.frame;
+            tc.emit<CondBranchCheckType>(receiver, type, fast_bb, slow_bb);
+            tc.block = fast_bb;
+            tc.frame = saved_frame;
+            Register* refined = temps_.AllocateStack();
+            tc.emit<RefineType>(refined, type, receiver);
+            tc.emit<LoadAttr>(result, refined, name_idx, tc.frame, true);
+            tc.emit<Branch>(merge_bb);
+            tc.block = slow_bb;
+            tc.frame = saved_frame;
+            BorrowedRef<> attr_name = PyTuple_GET_ITEM(code_->co_names, name_idx);
+            Register* name_reg = temps_.AllocateStack();
+            tc.emit<LoadConst>(name_reg, Type::fromObject(attr_name));
+            Register* slow_result = temps_.AllocateStack();
+            auto* call = tc.emit<CallStatic>(
+                2, slow_result,
+                reinterpret_cast<void*>(&PyObject_GetAttr), TOptObject);
+            call->SetOperand(0, receiver);
+            call->SetOperand(1, name_reg);
+            tc.emit<CheckExc>(result, slow_result, tc.frame);
+            tc.emit<Branch>(merge_bb);
+            tc.block = merge_bb;
+            tc.frame = saved_frame;
+            tc.frame.stack.push(result);
+            return;
+          }
           tc.emit<GuardType>(receiver, type, receiver);
         }
         break;

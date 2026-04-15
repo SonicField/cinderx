@@ -89,7 +89,8 @@ void Compiler::runPasses(
   };
 
   runPassIf(hir::Simplify{}, PassConfig::kSimplify);
-  runPass(hir::SpeculativeExpansion{}, irfunc, callback);
+  // Standalone SpeculativeExpansion disabled — using builder approach instead
+  // runPass(hir::SpeculativeExpansion{}, irfunc, callback);
   runPassIf(
       hir::DynamicComparisonElimination{}, PassConfig::kDynamicComparisonElim);
   runPassIf(hir::GuardTypeRemoval{}, PassConfig::kGuardTypeRemoval);
