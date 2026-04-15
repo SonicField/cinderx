@@ -598,7 +598,7 @@ class HIRBuilder {
       Register* result);
 
   const Preloader& preloader_;
-  Function* irfunc_{nullptr};
+
   TempAllocator temps_{nullptr};
 
   // Tracks the function for compilations that require it.
