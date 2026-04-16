@@ -2797,6 +2797,15 @@ void NativeGenerator::generateStaticEntryPoint(
   if (need_extra_args_load) {
     as_->lea(x86::r10, x86::ptr(x86::rbp, 16));
   }
+  // Allocate the header and spill space — the generic entry path does this
+  // at line 1685 but finish_frame_setup is AFTER that allocation. Without
+  // this, static-entry functions write to spill slots in the caller's frame.
+  {
+    int pad = allocateHeaderAndSpillSpace(frame_info);
+    if (pad) {
+      as_->add(x86::rsp, pad);
+    }
+  }
   as_->jmp(finish_frame_setup);
   env_.addAnnotation("StaticLinkFrame", static_link_cursor);
   auto static_entry_point_cursor = as_->cursor();
