@@ -6,11 +6,8 @@
 
 namespace cinderx {
 
-namespace {
-
-ModuleState* s_cinderx_state;
-
-} // namespace
+// Definition of the global ModuleState pointer (declared extern in header).
+__attribute__((visibility("hidden"))) ModuleState* s_cinderx_module_state = nullptr;
 
 int ModuleState::traverse(visitproc visit, void* arg) {
   Py_VISIT(builtin_next_);
@@ -25,12 +22,8 @@ int ModuleState::clear() {
 
 void setModuleState(BorrowedRef<> mod) {
   auto state = reinterpret_cast<cinderx::ModuleState*>(PyModule_GetState(mod));
-  s_cinderx_state = state;
+  s_cinderx_module_state = state;
   state->setModule(mod);
-}
-
-ModuleState* getModuleState() {
-  return s_cinderx_state;
 }
 
 ModuleState* getModuleState(BorrowedRef<> mod) {
@@ -38,7 +31,7 @@ ModuleState* getModuleState(BorrowedRef<> mod) {
 }
 
 void removeModuleState() {
-  s_cinderx_state = nullptr;
+  s_cinderx_module_state = nullptr;
 }
 
 bool ModuleState::initBuiltinMembers() {

@@ -218,8 +218,14 @@ class ModuleState {
   BorrowedRef<> cinderx_module_;
 };
 
-// Get the global ModuleState singleton.
-ModuleState* getModuleState();
+// Global ModuleState pointer — hidden visibility to avoid PLT overhead.
+// Access via getModuleState() below.
+extern __attribute__((visibility("hidden"))) ModuleState* s_cinderx_module_state;
+
+// Get the global ModuleState singleton (inlined to avoid PLT + call overhead).
+inline ModuleState* getModuleState() {
+  return s_cinderx_module_state;
+}
 
 // Get the ModuleState from the CinderX module object.
 //

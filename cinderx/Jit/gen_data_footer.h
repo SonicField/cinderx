@@ -8,9 +8,11 @@
 #include "cinder/genobject_jit.h"
 #endif
 
+#include "cinderx/Common/py-portability.h"
 #include "cinderx/Common/util.h"
 #include "cinderx/Jit/code_runtime.h"
 #include "cinderx/Jit/frame_header.h"
+#include "cinderx/module_state.h"
 
 namespace jit {
 
@@ -82,11 +84,25 @@ struct GenDataFooter {
 };
 
 #if PY_VERSION_HEX >= 0x030C0000
-GenDataFooter** jitGenDataFooterPtr(PyGenObject* gen, PyCodeObject* gen_code);
+inline GenDataFooter** jitGenDataFooterPtr(
+    PyGenObject* gen,
+    PyCodeObject* gen_code) {
+  BorrowedRef<PyTypeObject> gen_type = cinderx::getModuleState()->genType();
+  size_t python_frame_data_bytes =
+      _PyFrame_NumSlotsForCodeObject(gen_code) * gen_type->tp_itemsize;
+  return reinterpret_cast<GenDataFooter**>(
+      reinterpret_cast<uintptr_t>(gen) + gen_type->tp_basicsize +
+      python_frame_data_bytes);
+}
 
-GenDataFooter** jitGenDataFooterPtr(PyGenObject* gen);
+inline GenDataFooter** jitGenDataFooterPtr(PyGenObject* gen) {
+  _PyInterpreterFrame* gen_frame = generatorFrame(gen);
+  return jitGenDataFooterPtr(gen, _PyFrame_GetCode(gen_frame));
+}
 
-GenDataFooter* jitGenDataFooter(PyGenObject* gen);
+inline GenDataFooter* jitGenDataFooter(PyGenObject* gen) {
+  return *jitGenDataFooterPtr(gen);
+}
 #endif
 
 } // namespace jit
