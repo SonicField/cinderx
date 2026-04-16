@@ -906,22 +906,25 @@ def bench_chaos_game(n_iter):
     return total
 
 
+def _coroutine_stage1(n):
+    total = 0.0
+    for i in range(n):
+        total += i * 0.1
+        yield total
+
+def _coroutine_stage2(source):
+    for val in source:
+        yield val * 0.99
+
+def _coroutine_stage3(source):
+    for val in source:
+        yield val + 1.0
+
 def bench_coroutine_chain(n_iter):
     """Generator pipeline — chained yield stages."""
-    def stage1(n):
-        total = 0.0
-        for i in range(n):
-            total += i * 0.1
-            yield total
-    def stage2(source):
-        for val in source:
-            yield val * 0.99
-    def stage3(source):
-        for val in source:
-            yield val + 1.0
     total = 0.0
     for _ in range(n_iter // 1000):
-        pipeline = stage3(stage2(stage1(1000)))
+        pipeline = _coroutine_stage3(_coroutine_stage2(_coroutine_stage1(1000)))
         for val in pipeline:
             total = (total + val) % 10000
     return total
@@ -1313,6 +1316,7 @@ JIT_BENCHMARKS = [
 
 # Functions to force-compile for JIT benchmarks
 _JIT_COMPILABLE = [
+    _coroutine_stage1, _coroutine_stage2, _coroutine_stage3,
     _fib, _nqueens_solve, _spectral_A, _spectral_mul_Av,
     _spectral_mul_Atv, _spectral_mul_AtAv, _fannkuch,
     _MethodPoint.__init__, _MethodPoint.distance_to, _MethodPoint.translate,
