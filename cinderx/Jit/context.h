@@ -454,6 +454,12 @@ class Context : public IJitContext {
   DeoptStats deopt_stats_;
   GuardFailureCallback guard_failure_callback_;
 
+  // Tier 2 recompilation: old CodeRuntime saved before forgetCode.
+  // Set in tier1Vectorcall, read by SpeculativeExpansion, cleared after compile.
+ public:
+  CodeRuntime* pending_prior_runtime_{nullptr};
+ private:
+
   // References to Python objects held by this Context
   std::unordered_set<ThreadedRef<PyObject>> references_;
   Builtins builtins_;

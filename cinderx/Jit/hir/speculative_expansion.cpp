@@ -2,12 +2,14 @@
 
 #include "cinderx/Jit/hir/speculative_expansion.h"
 
+#include "cinderx/Jit/context.h"
 #include "cinderx/Jit/hir/hir.h"
 #include "cinderx/Jit/hir/pass.h"
 #include "cinderx/Jit/hir/ssa.h"
 
 #include <cstdlib>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace jit::hir {
@@ -543,14 +545,53 @@ bool expandLoadAttr(Function& func, Candidate& cand) {
 } // namespace
 
 void SpeculativeExpansion::Run(Function& irfunc) {
-  if (!getenv("CINDERX_SPECEXP")) {
+  // Tier 2 selective expansion: only expand guards at bytecode offsets
+  // where deopts occurred during Tier 1 execution.
+  // First compilation (prior_code_runtime == nullptr): no expansion.
+  // CINDERX_SPECEXP env var forces expansion for testing (all heaptype guards).
+  CodeRuntime* prior_rt = irfunc.prior_code_runtime;
+  bool force_all = getenv("CINDERX_SPECEXP") != nullptr;
+  if (prior_rt == nullptr && !force_all) {
     return;
+  }
+
+  // Build set of bytecode offsets that deopted during Tier 1.
+  // Use int values for comparison since BCOffset doesn't have std::hash.
+  std::unordered_set<int> deopt_offsets;
+  if (prior_rt != nullptr) {
+    auto* ctx = getContext();
+    const auto& metadatas = prior_rt->deoptMetadatas();
+    for (size_t i = 0; i < metadatas.size(); ++i) {
+      const auto* stat = ctx->deoptStat(prior_rt, i);
+      if (stat != nullptr && stat->count > 0) {
+        const auto& meta = metadatas[i];
+        if (meta.frame_meta.size() > 0) {
+          deopt_offsets.insert(
+              BCOffset{meta.frame_meta[0].cause_instr_idx}.value());
+        }
+      }
+    }
   }
 
   std::vector<Candidate> candidates;
   collectCandidates(irfunc, candidates);
 
   if (candidates.empty()) {
+    return;
+  }
+
+  // Filter candidates: only expand guards at deopted bytecode offsets,
+  // or all guards if CINDERX_SPECEXP is set.
+  if (!force_all && !deopt_offsets.empty()) {
+    std::vector<Candidate> filtered;
+    for (auto& cand : candidates) {
+      if (deopt_offsets.count(cand.guard->bytecodeOffset().value())) {
+        filtered.push_back(cand);
+      }
+    }
+    candidates = std::move(filtered);
+  } else if (!force_all) {
+    // No deopts recorded — nothing to expand.
     return;
   }
 

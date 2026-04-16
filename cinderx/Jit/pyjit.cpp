@@ -3305,9 +3305,12 @@ PyObject* tier1Vectorcall(
     // Tier 2 recompilation: clear old compiled code, recompile with warm ICs.
     // forgetCode clears compiled_codes_ so compileFunction will recompile.
     // removeCompiledFunc clears compiled_funcs_ so finalizeFunc re-registers.
+    // Save old CodeRuntime for DeoptStats querying during recompilation.
+    jitCtx()->pending_prior_runtime_ = compiled->runtime();
     jitCtx()->forgetCode(func);
     jitCtx()->removeCompiledFunc(func);
     PyObject* result = forcedJitVectorcall(func_obj, stack, nargsf, kwnames);
+    jitCtx()->pending_prior_runtime_ = nullptr;
     // Fix up: forcedJitVectorcall recompiled as Tier 1 (default).
     // Set tier to 2 so tier1Vectorcall is not re-installed on next lookup.
     CompiledFunction* recompiled = jitCtx()->lookupFunc(func);

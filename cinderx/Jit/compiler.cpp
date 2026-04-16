@@ -201,6 +201,7 @@ std::optional<CompiledFunctionData> Compiler::Compile(
   Timer timer;
   std::unique_ptr<hir::Function> irfunc(hir::buildHIR(preloader));
   irfunc->reifier = ThreadedRef<>::create(preloader.reifier());
+  irfunc->prior_code_runtime = getContext()->pending_prior_runtime_;
   if (nullptr != compilation_phase_timer) {
     compilation_phase_timer->end();
   }
