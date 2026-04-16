@@ -3590,17 +3590,90 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
         break;
       }
       case Opcode::kSend: {
+        // G2 Step 4: Inline type+state+value check for inner delegation.
         auto& hir_instr = static_cast<const Send&>(i);
-        // Note: asm_interpreter_frame isn't right for inlined functions, but we
-        // never inline generators so this is fine for now.
-        bbb.appendInstr(
-            hir_instr.output(),
-            Instruction::kCall,
+        auto* gen_reg = bbb.getDefInstr(hir_instr.GetOperand(0));
+        auto* val_reg = bbb.getDefInstr(hir_instr.GetOperand(1));
+
+        auto* fast_path = bbb.allocateBlock();
+        auto* slow_path = bbb.allocateBlock();
+        slow_path->setSection(codegen::CodeSection::kCold);
+        auto* done = bbb.allocateBlock();
+
+        // Type check: is gen a JitGen?
+        constexpr int32_t kObTypeOffset = offsetof(PyObject, ob_type);
+        auto* gen_type = bbb.appendInstr(
+            Instruction::kMove, OutVReg{}, Ind{gen_reg, kObTypeOffset});
+        auto* jitgen_type = bbb.appendInstr(
+            Instruction::kMove, OutVReg{},
+            Imm{reinterpret_cast<uint64_t>(
+                static_cast<PyTypeObject*>(
+                    cinderx::getModuleState()->genType())),
+                DataType::kObject});
+        auto* type_ok = bbb.appendInstr(
+            Instruction::kEqual, OutVReg{OperandBase::k8bit},
+            gen_type, jitgen_type);
+
+        auto* type_ok_block = bbb.allocateBlock();
+        bbb.appendBranch(
+            Instruction::kCondBranch, type_ok, type_ok_block, slow_path);
+
+        // State check: FRAME_SUSPENDED
+        bbb.switchBlock(type_ok_block);
+        constexpr int32_t kFrameStateOffset =
+            offsetof(PyGenObject, gi_frame_state);
+        auto* frame_state = bbb.appendInstr(
+            Instruction::kMovSX, OutVReg{OperandBase::k32bit},
+            Ind{gen_reg, kFrameStateOffset, OperandBase::k8bit});
+        auto* is_suspended = bbb.appendInstr(
+            Instruction::kEqual, OutVReg{OperandBase::k8bit},
+            frame_state,
+            Imm{static_cast<uint64_t>(FRAME_SUSPENDED)});
+
+        auto* state_ok_block = bbb.allocateBlock();
+        bbb.appendBranch(
+            Instruction::kCondBranch, is_suspended, state_ok_block, slow_path);
+
+        // Value check: v == Py_None (only fast-path for next(), not send(value))
+        bbb.switchBlock(state_ok_block);
+        auto* is_none = bbb.appendInstr(
+            Instruction::kEqual, OutVReg{OperandBase::k8bit},
+            val_reg,
+            Imm{reinterpret_cast<uint64_t>(Py_None), DataType::kObject});
+        bbb.appendBranch(
+            Instruction::kCondBranch, is_none, fast_path, slow_path);
+
+        // Fast path: call JITRT_ResumeJitGenForSend(gen)
+        bbb.switchBlock(fast_path);
+        auto* fast_tmp = const_cast<hir::Function*>(GetHIRFunction())
+            ->env.AllocateRegister();
+        auto* fast_output = bbb.appendCallInstruction(
+            fast_tmp, JITRT_ResumeJitGenForSend, hir_instr.GetOperand(0));
+        bbb.appendBranch(Instruction::kBranch, done);
+
+        // Slow path: call JITRT_GenSend (full protocol)
+        bbb.switchBlock(slow_path);
+        auto* slow_output = bbb.appendInstr(
+            Instruction::kCall, OutVReg{},
             Imm{reinterpret_cast<uint64_t>(JITRT_GenSend)},
             hir_instr.GetOperand(0),
             hir_instr.GetOperand(1),
             Imm{0},
             env_->asm_interpreter_frame);
+        // Map to a temp register for Phi
+        auto* slow_tmp_reg = const_cast<hir::Function*>(GetHIRFunction())
+            ->env.AllocateRegister();
+        bbb.createInstrOutput(slow_output, slow_tmp_reg);
+        bbb.appendBranch(Instruction::kBranch, done);
+
+        // Done: Phi merges fast + slow
+        bbb.switchBlock(done);
+        auto* phi = bbb.appendInstr(
+            hir_instr.output(), Instruction::kPhi);
+        phi->allocateLabelInput(fast_path);
+        phi->allocateLinkedInput(fast_output);
+        phi->allocateLabelInput(slow_path);
+        phi->allocateLinkedInput(slow_output);
         break;
       }
       case Opcode::kBuildInterpolation: {

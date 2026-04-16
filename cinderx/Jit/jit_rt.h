@@ -642,6 +642,9 @@ PyObject* JITRT_InvokeIterNext(PyObject* iterator);
 // Called after type+state checks pass. Does frame linkage + resumeEntry.
 PyObject* JITRT_ResumeJitGen(PyObject* iterator);
 
+// G2 Step 4: Resume helper returning GenSendRes for kSend fast path.
+JITRT_GenSendRes JITRT_ResumeJitGenForSend(PyObject* gen);
+
 // Fast-path builtin next() wrapper. Routes through JITRT_InvokeIterNext
 // (G1 fast path for JIT generators), converts sentinel to next() semantics.
 PyObject* JITRT_BuiltinNext(PyObject* it, PyObject* def);

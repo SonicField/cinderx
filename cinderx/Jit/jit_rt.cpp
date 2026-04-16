@@ -2332,6 +2332,20 @@ PyObject JITRT_IterDoneSentinel = {
 #endif
     nullptr};
 
+// G2 Step 4: Resume helper returning GenSendRes for kSend fast path.
+// Wraps JITRT_ResumeJitGen result into the struct that kSend expects.
+JITRT_GenSendRes JITRT_ResumeJitGenForSend(PyObject* gen) {
+  PyObject* result = JITRT_ResumeJitGen(gen);
+  if (result != nullptr && result != &JITRT_IterDoneSentinel) {
+    return {result, 0};  // yielded value, not done
+  }
+  if (result == &JITRT_IterDoneSentinel) {
+    Py_DECREF(result);
+    return {nullptr, 1};  // done, no value
+  }
+  return {nullptr, 1};  // error or done
+}
+
 // G2: Minimal resume helper for JitGen generators.
 // Called from inline LIR fast path after type+state checks pass.
 // Does ONLY: frame linkage → resumeEntry → post-resume cleanup.
