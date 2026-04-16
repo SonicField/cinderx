@@ -6,6 +6,7 @@
 #include "cinderx/Jit/hir/pass.h"
 #include "cinderx/Jit/hir/ssa.h"
 
+#include <cstdlib>
 #include <vector>
 
 namespace jit::hir {
@@ -22,6 +23,17 @@ struct Candidate {
 // 1. Guard an exact type
 // 2. Have a direct LoadAttr use (the operation being protected)
 // 3. Not be an iterator dispatch guard (tagged in builder.cpp)
+// Check if the guard target is a heap type (user-defined class).
+// Builtin types (int, float, str, etc.) don't benefit from expansion
+// because their guards rarely fail in practice.
+bool isHeapType(Type type) {
+  PyTypeObject* py_type = type.uniquePyType();
+  if (py_type == nullptr && type.hasTypeSpec()) {
+    py_type = type.typeSpec();
+  }
+  return py_type != nullptr && (py_type->tp_flags & Py_TPFLAGS_HEAPTYPE);
+}
+
 void collectCandidates(
     Function& func,
     std::vector<Candidate>& candidates) {
@@ -38,6 +50,12 @@ void collectCandidates(
         continue;
       }
       if (guard.isIterGuard()) {
+        continue;
+      }
+      if (!isHeapType(guard.target())) {
+        continue;
+      }
+      if (!guard.frameState()) {
         continue;
       }
 
@@ -89,6 +107,22 @@ bool expandCandidate(Function& func, Candidate& cand) {
   Register* src = guard.GetOperand(0);
   Type target_type = guard.target();
   int name_idx = load_attr.name_idx();
+
+  // Find the last Snapshot FrameState in the original block before the guard.
+  // This is needed for Snapshot propagation: after splitAfter creates the
+  // merge block, that block may lack a Snapshot, which causes crashes in
+  // RefcountInsertion (see commit 8be25e43).
+  const FrameState* snapshot_fs = nullptr;
+  for (auto it = original_bb->iterator_to(guard); it != original_bb->begin();) {
+    --it;
+    if (it->IsSnapshot()) {
+      snapshot_fs = static_cast<const Snapshot&>(*it).frameState();
+      break;
+    }
+  }
+  if (!snapshot_fs) {
+    return false;
+  }
 
   // Allocate blocks
   BasicBlock* fast_bb = func.cfg.AllocateBlock();
@@ -161,6 +195,13 @@ bool expandCandidate(Function& func, Candidate& cand) {
   phi->copyBytecodeOffset(load_attr);
   merge_bb->push_front(phi);
 
+  // Snapshot propagation: emit Snapshot in merge block after Phi.
+  // Without this, RefcountInsertion crashes when the merge block lacks
+  // a Snapshot (the original Snapshot stayed in original_bb before the split).
+  auto* snapshot = Snapshot::create(*snapshot_fs);
+  snapshot->copyBytecodeOffset(load_attr);
+  merge_bb->insert(snapshot, std::next(merge_bb->begin()));
+
   // Remove original LoadAttr (result now comes from Phi)
   load_attr.unlink();
 
@@ -170,6 +211,10 @@ bool expandCandidate(Function& func, Candidate& cand) {
 } // namespace
 
 void SpeculativeExpansion::Run(Function& irfunc) {
+  if (!getenv("CINDERX_SPECEXP")) {
+    return;
+  }
+
   std::vector<Candidate> candidates;
   collectCandidates(irfunc, candidates);
 
