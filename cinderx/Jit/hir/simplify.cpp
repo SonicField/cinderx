@@ -1101,10 +1101,14 @@ Register* simplifyUnbox(Env& env, const Instr* instr) {
   Type output_type = instr->output()->type();
   if (input_value->instr()->IsPrimitiveBox()) {
     // Simplify unbox(box(x)) -> x
+    // Compare the box's INPUT type (the primitive being boxed) with the
+    // unbox's output type (the primitive being extracted). The previous
+    // check compared box->type() (the boxed Python type, e.g. TLongExact)
+    // with output_type (the primitive type, e.g. TCInt64) which never matched.
     const auto box = static_cast<PrimitiveBox*>(input_value->instr());
-    if (box->type() == output_type) {
-      // We can't optimize away the potential overflow in unboxing.
-      return box->GetOperand(0);
+    Register* box_input = box->GetOperand(0);
+    if (box_input->type() == output_type) {
+      return box_input;
     }
   }
   // Ensure that we are dealing with either a integer or a double.

@@ -98,6 +98,7 @@ MemoryEffects memoryEffects(const Instr& inst) {
     case Opcode::kCheckSequenceBounds:
     case Opcode::kCheckVar:
     case Opcode::kGuard:
+    case Opcode::kGuardOverflow:
     case Opcode::kGuardType:
       return commonEffects(inst, AEmpty);
 
@@ -365,6 +366,7 @@ bool hasArbitraryExecution(const Instr& inst) {
     case Opcode::kCIntToCBool:
     case Opcode::kDeopt:
     case Opcode::kGuard:
+    case Opcode::kGuardOverflow:
     case Opcode::kGuardType:
     case Opcode::kRaise:
     case Opcode::kRaiseAwaitableError:
