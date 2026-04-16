@@ -1236,8 +1236,70 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
           bbb.appendCallInstruction(
               instr->output(), JITRT_UnboxU8, instr->value());
         } else if (ty <= TCInt64) {
+#if PY_VERSION_HEX >= 0x030C0000
+        {
+          // Inline compact PyLong extraction with LIR Phi merge.
+          constexpr int32_t kLvTagOff =
+              offsetof(PyLongObject, long_value.lv_tag);
+          constexpr int32_t kDigitOff =
+              offsetof(PyLongObject, long_value.ob_digit);
+
+          Instruction* value = bbb.getDefInstr(instr->value());
+
+          // Load lv_tag and check compact (lv_tag < 16)
+          Instruction* tag = bbb.appendInstr(
+              Instruction::kMove, OutVReg{}, Ind{value, kLvTagOff});
+          Instruction* is_compact = bbb.appendInstr(
+              Instruction::kLessThanUnsigned,
+              OutVReg{OperandBase::k8bit},
+              tag, Imm{16});
+
+          auto* fast_path = bbb.allocateBlock();
+          auto* slow_path = bbb.allocateBlock();
+          auto* done = bbb.allocateBlock();
+
+          bbb.appendBranch(
+              Instruction::kCondBranch, is_compact, fast_path, slow_path);
+
+          // Fast path: inline compact value extraction
+          bbb.switchBlock(fast_path);
+          Instruction* digit = bbb.appendInstr(
+              Instruction::kMove,
+              OutVReg{OperandBase::k32bit},
+              Ind{value, kDigitOff});
+          Instruction* sign_bits = bbb.appendInstr(
+              Instruction::kAnd, OutVReg{}, tag, Imm{3});
+          Instruction* one_val = bbb.appendInstr(
+              Instruction::kMove, OutVReg{}, Imm{1});
+          Instruction* sign = bbb.appendInstr(
+              Instruction::kSub, OutVReg{}, one_val, sign_bits);
+          auto* fast_tmp = const_cast<hir::Function*>(
+              GetHIRFunction())->env.AllocateRegister();
+          auto* fast_output = bbb.appendInstr(
+              fast_tmp, Instruction::kMul, sign, digit);
+          bbb.appendBranch(Instruction::kBranch, done);
+
+          // Slow path: JITRT_UnboxI64 for bignums
+          bbb.switchBlock(slow_path);
+          auto* slow_tmp = const_cast<hir::Function*>(
+              GetHIRFunction())->env.AllocateRegister();
+          auto* slow_output = bbb.appendCallInstruction(
+              slow_tmp, JITRT_UnboxI64, instr->value());
+          bbb.appendBranch(Instruction::kBranch, done);
+
+          // Done: Phi merges fast and slow outputs
+          bbb.switchBlock(done);
+          auto* phi = bbb.appendInstr(
+              instr->output(), Instruction::kPhi);
+          phi->allocateLabelInput(fast_path);
+          phi->allocateLinkedInput(fast_output);
+          phi->allocateLabelInput(slow_path);
+          phi->allocateLinkedInput(slow_output);
+        }
+#else
           bbb.appendCallInstruction(
               instr->output(), JITRT_UnboxI64, instr->value());
+#endif
         } else if (ty <= TCInt32) {
           bbb.appendCallInstruction(
               instr->output(), JITRT_UnboxI32, instr->value());
