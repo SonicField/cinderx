@@ -127,6 +127,7 @@ bool expandCandidate(Function& func, Candidate& cand) {
   // Allocate blocks
   BasicBlock* fast_bb = func.cfg.AllocateBlock();
   BasicBlock* slow_bb = func.cfg.AllocateBlock();
+  slow_bb->setSection(codegen::CodeSection::kCold);
 
   // Split after LoadAttr to create merge_bb
   BasicBlock* merge_bb = func.cfg.splitAfter(load_attr);

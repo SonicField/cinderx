@@ -646,6 +646,9 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
     const hir::BasicBlock* hir_bb) {
   BasicBlockBuilder bbb{env_, lir_func_};
   BasicBlock* entry_block = bbb.allocateBlock();
+  if (hir_bb->section() != codegen::CodeSection::kHot) {
+    entry_block->setSection(hir_bb->section());
+  }
   bbb.switchBlock(entry_block);
 
   for (auto& i : *hir_bb) {

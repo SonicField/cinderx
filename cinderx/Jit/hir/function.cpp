@@ -12,7 +12,7 @@ namespace jit::hir {
 #ifndef _LIBCPP_VERSION
 static_assert(sizeof(Function) == 48 * kPointerSize);
 static_assert(sizeof(CFG) == 5 * kPointerSize);
-static_assert(sizeof(BasicBlock) == 20 * kPointerSize);
+static_assert(sizeof(BasicBlock) == 21 * kPointerSize);
 static_assert(sizeof(Instr) == 6 * kPointerSize);
 #endif
 

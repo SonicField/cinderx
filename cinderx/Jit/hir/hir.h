@@ -5,6 +5,7 @@
 #include "cinderx/Common/ref.h"
 #include "cinderx/Jit/bytecode_offsets.h"
 #include "cinderx/Jit/code_patcher.h"
+#include "cinderx/Jit/codegen/code_section.h"
 #include "cinderx/Jit/hir/frame_state.h"
 #include "cinderx/Jit/hir/hir_ops.h"
 #include "cinderx/Jit/hir/register.h"
@@ -3936,6 +3937,10 @@ class BasicBlock {
 
   int id;
 
+  // Code section for code generation (hot vs cold path outlining).
+  codegen::CodeSection section() const { return section_; }
+  void setSection(codegen::CodeSection section) { section_ = section; }
+
   // Basic blocks belong to a list of all blocks in their CFG
   IntrusiveListNode cfg_node;
 
@@ -3960,6 +3965,9 @@ class BasicBlock {
 
   // Incoming edges.
   std::unordered_set<const Edge*> in_edges_;
+
+  // Code section for outlining (default: hot).
+  codegen::CodeSection section_{codegen::CodeSection::kHot};
 };
 
 class Environment {
