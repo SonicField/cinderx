@@ -914,26 +914,6 @@ Register* simplifyInPlaceOp(Env& env, const InPlaceOp* instr) {
     }
   }
 
-  // Integer Phi cascade: when LHS is Object (accumulator through Phi)
-  // and RHS is LongExact, guard LHS as LongExact. The couldBe check
-  // filters out non-integer Phi values like range iterators.
-  if (!lhs->isA(TLongExact) && rhs->isA(TLongExact) &&
-      lhs->type().couldBe(TLongExact)) {
-    std::optional<BinaryOpKind> binop;
-    switch (instr->op()) {
-      case InPlaceOpKind::kAdd: binop = BinaryOpKind::kAdd; break;
-      case InPlaceOpKind::kSubtract: binop = BinaryOpKind::kSubtract; break;
-      default: break;
-    }
-    if (binop) {
-      Register* guarded_lhs = env.emit<GuardType>(
-          TLongExact, lhs, *instr->frameState());
-      env.emit<UseType>(rhs, TLongExact);
-      return env.emit<LongBinaryOp>(
-          *binop, guarded_lhs, rhs, *instr->frameState());
-    }
-  }
-
   // Phase 2: Float in-place ops. Convert InPlaceOpKind to BinaryOpKind
   // for FloatBinaryOp emission.
   if (lhs->isA(TFloatExact) && rhs->isA(TFloatExact)) {
@@ -986,29 +966,6 @@ Register* simplifyInPlaceOp(Env& env, const InPlaceOp* instr) {
 }
 
 Register* simplifyLongBinaryOp(Env& env, const LongBinaryOp* instr) {
-  // Unboxed integer arithmetic for add/subtract.
-  // The FrameState on LongBinaryOp has operands already popped from the
-  // stack. For GuardOverflow deopt (re-execute the BINARY_OP), we need
-  // them back on the stack so the interpreter can pop and re-execute.
-  BinaryOpKind op = instr->op();
-  if ((op == BinaryOpKind::kAdd || op == BinaryOpKind::kSubtract) &&
-      instr->left()->type() <= TLongExact &&
-      instr->right()->type() <= TLongExact) {
-    Register* left_unboxed =
-        env.emit<PrimitiveUnbox>(instr->left(), TCInt64);
-    Register* right_unboxed =
-        env.emit<PrimitiveUnbox>(instr->right(), TCInt64);
-    Register* result =
-        env.emit<IntBinaryOp>(op, left_unboxed, right_unboxed);
-    // Build a FrameState with the original boxed operands back on the
-    // stack, so deopt can re-execute the BINARY_OP bytecode.
-    FrameState overflow_fs = *instr->frameState();
-    overflow_fs.stack.push(instr->left());
-    overflow_fs.stack.push(instr->right());
-    env.emit<GuardOverflow>(result, overflow_fs);
-    return env.emit<PrimitiveBox>(result, TLongExact, *instr->frameState());
-  }
-
   // This isn't safe in the multi-threaded compilation on 3.12 because
   // we don't hold the GIL which is required for allocation.
   RETURN_MULTITHREADED_COMPILE(nullptr);
