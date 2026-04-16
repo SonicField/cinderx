@@ -2827,9 +2827,68 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
         break;
       }
       case Opcode::kInvokeIterNext: {
+        // G2: Inline type+state check with LIR Phi for output merge.
         auto instr = static_cast<const InvokeIterNext*>(&i);
-        bbb.appendCallInstruction(
-            instr->output(), JITRT_InvokeIterNext, instr->GetOperand(0));
+        auto* iter_reg = bbb.getDefInstr(instr->GetOperand(0));
+
+        auto* fast_path = bbb.allocateBlock();
+        auto* slow_path = bbb.allocateBlock();
+        slow_path->setSection(codegen::CodeSection::kCold);
+        auto* done = bbb.allocateBlock();
+
+        // Type check: Py_TYPE(iter) == JitGen type
+        constexpr int32_t kObTypeOffset = offsetof(PyObject, ob_type);
+        auto* iter_type = bbb.appendInstr(
+            Instruction::kMove, OutVReg{}, Ind{iter_reg, kObTypeOffset});
+        auto* gen_type = bbb.appendInstr(
+            Instruction::kMove, OutVReg{},
+            Imm{reinterpret_cast<uint64_t>(
+                static_cast<PyTypeObject*>(
+                    cinderx::getModuleState()->genType())),
+                DataType::kObject});
+        auto* type_ok = bbb.appendInstr(
+            Instruction::kEqual, OutVReg{OperandBase::k8bit},
+            iter_type, gen_type);
+
+        auto* type_ok_block = bbb.allocateBlock();
+        bbb.appendBranch(
+            Instruction::kCondBranch, type_ok, type_ok_block, slow_path);
+
+        // State check: gen->gi_frame_state == FRAME_SUSPENDED
+        bbb.switchBlock(type_ok_block);
+        constexpr int32_t kFrameStateOffset =
+            offsetof(PyGenObject, gi_frame_state);
+        auto* frame_state = bbb.appendInstr(
+            Instruction::kMovSX, OutVReg{OperandBase::k32bit},
+            Ind{iter_reg, kFrameStateOffset, OperandBase::k8bit});
+        auto* is_suspended = bbb.appendInstr(
+            Instruction::kEqual, OutVReg{OperandBase::k8bit},
+            frame_state,
+            Imm{static_cast<uint64_t>(FRAME_SUSPENDED)});
+        bbb.appendBranch(
+            Instruction::kCondBranch, is_suspended, fast_path, slow_path);
+
+        // Fast path: call JITRT_ResumeJitGen → fast_output
+        bbb.switchBlock(fast_path);
+        auto* fast_tmp = const_cast<hir::Function*>(GetHIRFunction())->env.AllocateRegister();
+        auto* fast_output = bbb.appendCallInstruction(
+            fast_tmp, JITRT_ResumeJitGen, instr->GetOperand(0));
+        bbb.appendBranch(Instruction::kBranch, done);
+
+        // Slow path: call JITRT_InvokeIterNext → slow_output
+        bbb.switchBlock(slow_path);
+        auto* slow_tmp = const_cast<hir::Function*>(GetHIRFunction())->env.AllocateRegister();
+        auto* slow_output = bbb.appendCallInstruction(
+            slow_tmp, JITRT_InvokeIterNext, instr->GetOperand(0));
+        bbb.appendBranch(Instruction::kBranch, done);
+
+        // Done: Phi merges fast_output and slow_output
+        bbb.switchBlock(done);
+        auto* phi = bbb.appendInstr(instr->output(), Instruction::kPhi);
+        phi->allocateLabelInput(fast_path);
+        phi->allocateLinkedInput(fast_output);
+        phi->allocateLabelInput(slow_path);
+        phi->allocateLinkedInput(slow_output);
         break;
       }
       case Opcode::kLoadEvalBreaker: {
@@ -3653,6 +3712,11 @@ void LIRGenerator::resolvePhiOperands(
 
   for (auto& block : basic_blocks_) {
     block->foreachPhiInstr([&](Instruction* instr) {
+      // Skip Phis that already have inputs (created during LIR code gen,
+      // e.g., for multi-block patterns like G2 generator inline).
+      if (instr->getNumInputs() > 0) {
+        return;
+      }
       auto hir_instr = static_cast<const Phi*>(instr->origin());
       for (size_t i = 0; i < hir_instr->NumOperands(); ++i) {
         hir::BasicBlock* hir_block = hir_instr->basic_blocks().at(i);
