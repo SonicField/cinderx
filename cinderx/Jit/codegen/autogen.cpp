@@ -231,6 +231,12 @@ void TranslateGuard(Environ* env, const Instruction* instr) {
         as->js(deopt_label);
         break;
       }
+      case kNotOverflow: {
+        // Reads overflow flag set by the preceding add/sub/imul instruction.
+        // No test needed — jo branches on OF directly.
+        as->jo(deopt_label);
+        break;
+      }
       case kZero: {
         as->test(reg, reg);
         as->jnz(deopt_label);
@@ -350,6 +356,12 @@ void TranslateGuard(Environ* env, const Instruction* instr) {
 
         emit_cmp(arch::reg_scratch_0);
         as->b_ne(deopt_label);
+        break;
+      }
+      case kNotOverflow: {
+        // On aarch64, adds/subs set the V (overflow) flag.
+        // Branch if overflow occurred.
+        as->b_vs(deopt_label);
         break;
       }
     }

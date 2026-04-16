@@ -438,6 +438,7 @@ enum InstrGuardKind {
   kHasType,
   kIs,
   kNotNegative,
+  kNotOverflow,
   kNotZero,
   kZero,
 };

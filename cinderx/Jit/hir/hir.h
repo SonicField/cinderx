@@ -3424,6 +3424,23 @@ class INSTR_CLASS(GuardType, (TObject), HasOutput, Operands<1>, DeoptBase) {
   bool is_iter_guard_{false};
 };
 
+// Deopt if the preceding integer arithmetic overflowed. Reads the CPU
+// overflow flag (OF on x86, V on aarch64) set by the preceding IntBinaryOp.
+// Used to implement unboxed integer arithmetic with overflow fallback to
+// arbitrary-precision PyLong operations.
+class INSTR_CLASS(GuardOverflow, (), Operands<1>, DeoptBase) {
+ public:
+  GuardOverflow(Register* value, const FrameState& fs)
+      : InstrT(value, fs) {}
+
+  // The value operand is the result of the preceding IntBinaryOp.
+  // It's passed through to the guard for register allocation but
+  // the guard condition is the CPU overflow flag, not the value.
+  Register* value() const {
+    return GetOperand(0);
+  }
+};
+
 using ProfiledTypes = std::vector<std::vector<Type>>;
 
 // Stores all profiled types for a set of operands at a bytecode location.

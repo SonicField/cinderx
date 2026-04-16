@@ -375,6 +375,7 @@ bool Instr::isReplayable() const {
     case Opcode::kGetSecondOutput:
     case Opcode::kGuard:
     case Opcode::kGuardIs:
+    case Opcode::kGuardOverflow:
     case Opcode::kGuardType:
     case Opcode::kHintType:
     case Opcode::kIndexUnbox:

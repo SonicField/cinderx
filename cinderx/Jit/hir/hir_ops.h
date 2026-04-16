@@ -67,6 +67,7 @@ namespace jit::hir {
   V(GetTuple)                          \
   V(Guard)                             \
   V(GuardIs)                           \
+  V(GuardOverflow)                     \
   V(GuardType)                         \
   V(HintType)                          \
   V(ImportFrom)                        \

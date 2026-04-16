@@ -1979,6 +1979,12 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
         appendGuard(bbb, InstrGuardKind::kHasType, instr, value);
         break;
       }
+      case Opcode::kGuardOverflow: {
+        const auto& instr = static_cast<const DeoptBase&>(i);
+        Instruction* value = bbb.getDefInstr(instr.GetOperand(0));
+        appendGuard(bbb, InstrGuardKind::kNotOverflow, instr, value);
+        break;
+      }
       case Opcode::kRefineType: {
         break;
       }
@@ -3742,6 +3748,7 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
         case Opcode::kDeoptPatchpoint:
         case Opcode::kGuard:
         case Opcode::kGuardIs:
+        case Opcode::kGuardOverflow:
         case Opcode::kGuardType:
         case Opcode::kInvokeStaticFunction:
         case Opcode::kIsInstance:
