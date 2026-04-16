@@ -7,6 +7,7 @@
 #include "cinderx/Jit/hir/ssa.h"
 
 #include <cstdlib>
+#include <unordered_map>
 #include <vector>
 
 namespace jit::hir {
@@ -15,7 +16,7 @@ namespace {
 
 struct Candidate {
   GuardType* guard;
-  LoadAttr* load_attr;
+  LoadAttr* load_attr; // nullptr for guard-only (no downstream LoadAttr)
 };
 
 // Find GuardType + LoadAttr pairs that can be speculatively expanded.
@@ -39,6 +40,8 @@ void collectCandidates(
     std::vector<Candidate>& candidates) {
   RegUses reg_uses = collectDirectRegUses(func);
 
+  // Phase 1: collect all expandable guards with their LoadAttr users (if any).
+  std::vector<Candidate> all_guards;
   for (BasicBlock& block : func.cfg.blocks) {
     for (Instr& instr : block) {
       if (!instr.IsGuardType()) {
@@ -59,23 +62,137 @@ void collectCandidates(
         continue;
       }
 
+      // Find LoadAttr user (may not exist).
+      LoadAttr* load_attr = nullptr;
       Register* guard_out = guard.output();
       auto it = reg_uses.find(guard_out);
-      if (it == reg_uses.end()) {
-        continue;
+      if (it != reg_uses.end()) {
+        for (Instr* use : it->second) {
+          if (use->IsLoadAttr()) {
+            auto* la = static_cast<LoadAttr*>(use);
+            if (!la->alreadyOptimized()) {
+              load_attr = la;
+            }
+            break;
+          }
+        }
       }
 
-      for (Instr* use : it->second) {
-        if (use->IsLoadAttr()) {
-          auto* load_attr = static_cast<LoadAttr*>(use);
-          if (!load_attr->alreadyOptimized()) {
-            candidates.push_back({&guard, load_attr});
-          }
-          break;
-        }
+      all_guards.push_back({&guard, load_attr});
+    }
+  }
+
+  // Phase 2: group by base value using modelReg.
+  std::unordered_map<Register*, std::vector<size_t>> groups;
+  for (size_t i = 0; i < all_guards.size(); ++i) {
+    Register* base = modelReg(all_guards[i].guard->GetOperand(0));
+    groups[base].push_back(i);
+  }
+
+  // Phase 3: promote groups — if ANY guard in a group has a LoadAttr,
+  // include ALL guards in the group for expansion.
+  for (auto& [base, indices] : groups) {
+    bool has_load_attr = false;
+    for (size_t idx : indices) {
+      if (all_guards[idx].load_attr != nullptr) {
+        has_load_attr = true;
+        break;
+      }
+    }
+    if (has_load_attr) {
+      for (size_t idx : indices) {
+        candidates.push_back(all_guards[idx]);
       }
     }
   }
+}
+
+// Expand a guard-only GuardType (no downstream LoadAttr) into:
+//
+//   [original_bb]
+//     ...
+//     CondBranchCheckType(src, type, fast_bb, slow_bb)
+//
+//   [fast_bb]
+//     refined = RefineType(type, src)
+//     Branch(merge_bb)
+//
+//   [slow_bb]
+//     Branch(merge_bb)
+//
+//   [merge_bb]
+//     result = Phi(fast: refined, slow: src)
+//     Snapshot(...)
+//     ...rest...
+//
+// The slow path passes src through unrefined. Downstream ops receive
+// either the refined type (fast) or the original (slow), using generic
+// dispatch on the slow path without deopting.
+bool expandGuardOnly(Function& func, Candidate& cand) {
+  auto& guard = *cand.guard;
+
+  BasicBlock* original_bb = guard.block();
+  Register* src = guard.GetOperand(0);
+  Type target_type = guard.target();
+  Register* result = guard.output();
+
+  // Find Snapshot FrameState before the guard.
+  const FrameState* snapshot_fs = nullptr;
+  for (auto it = original_bb->iterator_to(guard); it != original_bb->begin();) {
+    --it;
+    if (it->IsSnapshot()) {
+      snapshot_fs = static_cast<const Snapshot&>(*it).frameState();
+      break;
+    }
+  }
+  if (!snapshot_fs) {
+    return false;
+  }
+
+  // Allocate blocks
+  BasicBlock* fast_bb = func.cfg.AllocateBlock();
+  BasicBlock* slow_bb = func.cfg.AllocateBlock();
+  slow_bb->setSection(codegen::CodeSection::kCold);
+
+  // Split after GuardType to create merge_bb
+  BasicBlock* merge_bb = func.cfg.splitAfter(guard);
+
+  // Replace GuardType with CondBranchCheckType
+  auto* cond_branch = CondBranchCheckType::create(
+      src, target_type, fast_bb, slow_bb);
+  cond_branch->copyBytecodeOffset(guard);
+  guard.ReplaceWith(*cond_branch);
+
+  // Fast path: RefineType
+  Register* refined = func.env.AllocateRegister();
+  auto* refine = RefineType::create(refined, target_type, src);
+  refine->copyBytecodeOffset(*cond_branch);
+  fast_bb->Append(refine);
+
+  auto* fast_branch = Branch::create(merge_bb);
+  fast_branch->copyBytecodeOffset(*cond_branch);
+  fast_bb->Append(fast_branch);
+
+  // Slow path: pass src through (no C-API call, no deopt)
+  auto* slow_branch = Branch::create(merge_bb);
+  slow_branch->copyBytecodeOffset(*cond_branch);
+  slow_bb->Append(slow_branch);
+
+  // Merge: Phi receives refined (fast) or src (slow)
+  std::unordered_map<BasicBlock*, Register*> phi_args{
+      {fast_bb, refined},
+      {slow_bb, src},
+  };
+  auto* phi = Phi::create(result, phi_args);
+  phi->copyBytecodeOffset(*cond_branch);
+  merge_bb->push_front(phi);
+
+  // Snapshot propagation
+  auto* snapshot = Snapshot::create(*snapshot_fs);
+  snapshot->copyBytecodeOffset(*cond_branch);
+  merge_bb->insert(snapshot, std::next(merge_bb->begin()));
+
+  return true;
 }
 
 // Expand a single GuardType + LoadAttr into:
@@ -224,7 +341,11 @@ void SpeculativeExpansion::Run(Function& irfunc) {
   }
 
   for (auto& cand : candidates) {
-    expandCandidate(irfunc, cand);
+    if (cand.load_attr != nullptr) {
+      expandCandidate(irfunc, cand);
+    } else {
+      expandGuardOnly(irfunc, cand);
+    }
   }
 
   reflowTypes(irfunc);
