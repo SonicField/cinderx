@@ -2,7 +2,6 @@
 
 #pragma once
 
-#include "cinderx/Jit/code_runtime.h"
 #include "cinderx/Jit/containers.h"
 #include "cinderx/Jit/hir/cfg.h"
 #include "cinderx/Jit/hir/hir.h"
@@ -113,12 +112,6 @@ class Function {
   BorrowedRef<PyCodeObject> codeFor(const Instr& instr) const;
 
   ThreadedRef<> reifier;
-
-  // For Tier 2 recompilation: points to CodeRuntime from the previous
-  // compilation. Used by SpeculativeExpansion to query DeoptStats and
-  // selectively expand only guards that deopted during Tier 1.
-  // nullptr for first compilation.
-  CodeRuntime* prior_code_runtime{nullptr};
 
  private:
   DISALLOW_COPY_AND_ASSIGN(Function);
