@@ -638,6 +638,10 @@ extern PyObject JITRT_IterDoneSentinel;
  */
 PyObject* JITRT_InvokeIterNext(PyObject* iterator);
 
+// G2: Minimal resume helper for suspended JitGen generators.
+// Called after type+state checks pass. Does frame linkage + resumeEntry.
+PyObject* JITRT_ResumeJitGen(PyObject* iterator);
+
 // Fast-path builtin next() wrapper. Routes through JITRT_InvokeIterNext
 // (G1 fast path for JIT generators), converts sentinel to next() semantics.
 PyObject* JITRT_BuiltinNext(PyObject* it, PyObject* def);
