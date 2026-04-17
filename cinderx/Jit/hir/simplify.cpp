@@ -760,10 +760,12 @@ Register* simplifyBinaryOp(Env& env, const BinaryOp* instr) {
   }
 
   // BinaryOp float speculation: guard Object operand to FloatExact.
-  // Handles untyped function arguments that are actually float at runtime.
+  // Only speculate float when the operand cannot be int — otherwise the
+  // guard fails on common float×int patterns like `0.01 * int_arg`.
   if (op != BinaryOpKind::kSubscript && op != BinaryOpKind::kMatrixMultiply) {
     if (lhs->isA(TFloatExact) && !rhs->isA(TFloatExact) &&
-        rhs->type().couldBe(TFloatExact)) {
+        rhs->type().couldBe(TFloatExact) &&
+        !rhs->type().couldBe(TLongExact)) {
       if (FloatBinaryOp::slotMethod(op) || op == BinaryOpKind::kPower) {
         env.emit<UseType>(lhs, TFloatExact);
         Register* guarded = env.emit<GuardType>(TFloatExact, rhs,
@@ -773,7 +775,8 @@ Register* simplifyBinaryOp(Env& env, const BinaryOp* instr) {
       }
     }
     if (rhs->isA(TFloatExact) && !lhs->isA(TFloatExact) &&
-        lhs->type().couldBe(TFloatExact)) {
+        lhs->type().couldBe(TFloatExact) &&
+        !lhs->type().couldBe(TLongExact)) {
       if (FloatBinaryOp::slotMethod(op) || op == BinaryOpKind::kPower) {
         env.emit<UseType>(rhs, TFloatExact);
         Register* guarded = env.emit<GuardType>(TFloatExact, lhs,
