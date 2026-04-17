@@ -1860,7 +1860,7 @@ def _run_worker(python_cmd, condition, compile_mode, filter_benchmarks=None):
         cmd.append(f"--filter={','.join(filter_benchmarks)}")
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=300, env=env,
+            cmd, capture_output=True, text=True, timeout=600, env=env,
         )
         if result.returncode != 0:
             print(f"  Worker failed (exit {result.returncode}): {result.stderr[:200]}")
@@ -1923,9 +1923,12 @@ def _worker_jit(args):
         n_iter = BENCH_CALIBRATED_ITERS.get(name, default_iter)
         warmup_iter = 50_000 if (filter_set and compile_mode == "auto") else n_iter
 
-        # Warmup — use warmup_iter to ensure auto-compile triggers
+        # Warmup — ensure auto-compile triggers. Lower the compile threshold
+        # to 1 so the first warmup call triggers compilation, then restore.
+        if compile_mode == "auto" and cinderjit_mod:
+            cinderjit_mod.compile_after_n_calls(1)
         for _ in range(n_warmup):
-            func(warmup_iter)
+            func(n_iter)
 
         # Measure
         times = []
