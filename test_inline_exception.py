@@ -53,7 +53,6 @@ class TestInlineExceptionHandling(unittest.TestCase):
         self.assertEqual(f(1000), 499500)
         self.assertEqual(f(10000), 4995000)
 
-    @unittest.skip("Known limitation: non-matching except type in inline handler crashes on deopt re-raise")
     def test_except_wrong_type(self):
         def f():
             d = {0: 'a'}
@@ -63,8 +62,13 @@ class TestInlineExceptionHandling(unittest.TestCase):
                 return 'wrong type'
 
         for _ in range(1200):
-            with self.assertRaises(KeyError):
+            try:
                 f()
+            except KeyError:
+                pass
+        self.assertTrue(cinderjit.is_jit_compiled(f))
+        with self.assertRaises(KeyError):
+            f()
 
     def test_no_except_block(self):
         def f():
