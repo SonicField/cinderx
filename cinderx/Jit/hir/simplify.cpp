@@ -847,6 +847,30 @@ Register* simplifyBinaryOp(Env& env, const BinaryOp* instr) {
     }
   }
 
+  // BinaryOp integer speculation: guard Object operand as LongExact when
+  // the other is LongExact AND the non-exact operand comes from a Phi
+  // (loop accumulator) or constant — not from a function call, which would
+  // add unbox overhead on the call result.
+  if (op == BinaryOpKind::kAdd || op == BinaryOpKind::kSubtract) {
+    auto isPhiOrConst = [](Register* r) {
+      return r->instr()->IsPhi() || r->instr()->IsLoadConst();
+    };
+    if (lhs->isA(TLongExact) && !rhs->isA(TLongExact) &&
+        rhs->type().couldBe(TLongExact) && isPhiOrConst(rhs)) {
+      env.emit<UseType>(lhs, TLongExact);
+      Register* guarded = env.emit<GuardType>(
+          TLongExact, rhs, *instr->frameState());
+      return env.emit<LongBinaryOp>(op, lhs, guarded, *instr->frameState());
+    }
+    if (rhs->isA(TLongExact) && !lhs->isA(TLongExact) &&
+        lhs->type().couldBe(TLongExact) && isPhiOrConst(lhs)) {
+      env.emit<UseType>(rhs, TLongExact);
+      Register* guarded = env.emit<GuardType>(
+          TLongExact, lhs, *instr->frameState());
+      return env.emit<LongBinaryOp>(op, guarded, rhs, *instr->frameState());
+    }
+  }
+
   if ((lhs->isA(TUnicodeExact) && rhs->isA(TLongExact)) &&
       (op == BinaryOpKind::kMultiply)) {
     Register* unboxed_rhs = env.emit<IndexUnbox>(rhs, PyExc_OverflowError);
