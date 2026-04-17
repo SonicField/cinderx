@@ -39,6 +39,7 @@ USAGE:
 """
 
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -1289,6 +1290,217 @@ def bench_store_then_use(n_iter):
     return total
 
 
+# --- Benchmarks ported from phoenix/benchmark_phoenix.py ---
+
+def _callee_with_import():
+    """Callee containing EAGER_IMPORT_NAME (import os)."""
+    import os
+    return os.sep
+
+def _callee_with_try():
+    """Callee containing exception handler (try/except)."""
+    try:
+        return 42
+    except Exception:
+        return -1
+
+def bench_import_callee(n_iter):
+    """Hot loop calling callee with import -- EAGER_IMPORT_NAME inlining."""
+    total = 0
+    for _ in range(n_iter):
+        total += len(_callee_with_import())
+    return total
+
+def bench_try_except_callee(n_iter):
+    """Hot loop calling callee with try/except -- exception handler inlining."""
+    total = 0
+    for _ in range(n_iter):
+        total += _callee_with_try()
+    return total
+
+def bench_store_subscr(n_iter):
+    """List and dict subscript store -- STORE_SUBSCR specialisation."""
+    xs = [0] * 100
+    d = {}
+    total = 0
+    for i in range(n_iter):
+        idx = i % 100
+        xs[idx] = i
+        d[idx] = i
+        total += xs[idx] + d[idx]
+    return total
+
+def bench_int_arith(n_iter):
+    """Pure integer arithmetic -- BINARY_OP_ADD_INT / BINARY_OP_MULTIPLY_INT."""
+    total = 0
+    a, b = 3, 7
+    for i in range(n_iter):
+        total += a * i + b
+        a = (a + 1) % 127
+        b = (b + 3) % 131
+    return total
+
+def _positional_callee(a=0, b=0):
+    return a + b
+
+def bench_positional_dispatch(n_iter):
+    """Keyword call-site to positional callee -- ResolveKwargs target."""
+    total = 0
+    for i in range(n_iter):
+        total += _positional_callee(a=i, b=i+1)
+    return total
+
+class _DCBase:
+    def __init__(self, name):
+        self.name = name
+        self.training = True
+        self._forward_hooks = []
+    def parameters(self):
+        return [v for k, v in self.__dict__.items() if isinstance(v, float)]
+    def train(self, mode=True):
+        self.training = mode
+        return self
+
+class _DCLayer(_DCBase):
+    def __init__(self, name, in_features, out_features):
+        super().__init__(name)
+        self.in_features = in_features
+        self.out_features = out_features
+        self.weight = 0.01 * in_features * out_features
+        self.bias = 0.01 * out_features
+    def forward(self, x):
+        return x * self.weight + self.bias
+
+class _DCBlock(_DCLayer):
+    def __init__(self, name, features, num_layers=3):
+        super().__init__(name, features, features)
+        self.num_layers = num_layers
+        self.scale = 1.0 / num_layers
+        self.layers = [_DCLayer(f"{name}_sub_{i}", features, features)
+                       for i in range(num_layers)]
+    def forward(self, x):
+        residual = x
+        for layer in self.layers:
+            x = layer.forward(x) * self.scale
+        return x + residual
+
+class _DCNetwork(_DCBlock):
+    def __init__(self, name, features, num_blocks=2):
+        super().__init__(name, features, num_layers=3)
+        self.num_blocks = num_blocks
+        self.blocks = [_DCBlock(f"{name}_block_{i}", features)
+                       for i in range(num_blocks)]
+    def forward(self, x):
+        for block in self.blocks:
+            x = block.forward(x)
+        return x
+
+class _DCModel(_DCNetwork):
+    def __init__(self, name, features=64, num_blocks=2):
+        super().__init__(name, features, num_blocks)
+        self.classifier_weight = 0.01 * features
+        self.classifier_bias = 0.001
+    def forward(self, x):
+        x = super().forward(x)
+        return x * self.classifier_weight + self.classifier_bias
+    def __repr__(self):
+        return (f"Model({self.name}, features={self.in_features}, "
+                f"blocks={self.num_blocks})")
+
+def bench_deep_class_super(n_iter):
+    """5-level class hierarchy with super() -- MRO, isinstance, repr."""
+    total = 0.0
+    for _ in range(n_iter // 10):
+        model = _DCModel("bench", features=32, num_blocks=2)
+        result = model.forward(1.0)
+        total += result % 100.0
+        if isinstance(model, _DCModel):
+            total += 0.001
+        if isinstance(model, _DCNetwork):
+            total += 0.001
+        if isinstance(model, _DCBlock):
+            total += 0.001
+        if isinstance(model, _DCLayer):
+            total += 0.001
+        if isinstance(model, _DCBase):
+            total += 0.001
+        _ = model.training
+        _ = model.in_features
+        _ = model.num_layers
+        _ = model.num_blocks
+        model.train(False)
+        params = model.parameters()
+        total += len(params) * 0.001
+        _ = repr(model)
+    return total
+
+class _NoGrad:
+    """Mimics torch.no_grad() -- sets/restores a global flag."""
+    _enabled = True
+    def __enter__(self):
+        self._prev = _NoGrad._enabled
+        _NoGrad._enabled = False
+        return self
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        _NoGrad._enabled = self._prev
+        return False
+
+class _Autocast:
+    """Mimics torch.autocast() -- sets/restores precision mode."""
+    _mode = 'float32'
+    def __init__(self, mode='float16'):
+        self._target = mode
+    def __enter__(self):
+        self._prev = _Autocast._mode
+        _Autocast._mode = self._target
+        return self
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        _Autocast._mode = self._prev
+        return False
+
+class _ProfileScope:
+    """Mimics profiler scope -- tracks entry/exit counts."""
+    _depth = 0
+    _total = 0
+    def __init__(self, name):
+        self._name = name
+    def __enter__(self):
+        _ProfileScope._depth += 1
+        _ProfileScope._total += 1
+        return self
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        _ProfileScope._depth -= 1
+        return False
+
+@contextlib.contextmanager
+def _training_mode(model_dict, mode=True):
+    """Mimics model.train()/model.eval() as context manager."""
+    prev = model_dict.get('training', True)
+    model_dict['training'] = mode
+    try:
+        yield model_dict
+    finally:
+        model_dict['training'] = prev
+
+def bench_pytorch_cm(n_iter):
+    """PyTorch-style context managers -- nested, contextlib, state toggle."""
+    model = {'training': True, 'weight': 1.0, 'bias': 0.0}
+    total = 0.0
+    for i in range(n_iter // 10):
+        with _NoGrad():
+            total += model['weight'] * float(i % 100) + model['bias']
+        with _Autocast('float16'):
+            with _NoGrad():
+                total += float(i % 50) * 0.5
+        with _training_mode(model, False) as m:
+            total += m['weight'] * 0.1
+        with _ProfileScope("layer_1"):
+            with _ProfileScope("layer_2"):
+                total += float(i % 10) * 0.01
+        total = total % 10000.0
+    return total
+
+
 JIT_BENCHMARKS = [
     ("fibonacci",       bench_fibonacci),
     ("richards_slots",  bench_richards_slots),
@@ -1312,7 +1524,52 @@ JIT_BENCHMARKS = [
     ("json_roundtrip",  bench_json_roundtrip),
     ("yield_from",      bench_yield_from_chain),
     ("nn_module",       bench_nn_module),
+    ("import_callee",   bench_import_callee),
+    ("try_except_callee", bench_try_except_callee),
+    ("store_subscr",    bench_store_subscr),
+    ("int_arith",       bench_int_arith),
+    ("positional_dispatch", bench_positional_dispatch),
+    ("deep_class_super", bench_deep_class_super),
+    ("pytorch_cm",      bench_pytorch_cm),
 ]
+
+# Calibrated iteration counts so each benchmark takes ~500ms on JIT.
+# Prevents fast benchmarks (gen_simple 6ms) from being drowned by slow ones
+# (fibonacci 6.6s). Geomean with rebalanced benchmarks gives equal weight
+# to each workload.
+# Calibrated on x86_64, commit 92fec179, RelWithDebInfo.
+BENCH_CALIBRATED_ITERS = {
+    "chaos_game":     1_200_000,
+    "coroutine_chain":1_700_000,
+    "dict_ops":       4_500_000,
+    "exceptions":     2_100_000,
+    "fannkuch":          87_000,
+    "fibonacci":          7_500,
+    "float_arith":    1_900_000,
+    "func_calls":     1_800_000,
+    "gen_nested":     1_600_000,
+    "gen_simple":     6_100_000,
+    "json_roundtrip":   840_000,
+    "list_comp":      8_900_000,
+    "method_calls":   1_050_000,
+    "nbody":          7_800_000,
+    "nn_module":      3_300_000,
+    "nqueens":           78_000,
+    "richards_full":     49_000,
+    "richards_slots":   123_000,
+    "spectral_norm":      8_000,
+    "string_ops":     3_500_000,
+    "unpack_seq":     5_800_000,
+    "yield_from":     3_000_000,
+    # Phoenix-ported benchmarks (calibrated from phoenix _PER_BENCH_ITERS)
+    "import_callee":  1_700_000,
+    "try_except_callee": 6_400_000,
+    "store_subscr":   2_700_000,
+    "int_arith":      2_500_000,
+    "positional_dispatch": 3_000_000,
+    "deep_class_super": 300_000,
+    "pytorch_cm":     280_000,
+}
 
 # Functions to force-compile for JIT benchmarks
 _JIT_COMPILABLE = [
@@ -1328,6 +1585,12 @@ _JIT_COMPILABLE = [
     _RTask.waitTask, _RTask.hold, _RTask.release, _RTask.qpkt,
     _RDeviceTask.fn, _RHandlerTask.fn,
     _RIdleTask.__init__, _RIdleTask.fn, _RWorkTask.fn,
+    _callee_with_import, _callee_with_try, _positional_callee,
+    _DCBase.__init__, _DCBase.parameters, _DCBase.train,
+    _DCLayer.__init__, _DCLayer.forward,
+    _DCBlock.__init__, _DCBlock.forward,
+    _DCNetwork.__init__, _DCNetwork.forward,
+    _DCModel.__init__, _DCModel.forward,
 ]
 
 
@@ -1642,11 +1905,10 @@ def _worker_jit(args):
         if cinderjit_mod:
             enable_specialised_opcodes(cinderjit_mod)
 
-    n_iter = 10_000 if filter_set else 100_000
+    default_iter = 10_000 if filter_set else 100_000
     # Auto-compile needs heavy warmup to trigger compilation of all methods.
     # 50K iterations ensures inner methods hit the compilation threshold.
     n_warmup = 5 if (filter_set and compile_mode == "auto") else (2 if filter_set else 3)
-    warmup_iter = 50_000 if (filter_set and compile_mode == "auto") else n_iter
     n_measure = 3 if filter_set else 5
 
     results = {
@@ -1655,6 +1917,9 @@ def _worker_jit(args):
     }
 
     for name, func in benchmarks:
+        n_iter = BENCH_CALIBRATED_ITERS.get(name, default_iter)
+        warmup_iter = 50_000 if (filter_set and compile_mode == "auto") else n_iter
+
         # Warmup — use warmup_iter to ensure auto-compile triggers
         for _ in range(n_warmup):
             func(warmup_iter)
@@ -1810,6 +2075,7 @@ def cmd_jit(args):
 
     total_on = 0
     total_off = 0
+    speedups = []
 
     for b in all_benchmarks:
         on_means = [
@@ -1830,6 +2096,7 @@ def cmd_jit(args):
         if on_mean > 0:
             speedup = off_mean / on_mean
             delta_pct = ((off_mean - on_mean) / off_mean) * 100
+            speedups.append(speedup)
         else:
             speedup = 0
             delta_pct = 0
@@ -1841,6 +2108,12 @@ def cmd_jit(args):
         )
 
     print("-" * 65)
+    if speedups:
+        geomean = math.exp(sum(math.log(s) for s in speedups) / len(speedups))
+        print(
+            f"  {'GEOMEAN':<20} {'':>10} {'':>10} "
+            f"{geomean:>8.2f}x {(geomean - 1) * 100:>6.1f}%"
+        )
     if total_on > 0:
         overall = total_off / total_on
         overall_pct = ((total_off - total_on) / total_off) * 100
@@ -2077,6 +2350,7 @@ def cmd_target(args):
 
     total_on = 0
     total_off = 0
+    speedups = []
 
     for b in sorted(TARGET_BENCH_NAMES):
         on_means = [
@@ -2097,6 +2371,7 @@ def cmd_target(args):
         if on_mean > 0:
             speedup = off_mean / on_mean
             delta_pct = ((off_mean - on_mean) / off_mean) * 100
+            speedups.append(speedup)
         else:
             speedup = 0
             delta_pct = 0
@@ -2108,6 +2383,12 @@ def cmd_target(args):
         )
 
     print("-" * 65)
+    if speedups:
+        geomean = math.exp(sum(math.log(s) for s in speedups) / len(speedups))
+        print(
+            f"  {'GEOMEAN':<20} {'':>10} {'':>10} "
+            f"{geomean:>8.2f}x {(geomean - 1) * 100:>6.1f}%"
+        )
     if total_on > 0:
         overall = total_off / total_on
         overall_pct = ((total_off - total_on) / total_off) * 100
