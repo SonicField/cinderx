@@ -59,7 +59,7 @@ struct DataDescrMutator {
   PyObject* getAttr(PyObject* obj);
   int setAttr(PyObject* obj, PyObject* value);
 
-  BorrowedRef<> descr;
+  BorrowedRef<> descr;  // Borrowed — protected by type watcher
 };
 
 // Mutator for a member descriptor
@@ -75,7 +75,7 @@ struct DescrOrClassVarMutator {
   PyObject* getAttr(PyObject* obj, PyObject* name);
   int setAttr(PyObject* obj, PyObject* name, PyObject* value);
 
-  BorrowedRef<> descr;
+  BorrowedRef<> descr;  // Borrowed — protected by type watcher
   uint keys_version;
 };
 
@@ -279,7 +279,8 @@ class LoadMethodCache {
  public:
   struct Entry {
     BorrowedRef<PyTypeObject> type;
-    BorrowedRef<> value;
+    Ref<> value;  // Owned reference — prevents use-after-free when GC
+                  // frees the method while the cache holds a pointer.
 #if PY_VERSION_HEX >= 0x030C0000
     uint keys_version;
 #endif
@@ -354,7 +355,7 @@ class LoadTypeMethodCache {
   // Borrowed, but uses a raw pointer as typeAddr() will return the address of
   // this field for codegen purposes.
   PyTypeObject* type_;
-  BorrowedRef<> value_;
+  Ref<> value_;  // Owned reference — prevents use-after-free on GC
   std::unique_ptr<CacheStats> cache_stats_;
   bool is_unbound_meth_;
 };
@@ -375,12 +376,12 @@ class LoadModuleAttrCache {
 
   // This corresponds to module __dict__'s version which allows us
   // to correctly invalidate the cache whenever the dictionary changes.
-  BorrowedRef<> module_;
+  Ref<> module_;  // Owned — prevents use-after-free
 #if PY_VERSION_HEX >= 0x030E0000
   PyObject** cache_;
 #else
   ci_dict_version_tag_t version_{0};
-  BorrowedRef<> value_;
+  Ref<> value_;  // Owned reference — prevents use-after-free on GC
 #endif
 };
 
@@ -405,12 +406,12 @@ class LoadModuleMethodCache {
 
   // This corresponds to module __dict__'s version which allows us
   // to correctly invalidate the cache whenever the dictionary changes.
-  BorrowedRef<> module_obj_;
+  Ref<> module_obj_;  // Owned — prevents use-after-free
 #if PY_VERSION_HEX >= 0x030E0000
   PyObject** cache_;
 #else
   ci_dict_version_tag_t module_version_{0};
-  BorrowedRef<> value_;
+  Ref<> value_;  // Owned reference — prevents use-after-free on GC
 #endif
 };
 

@@ -1120,7 +1120,7 @@ void LoadTypeAttrCache::fill(
 
   ltac_watcher.unwatch(type_, this);
   type_ = type;
-  value_ = value;
+  value_ = Ref<>::create(value);  // Take owned reference
   ltac_watcher.watch(type_, this);
 }
 
@@ -1334,7 +1334,7 @@ void LoadMethodCache::fill(
 
       lm_watcher.watch(type, this);
       entry.type = type;
-      entry.value = value;
+      entry.value = Ref<>::create(value);  // Take owned reference
 #if PY_VERSION_HEX >= 0x030C0000
       entry.keys_version = keys_version;
 #endif
@@ -1541,7 +1541,7 @@ void LoadTypeMethodCache::fill(
 
   ltm_watcher.unwatch(type_, this);
   type_ = type;
-  value_ = value;
+  value_ = Ref<>::create(value);  // Take owned reference
   is_unbound_meth_ = is_unbound_meth;
   ltm_watcher.watch(type_, this);
 }
@@ -1617,10 +1617,10 @@ PyObject* __attribute__((noinline)) LoadModuleAttrCache::lookupSlowPath(
           dict, dict, uname);
     }
 #else
-    value_ = value;
+    value_ = Ref<>::create(value);  // Take owned reference
     version_ = version;
 #endif
-    module_ = object;
+    module_ = Ref<>::create(object);
 
     // PyDict_GetItemWithError returns a borrowed reference, so
     // we need to increment it before returning.
@@ -1677,14 +1677,14 @@ LoadModuleMethodCache::lookupSlowPath(BorrowedRef<> obj, BorrowedRef<> name) {
   if (res != nullptr) {
     if (PyFunction_Check(res) || PyCFunction_Check(res) ||
         Py_TYPE(res) == &PyMethodDescr_Type) {
-      module_obj_ = obj;
+      module_obj_ = Ref<>::create(obj);
 #if PY_VERSION_HEX >= 0x030E0000
       BorrowedRef<PyUnicodeObject> uname{name};
       cache_ = cinderx::getModuleState()->cacheManager()->getGlobalCache(
           getModuleDict(obj), getModuleDict(obj), uname);
 #else
       module_version_ = version;
-      value_ = res;
+      value_ = Ref<>::create(res);
 #endif
     }
     // PyDict_GetItemWithError returns a borrowed reference, so
