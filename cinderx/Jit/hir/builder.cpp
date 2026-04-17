@@ -765,9 +765,9 @@ void HIRBuilder::emitInlineExceptionMatch(
 
           case JUMP_BACKWARD:
           case JUMP_BACKWARD_NO_INTERRUPT: {
-            BCOffset target = ebc.getJumpTarget();
-            auto* target_block = getBlockAtOff(target);
-            match_tc.emit<Branch>(target_block);
+            match_tc.frame.cur_instr_offs = ebc.getJumpTarget();
+            match_tc.emitSnapshot();
+            match_tc.emit<Deopt>();
             emitted_terminator = true;
             break;
           }
@@ -2459,10 +2459,6 @@ void HIRBuilder::emitBinaryOp(
 
   // B2: For subscript inside try block with simple except pattern,
   // emit inline exception match instead of BinaryOp (which auto-deopts).
-  // DISABLED: emitInlineExceptionMatch has a crash bug on mixed hit/miss
-  // patterns (segfault at n=10000+). The exception table varint fix
-  // (parseExceptionTable) is correct but the handler code needs debugging.
-#if 0
   if (op_kind == BinaryOpKind::kSubscript) {
     BCOffset cur_off = bc_instr.baseOffset();
     auto* handler = findExceptionHandler(cur_off);
@@ -2477,7 +2473,6 @@ void HIRBuilder::emitBinaryOp(
       }
     }
   }
-#endif
 
   tc.emit<BinaryOp>(result, op_kind, left, right, tc.frame);
   stack.push(result);
