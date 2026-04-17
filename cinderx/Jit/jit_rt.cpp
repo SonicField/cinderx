@@ -233,6 +233,38 @@ PyObject* JITRT_CallWithKeywordArgs(
     size_t nargsf,
     PyObject* kwnames) {
   PyCodeObject* co = (PyCodeObject*)func->func_code;
+
+  // Fast path: when positional args + keyword args together fill all params
+  // in order, skip the full binding — args are already in the right positions.
+  // Vectorcall layout: args[0..npos-1] positional, args[npos..npos+nkw-1] kwarg
+  // values. If kwnames[i] == co_varnames[npos+i], args is already positional.
+  if (kwnames != nullptr && co->co_kwonlyargcount == 0 &&
+      !(co->co_flags & (CO_VARARGS | CO_VARKEYWORDS))) {
+    Py_ssize_t nkw = PyTuple_GET_SIZE(kwnames);
+    Py_ssize_t npos = PyVectorcall_NARGS(nargsf);
+    if (npos + nkw == co->co_argcount &&
+        npos >= co->co_posonlyargcount) {
+      bool match = true;
+      // Identity compare: works for interned kwnames from source-level calls.
+      // Non-interned names (e.g. **dict unpacking) fall through to full path.
+      for (Py_ssize_t i = 0; i < nkw; i++) {
+        if (PyTuple_GET_ITEM(kwnames, i) != jit::getVarname(co, npos + i)) {
+          match = false;
+          break;
+        }
+      }
+      if (match) {
+        // Args are already in positional order — re-enter directly.
+        size_t new_nargsf = co->co_argcount;
+#if PY_VERSION_HEX < 0x030C0000
+        new_nargsf |= (nargsf & Ci_Py_AWAITED_CALL_MARKER);
+#endif
+        return getJitReentry(func)(
+            (PyObject*)func, args, new_nargsf, nullptr);
+      }
+    }
+  }
+
   const Py_ssize_t total_args = co->co_argcount + co->co_kwonlyargcount +
       ((co->co_flags & CO_VARKEYWORDS) ? 1 : 0) +
       ((co->co_flags & CO_VARARGS) ? 1 : 0);
