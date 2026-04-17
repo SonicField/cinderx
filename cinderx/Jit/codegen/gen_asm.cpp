@@ -1723,6 +1723,7 @@ void NativeGenerator::generatePrologue(
   // Finally allocate the saved space required for the actual function.
   auto finish_frame_setup_cursor = as_->cursor();
   as_->bind(finish_frame_setup);
+
   saveCallerRegisters(frame_info, x86::r11);
 
   env_.addAnnotation("Finish frame setup", finish_frame_setup_cursor);
