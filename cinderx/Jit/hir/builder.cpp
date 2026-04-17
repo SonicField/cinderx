@@ -560,18 +560,17 @@ void HIRBuilder::parseExceptionTable() {
   Py_ssize_t length = PyBytes_GET_SIZE(table_obj);
   Py_ssize_t pos = 0;
 
-  // Variable-length integer decoder matching CPython format (LSB first).
-  // Each byte: bits 0-5 = payload, bit 6 = continuation, bit 7 = entry start.
+  // Variable-length integer decoder matching CPython format (MSB first).
+  // Each byte: bits 0-5 = payload, bit 6 = continuation.
   auto parse_varint = [&]() -> int {
-    int val = 0;
-    int shift = 0;
-    uint8_t b;
-    do {
+    JIT_DCHECK(pos < length, "Truncated exception table");
+    uint8_t b = table[pos++];
+    int val = b & 0x3F;
+    while (b & 0x40) {
       JIT_DCHECK(pos < length, "Truncated exception table");
       b = table[pos++];
-      val |= (b & 0x3F) << shift;
-      shift += 6;
-    } while (b & 0x40);
+      val = (val << 6) | (b & 0x3F);
+    }
     return val;
   };
 
@@ -2460,6 +2459,10 @@ void HIRBuilder::emitBinaryOp(
 
   // B2: For subscript inside try block with simple except pattern,
   // emit inline exception match instead of BinaryOp (which auto-deopts).
+  // DISABLED: emitInlineExceptionMatch has a crash bug on mixed hit/miss
+  // patterns (segfault at n=10000+). The exception table varint fix
+  // (parseExceptionTable) is correct but the handler code needs debugging.
+#if 0
   if (op_kind == BinaryOpKind::kSubscript) {
     BCOffset cur_off = bc_instr.baseOffset();
     auto* handler = findExceptionHandler(cur_off);
@@ -2474,6 +2477,7 @@ void HIRBuilder::emitBinaryOp(
       }
     }
   }
+#endif
 
   tc.emit<BinaryOp>(result, op_kind, left, right, tc.frame);
   stack.push(result);
