@@ -1497,6 +1497,62 @@ Register* simplifyLoadAttrGenericDescriptor(Env& env, const DescrInfo& info) {
   return env.emit<CheckExc>(call->output(), *info.frame_state);
 }
 
+Register* simplifyLoadAttrSpecial(Env& env, const LoadAttrSpecial* instr) {
+  Register* receiver = instr->GetOperand(0);
+  Type type = receiver->type();
+  BorrowedRef<PyTypeObject> py_type{type.runtimePyType()};
+
+  if (!type.isExact() || py_type == nullptr ||
+      !PyType_HasFeature(py_type, Py_TPFLAGS_READY)) {
+    return nullptr;
+  }
+  if (getThreadedCompileContext().compileRunning()) {
+    if (!Ci_Type_HasValidVersionTag(py_type)) {
+      return nullptr;
+    }
+  } else if (!ensureVersionTag(py_type)) {
+    return nullptr;
+  }
+
+  BorrowedRef<> attr_name{instr->id()};
+  BorrowedRef<> descr{typeLookupSafe(py_type, attr_name)};
+  if (descr == nullptr) {
+    return nullptr;
+  }
+
+  BorrowedRef<PyUnicodeObject> attr_unicode{attr_name};
+  DescrInfo info{
+      instr->frameState(), receiver, type, py_type, attr_unicode, descr};
+  emitTypeAttrDeoptPatcher(env, info, "LoadAttrSpecial dunder");
+
+  BorrowedRef<PyTypeObject> descr_type = Py_TYPE(descr);
+  descrgetfunc descr_get = descr_type->tp_descr_get;
+
+  env.emit<UseType>(receiver, type);
+
+  if (descr_get != nullptr) {
+    if (!_PyClassLoader_IsImmutable(descr_type)) {
+      auto patchpoint = env.emitInstr<DeoptPatchpoint>(
+          env.func.allocateCodePatcher<TypeDeoptPatcher>(descr_type));
+      patchpoint->setGuiltyReg(receiver);
+      patchpoint->setDescr("tp_descr_get");
+    }
+    Register* descr_reg = env.emit<LoadConst>(Type::fromObject(descr));
+    Register* type_reg = env.emit<LoadConst>(
+        Type::fromObject(reinterpret_cast<PyObject*>(py_type.get())));
+    auto call = env.emitRawInstr<CallStatic>(
+        3,
+        env.func.env.AllocateRegister(),
+        reinterpret_cast<void*>(descr_get),
+        TOptObject);
+    call->SetOperand(0, descr_reg);
+    call->SetOperand(1, receiver);
+    call->SetOperand(2, type_reg);
+    return env.emit<CheckExc>(call->output(), *instr->frameState());
+  }
+  return env.emit<LoadConst>(Type::fromObject(descr));
+}
+
 // Attempt to handle LOAD_ATTR cases where the load is a common case for object
 // instances (not types).
 Register* simplifyLoadAttrInstanceReceiver(
@@ -2111,6 +2167,11 @@ Register* simplifyInstr(Env& env, const Instr* instr) {
 #ifndef Py_GIL_DISABLED
     case Opcode::kLoadMethod:
       return simplifyLoadMethod(env, static_cast<const LoadMethod*>(instr));
+#endif
+#ifndef Py_GIL_DISABLED
+    case Opcode::kLoadAttrSpecial:
+      return simplifyLoadAttrSpecial(
+          env, static_cast<const LoadAttrSpecial*>(instr));
 #endif
     case Opcode::kLoadField:
       return simplifyLoadField(env, static_cast<const LoadField*>(instr));
