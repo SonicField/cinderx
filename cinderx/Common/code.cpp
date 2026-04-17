@@ -150,12 +150,14 @@ int uninstrument(PyCodeObject* code, int index) {
   }
 
   // Instrumented lines and arbitrary instrumented instructions need to check
-  // different tables.
-  if (opcode == INSTRUMENTED_INSTRUCTION) {
-    return code->_co_monitoring->per_instruction_opcodes[index];
-  }
-  if (opcode == INSTRUMENTED_LINE) {
-    return Cix_GetOriginalOpcode(code->_co_monitoring->lines, index);
+  // different tables. _co_monitoring may be NULL if no monitoring is active.
+  if (code->_co_monitoring != nullptr) {
+    if (opcode == INSTRUMENTED_INSTRUCTION) {
+      return code->_co_monitoring->per_instruction_opcodes[index];
+    }
+    if (opcode == INSTRUMENTED_LINE) {
+      return Cix_GetOriginalOpcode(code->_co_monitoring->lines, index);
+    }
   }
 #endif
 
