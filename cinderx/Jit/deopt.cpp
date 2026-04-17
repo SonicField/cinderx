@@ -64,6 +64,13 @@ hir::ValueKind deoptValueKind(hir::Type type) {
     if (type <= (jit::hir::TCSigned | jit::hir::TNullptr)) {
       return jit::hir::ValueKind::kSigned;
     }
+    // After Phi unboxing, a register may carry CInt64 with a union type
+    // (e.g., CInt64|ImmortalLongExact from Phi merging an unboxed loop-back
+    // with a constant initial value). Treat as signed — readOwned will
+    // re-box via PyLong_FromSsize_t on deopt.
+    if (type.couldBe(jit::hir::TCSigned)) {
+      return jit::hir::ValueKind::kSigned;
+    }
   } else if (type.couldBe(jit::hir::TCDouble)) {
     return jit::hir::ValueKind::kDouble;
   }
