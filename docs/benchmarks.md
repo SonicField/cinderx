@@ -17,7 +17,7 @@ Branch: speculation-experiment
 - **ABBA design**: 8 subprocess runs (4 JIT, 4 vanilla), alternating to cancel thermal/load drift
 - **Compile mode**: `cinderjit.auto()` with 5000 warmup iterations
 - **Baseline**: fbpython (`/usr/local/fbcode/platform010/bin/python3.12`)
-- **Build**: RelWithDebInfo, non-LTO
+- **Build**: RelWithDebInfo, LTO enabled (ENABLE_LTO=ON)
 - **Platform**: x86_64 Linux
 - **Repetitions**: 2 ABBA reps (8 total runs)
 - **Calibrated iterations**: each benchmark tuned to ~500ms to give equal geomean weight
