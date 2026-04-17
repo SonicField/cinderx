@@ -1012,6 +1012,7 @@ LoadTypeAttrCache::LoadTypeAttrCache() {
 
 LoadTypeAttrCache::~LoadTypeAttrCache() {
   ltac_watcher.unwatch(type_, this);
+  Py_XDECREF(value_);
 }
 
 PyObject* LoadTypeAttrCache::invoke(
@@ -1120,7 +1121,9 @@ void LoadTypeAttrCache::fill(
 
   ltac_watcher.unwatch(type_, this);
   type_ = type;
-  value_ = Ref<>::create(value);  // Take owned reference
+  Py_XINCREF(value);
+  Py_XDECREF(value_);
+  value_ = value;
   ltac_watcher.watch(type_, this);
 }
 
@@ -1128,6 +1131,7 @@ void LoadTypeAttrCache::reset() {
   // We need to return a PyTypeObject* even in the empty case so that subsequent
   // refcounting operations work correctly.
   type_ = &s_empty_type_attr_cache;
+  Py_XDECREF(value_);
   value_ = nullptr;
 }
 
