@@ -22,27 +22,54 @@
 #include "cinderx/Jit/frame.h"
 #include "cinderx/Jit/generators_rt.h"
 
+#include <atomic>
+
+// G2 fast-path activation counters (thread-safe).
+static std::atomic<uint64_t> g_iter_fast_count{0};
+static std::atomic<uint64_t> g_iter_slow_count{0};
+static std::atomic<uint64_t> g_send_fast_count{0};
+static std::atomic<uint64_t> g_send_slow_count{0};
+
+void JITRT_GetGeneratorFastPathStats(
+    uint64_t* iter_fast, uint64_t* iter_slow,
+    uint64_t* send_fast, uint64_t* send_slow) {
+  *iter_fast = g_iter_fast_count.load(std::memory_order_relaxed);
+  *iter_slow = g_iter_slow_count.load(std::memory_order_relaxed);
+  *send_fast = g_send_fast_count.load(std::memory_order_relaxed);
+  *send_slow = g_send_slow_count.load(std::memory_order_relaxed);
+}
+
+void JITRT_ClearGeneratorFastPathStats() {
+  g_iter_fast_count.store(0, std::memory_order_relaxed);
+  g_iter_slow_count.store(0, std::memory_order_relaxed);
+  g_send_fast_count.store(0, std::memory_order_relaxed);
+  g_send_slow_count.store(0, std::memory_order_relaxed);
+}
+
 // G2: C-level type+state+value check for kSend LIR fast path.
 int JITRT_G2CheckSendFastPath(PyObject* gen_obj, PyObject* value) {
   if (value == Py_None &&
       Py_TYPE(gen_obj) == cinderx::getModuleState()->genType()) {
     auto* gen = reinterpret_cast<PyGenObject*>(gen_obj);
     if (gen->gi_frame_state == FRAME_SUSPENDED) {
+      g_send_fast_count.fetch_add(1, std::memory_order_relaxed);
       return 1;
     }
   }
+  g_send_slow_count.fetch_add(1, std::memory_order_relaxed);
   return 0;
 }
 
 // G2: C-level type+state check for kInvokeIterNext LIR fast path.
-// Checks if iterator is a suspended JitGen generator.
 int JITRT_G2CheckFastPath(PyObject* iterator) {
   if (Py_TYPE(iterator) == cinderx::getModuleState()->genType()) {
     auto* gen = reinterpret_cast<PyGenObject*>(iterator);
     if (gen->gi_frame_state == FRAME_SUSPENDED) {
+      g_iter_fast_count.fetch_add(1, std::memory_order_relaxed);
       return 1;
     }
   }
+  g_iter_slow_count.fetch_add(1, std::memory_order_relaxed);
   return 0;
 }
 

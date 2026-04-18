@@ -650,6 +650,12 @@ int JITRT_G2CheckFastPath(PyObject* iterator);
 // G2: C-level type+state+value check for kSend LIR fast path.
 int JITRT_G2CheckSendFastPath(PyObject* gen_obj, PyObject* value);
 
+// G2 fast-path activation counters.
+void JITRT_GetGeneratorFastPathStats(
+    uint64_t* iter_fast, uint64_t* iter_slow,
+    uint64_t* send_fast, uint64_t* send_slow);
+void JITRT_ClearGeneratorFastPathStats();
+
 // Fast-path builtin next() wrapper. Routes through JITRT_InvokeIterNext
 // (G1 fast path for JIT generators), converts sentinel to next() semantics.
 PyObject* JITRT_BuiltinNext(PyObject* it, PyObject* def);

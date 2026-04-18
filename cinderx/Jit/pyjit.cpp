@@ -40,6 +40,7 @@
 #include "cinderx/Jit/inline_cache.h"
 #include "cinderx/Jit/bytecode.h"
 #include "cinderx/Jit/jit_flag_processor.h"
+#include "cinderx/Jit/jit_rt.h"
 #include "cinderx/Jit/jit_gdb_support.h"
 #include "cinderx/Jit/jit_list.h"
 #include "cinderx/Jit/jit_time_log.h"
@@ -2478,6 +2479,29 @@ PyObject* get_allocator_stats(PyObject*, PyObject*) {
   return stats.release();
 }
 
+PyObject* get_generator_fast_path_stats(PyObject*, PyObject*) {
+  uint64_t iter_fast, iter_slow, send_fast, send_slow;
+  JITRT_GetGeneratorFastPathStats(
+      &iter_fast, &iter_slow, &send_fast, &send_slow);
+  auto stats = Ref<>::steal(PyDict_New());
+  if (stats == nullptr) return nullptr;
+  auto set = [&](const char* key, uint64_t val) {
+    auto py_val = Ref<>::steal(PyLong_FromUnsignedLongLong(val));
+    if (py_val == nullptr || PyDict_SetItemString(stats, key, py_val) < 0)
+      return false;
+    return true;
+  };
+  if (!set("iter_fast", iter_fast) || !set("iter_slow", iter_slow) ||
+      !set("send_fast", send_fast) || !set("send_slow", send_slow))
+    return nullptr;
+  return stats.release();
+}
+
+PyObject* clear_generator_fast_path_stats(PyObject*, PyObject*) {
+  JITRT_ClearGeneratorFastPathStats();
+  Py_RETURN_NONE;
+}
+
 PyObject* is_hir_inliner_enabled(PyObject* /* self */, PyObject*) {
   if (getConfig().hir_opts.inliner) {
     Py_RETURN_TRUE;
@@ -2940,6 +2964,14 @@ PyMethodDef jit_methods[] = {
      get_allocator_stats,
      METH_NOARGS,
      PyDoc_STR("Return stats from the code allocator as a dictionary.")},
+    {"get_generator_fast_path_stats",
+     get_generator_fast_path_stats,
+     METH_NOARGS,
+     PyDoc_STR("Return G2 fast-path activation counters as a dictionary.")},
+    {"clear_generator_fast_path_stats",
+     clear_generator_fast_path_stats,
+     METH_NOARGS,
+     PyDoc_STR("Clear G2 fast-path activation counters.")},
     {"is_hir_inliner_enabled",
      is_hir_inliner_enabled,
      METH_NOARGS,
