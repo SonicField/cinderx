@@ -804,7 +804,9 @@ int cinderx_func_watcher(
       // Update the new function's vectorcall to have it run with Static Python
       // if it needs to.
       func->vectorcall = getInterpretedVectorcall(func);
-      scheduleCompile(func);
+      if (jit::getConfig().state == jit::State::kRunning) {
+        scheduleCompile(func);
+      }
       break;
     case PyFunction_EVENT_MODIFY_CODE:
       jit::funcModified(func);
@@ -1481,7 +1483,9 @@ int _cinderx_exec_impl(PyObject* m) {
     return -1;
   }
 
-  init_existing_objects();
+  // init_existing_objects() deferred to JIT enable time (auto() or
+  // compile_after_n_calls). compile_after_n_calls_impl() already walks
+  // all functions via walkFunctionObjects when JIT enables.
 
 #if PY_VERSION_HEX < 0x030C0000
   Ci_cinderx_initialized = 1;
