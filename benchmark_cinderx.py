@@ -2142,19 +2142,10 @@ def cmd_jit(args):
     print(f"Compile mode: {args.compile}")
     print()
 
-    # Determine Python commands
-    venv_python = os.environ.get(
-        "CINDERX_PYTHON",
-        os.path.join(
-            os.environ.get("CINDERX_VENV", ""),
-            "bin/python3",
-        ),
-    )
-    vanilla_python = os.environ.get("VANILLA_PYTHON", "")
-    if not vanilla_python:
-        # Try to find python3.12 on PATH
-        import shutil
-        vanilla_python = shutil.which("python3.12") or "python3.12"
+    # Python commands (resolved in main() preflight — no fallbacks)
+    venv_python = os.environ.get("CINDERX_PYTHON") or os.path.join(
+        os.environ.get("CINDERX_VENV", ""), "bin/python3")
+    vanilla_python = os.environ["VANILLA_PYTHON"]
 
     # Check availability
     venv_cmd = [venv_python]
@@ -2646,15 +2637,22 @@ Environment variables:
     # Auto-save benchmark output
     log_path = _setup_benchmark_log()
 
-    # Preflight checks (all modes)
-    venv_python = os.environ.get(
-        "CINDERX_PYTHON",
-        os.path.join(os.environ.get("CINDERX_VENV", ""), "bin/python3"),
+    # Resolve python paths — no fallbacks, require explicit configuration
+    venv_python = os.environ.get("CINDERX_PYTHON") or (
+        os.path.join(os.environ.get("CINDERX_VENV", ""), "bin/python3")
+        if os.environ.get("CINDERX_VENV") else None
     )
-    vanilla_python = os.environ.get("VANILLA_PYTHON", "")
-    if not vanilla_python:
-        import shutil
-        vanilla_python = shutil.which("python3.12") or "python3.12"
+    vanilla_python = os.environ.get("VANILLA_PYTHON")
+    if not venv_python or not vanilla_python:
+        print("ERROR: Both python paths must be set explicitly. No fallbacks.")
+        if not venv_python:
+            print("  Missing: CINDERX_PYTHON or CINDERX_VENV")
+        if not vanilla_python:
+            print("  Missing: VANILLA_PYTHON")
+        print("\nUsage:")
+        print("  CINDERX_VENV=/path/to/venv VANILLA_PYTHON=/path/to/python3.12 \\")
+        print("    python3 benchmark_cinderx.py jit --reps=3")
+        sys.exit(1)
     print("Preflight checks:")
     _preflight_checks([venv_python], [vanilla_python, "-I"])
 
