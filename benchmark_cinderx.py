@@ -69,9 +69,8 @@ COMPILE_THRESHOLD = 999_999_999  # Prevent auto-compilation when not wanted
 def init_cinderjit(compile_mode="force"):
     """Initialise CinderX JIT. Returns cinderjit module or None."""
     try:
-        import cinderx
-        if hasattr(cinderx, "init"):
-            cinderx.init()
+        import _cinderx
+        _cinderx.install_frame_evaluator()
         import cinderjit
 
         if compile_mode == "auto":
