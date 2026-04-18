@@ -655,6 +655,10 @@ void JITRT_GetGeneratorFastPathStats(
     uint64_t* iter_fast, uint64_t* iter_slow,
     uint64_t* send_fast, uint64_t* send_slow);
 void JITRT_ClearGeneratorFastPathStats();
+void JITRT_IncrIterFast();
+void JITRT_IncrIterSlow();
+void JITRT_IncrSendFast();
+void JITRT_IncrSendSlow();
 
 // Fast-path builtin next() wrapper. Routes through JITRT_InvokeIterNext
 // (G1 fast path for JIT generators), converts sentinel to next() semantics.

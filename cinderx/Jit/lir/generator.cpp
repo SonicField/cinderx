@@ -2936,15 +2936,17 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
         bbb.appendBranch(
             Instruction::kCondBranch, is_suspended, fast_path, slow_path);
 
-        // Fast path: call JITRT_ResumeJitGen → fast_output
+        // Fast path: increment counter, call JITRT_ResumeJitGen → fast_output
         bbb.switchBlock(fast_path);
+        bbb.appendInvokeInstruction(JITRT_IncrIterFast);
         auto* fast_tmp = const_cast<hir::Function*>(GetHIRFunction())->env.AllocateRegister();
         auto* fast_output = bbb.appendCallInstruction(
             fast_tmp, JITRT_ResumeJitGen, instr->GetOperand(0));
         bbb.appendBranch(Instruction::kBranch, done);
 
-        // Slow path: call JITRT_InvokeIterNext → slow_output
+        // Slow path: increment counter, call JITRT_InvokeIterNext → slow_output
         bbb.switchBlock(slow_path);
+        bbb.appendInvokeInstruction(JITRT_IncrIterSlow);
         auto* slow_tmp = const_cast<hir::Function*>(GetHIRFunction())->env.AllocateRegister();
         auto* slow_output = bbb.appendCallInstruction(
             slow_tmp, JITRT_InvokeIterNext, instr->GetOperand(0));
@@ -3711,16 +3713,18 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
         bbb.appendBranch(
             Instruction::kCondBranch, is_none, fast_path, slow_path);
 
-        // Fast path: call JITRT_ResumeJitGenForSend(gen)
+        // Fast path: increment counter, call JITRT_ResumeJitGenForSend(gen)
         bbb.switchBlock(fast_path);
+        bbb.appendInvokeInstruction(JITRT_IncrSendFast);
         auto* fast_tmp = const_cast<hir::Function*>(GetHIRFunction())
             ->env.AllocateRegister();
         auto* fast_output = bbb.appendCallInstruction(
             fast_tmp, JITRT_ResumeJitGenForSend, hir_instr.GetOperand(0));
         bbb.appendBranch(Instruction::kBranch, done);
 
-        // Slow path: call JITRT_GenSend (full protocol)
+        // Slow path: increment counter, call JITRT_GenSend (full protocol)
         bbb.switchBlock(slow_path);
+        bbb.appendInvokeInstruction(JITRT_IncrSendSlow);
         auto* slow_output = bbb.appendInstr(
             Instruction::kCall, OutVReg{},
             Imm{reinterpret_cast<uint64_t>(JITRT_GenSend)},

@@ -46,6 +46,22 @@ void JITRT_ClearGeneratorFastPathStats() {
   g_send_slow_count.store(0, std::memory_order_relaxed);
 }
 
+void JITRT_IncrIterFast() {
+  g_iter_fast_count.fetch_add(1, std::memory_order_relaxed);
+}
+
+void JITRT_IncrIterSlow() {
+  g_iter_slow_count.fetch_add(1, std::memory_order_relaxed);
+}
+
+void JITRT_IncrSendFast() {
+  g_send_fast_count.fetch_add(1, std::memory_order_relaxed);
+}
+
+void JITRT_IncrSendSlow() {
+  g_send_slow_count.fetch_add(1, std::memory_order_relaxed);
+}
+
 // G2: C-level type+state+value check for kSend LIR fast path.
 int JITRT_G2CheckSendFastPath(PyObject* gen_obj, PyObject* value) {
   if (value == Py_None &&
