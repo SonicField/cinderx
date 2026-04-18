@@ -704,8 +704,7 @@ void HIRBuilder::emitInlineExceptionMatch(
     BasicBlock* deopt_block = cfg.AllocateBlock();
     exc_tc.emit<CondBranch>(match_result, match_block, deopt_block);
 
-    // === Match block: emit except body bytecodes inline ===
-    // Delegate to existing emit* methods to handle all edge cases.
+    // === Match block: emit except body with deopt at loop back-edge ===
     {
       TranslationContext match_tc{match_block, exc_tc.frame};
       match_tc.frame.cur_instr_offs = info.except_body;
@@ -716,19 +715,15 @@ void HIRBuilder::emitInlineExceptionMatch(
       while (!emitted_terminator) {
         switch (ebc.opcode()) {
           case POP_EXCEPT:
-            // No-op for B2: we never pushed exc_info in the JIT.
             break;
-
           case POP_TOP:
             match_tc.frame.stack.pop();
             break;
-
           case LOAD_FAST:
           case LOAD_FAST_CHECK:
           case LOAD_FAST_AND_CLEAR:
             emitLoadFast(match_tc, ebc);
             break;
-
           case LOAD_CONST: {
             Register* reg = temps_.AllocateStack();
             Type type = Type::fromObject(
@@ -737,15 +732,12 @@ void HIRBuilder::emitInlineExceptionMatch(
             match_tc.frame.stack.push(reg);
             break;
           }
-
           case STORE_FAST:
             emitStoreFast(match_tc, ebc);
             break;
-
           case BINARY_OP:
             emitBinaryOp(cfg, match_tc, ebc);
             break;
-
           case RETURN_CONST: {
             Register* ret_reg = temps_.AllocateStack();
             Type type = Type::fromObject(
@@ -755,14 +747,12 @@ void HIRBuilder::emitInlineExceptionMatch(
             emitted_terminator = true;
             break;
           }
-
           case RETURN_VALUE: {
             Register* ret_val = match_tc.frame.stack.pop();
             match_tc.emit<Return>(ret_val, preloader_.returnType());
             emitted_terminator = true;
             break;
           }
-
           case JUMP_BACKWARD:
           case JUMP_BACKWARD_NO_INTERRUPT: {
             match_tc.frame.cur_instr_offs = ebc.getJumpTarget();
@@ -771,16 +761,13 @@ void HIRBuilder::emitInlineExceptionMatch(
             emitted_terminator = true;
             break;
           }
-
           default:
-            // Unsupported opcode: deopt to interpreter.
             match_tc.frame.cur_instr_offs = ebc.baseOffset();
             match_tc.emitSnapshot();
             match_tc.emit<Deopt>();
             emitted_terminator = true;
             break;
         }
-
         if (!emitted_terminator) {
           ebc = ebc.nextInstr();
         }
@@ -5423,6 +5410,17 @@ void HIRBuilder::emitSend(
   OperandStack& stack = tc.frame.stack;
   Register* value_out = stack.pop();
   Register* iter = stack.top();
+
+  if (getConfig().specialized_opcodes &&
+      bc_instr.specializedOpcode() == SEND_GEN) {
+    PyTypeObject* jit_gen_type = cinderx::getModuleState()->genType();
+    if (jit_gen_type != nullptr) {
+      tc.emitSnapshot();
+      Type gen_type = Type::fromTypeExact(jit_gen_type);
+      tc.emit<GuardType>(iter, gen_type, iter, tc.frame);
+    }
+  }
+
   Register* value_in = temps_.AllocateStack();
   tc.emit<Send>(iter, value_out, value_in, tc.frame);
   Register* is_done = temps_.AllocateNonStack();

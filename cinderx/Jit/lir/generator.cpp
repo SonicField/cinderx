@@ -3658,7 +3658,6 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
         break;
       }
       case Opcode::kSend: {
-        // G2 Step 4: Inline type+state+value check for inner delegation.
         auto& hir_instr = static_cast<const Send&>(i);
         auto* gen_reg = bbb.getDefInstr(hir_instr.GetOperand(0));
         auto* val_reg = bbb.getDefInstr(hir_instr.GetOperand(1));
@@ -3668,6 +3667,13 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
         slow_path->setSection(codegen::CodeSection::kCold);
         auto* done = bbb.allocateBlock();
 
+        // If HIR already proved the operand is genType (via GuardType from
+        // SEND_GEN), skip runtime type check but KEEP state+value checks.
+        PyTypeObject* gen_py_type =
+            hir_instr.GetOperand(0)->type().runtimePyType();
+        bool skip_type_check = (gen_py_type != nullptr &&
+            gen_py_type == cinderx::getModuleState()->genType());
+        if (!skip_type_check) {
         // Type check: is gen a JitGen?
         constexpr int32_t kObTypeOffset = offsetof(PyObject, ob_type);
         auto* gen_type = bbb.appendInstr(
@@ -3685,9 +3691,10 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
         auto* type_ok_block = bbb.allocateBlock();
         bbb.appendBranch(
             Instruction::kCondBranch, type_ok, type_ok_block, slow_path);
-
-        // State check: FRAME_SUSPENDED
         bbb.switchBlock(type_ok_block);
+        } // end if (!skip_type_check)
+
+        // State check: FRAME_SUSPENDED (always checked, even with known type)
         constexpr int32_t kFrameStateOffset =
             offsetof(PyGenObject, gi_frame_state);
         auto* frame_state = bbb.appendInstr(

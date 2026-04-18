@@ -101,6 +101,7 @@ int BytecodeInstruction::specializedOpcode() const {
     case FOR_ITER_RANGE:
     case FOR_ITER_LIST:
     case FOR_ITER_TUPLE:
+    case SEND_GEN:
       return opcode;
     default:
       return unspecialize(opcode);
