@@ -3635,16 +3635,50 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
       case Opcode::kSend: {
         auto& hir_instr = static_cast<const Send&>(i);
 
-        // kSend: just call JITRT_GenSend directly (fast path disabled
-        // pending error handling fix for JITRT_ResumeJitGenForSend).
-        bbb.appendInstr(
-            hir_instr.output(),
-            Instruction::kCall,
+        auto* fast_path = bbb.allocateBlock();
+        auto* slow_path = bbb.allocateBlock();
+        slow_path->setSection(codegen::CodeSection::kCold);
+        auto* done = bbb.allocateBlock();
+
+        // Call C helper to check type+state+value
+        auto* check_tmp = const_cast<hir::Function*>(GetHIRFunction())
+            ->env.AllocateRegister();
+        auto* check_result = bbb.appendCallInstruction(
+            check_tmp, JITRT_G2CheckSendFastPath,
+            hir_instr.GetOperand(0), hir_instr.GetOperand(1));
+        bbb.appendBranch(
+            Instruction::kCondBranch, check_result, fast_path, slow_path);
+
+        // Fast path: call JITRT_ResumeJitGenForSend(gen)
+        bbb.switchBlock(fast_path);
+        auto* fast_tmp = const_cast<hir::Function*>(GetHIRFunction())
+            ->env.AllocateRegister();
+        auto* fast_output = bbb.appendCallInstruction(
+            fast_tmp, JITRT_ResumeJitGenForSend, hir_instr.GetOperand(0));
+        bbb.appendBranch(Instruction::kBranch, done);
+
+        // Slow path: call JITRT_GenSend (full protocol)
+        bbb.switchBlock(slow_path);
+        auto* slow_output = bbb.appendInstr(
+            Instruction::kCall, OutVReg{},
             Imm{reinterpret_cast<uint64_t>(JITRT_GenSend)},
             hir_instr.GetOperand(0),
             hir_instr.GetOperand(1),
             Imm{0},
             env_->asm_interpreter_frame);
+        auto* slow_tmp_reg = const_cast<hir::Function*>(GetHIRFunction())
+            ->env.AllocateRegister();
+        bbb.createInstrOutput(slow_output, slow_tmp_reg);
+        bbb.appendBranch(Instruction::kBranch, done);
+
+        // Done: Phi merges fast + slow
+        bbb.switchBlock(done);
+        auto* phi = bbb.appendInstr(
+            hir_instr.output(), Instruction::kPhi);
+        phi->allocateLabelInput(fast_path);
+        phi->allocateLinkedInput(fast_output);
+        phi->allocateLabelInput(slow_path);
+        phi->allocateLinkedInput(slow_output);
         break;
       }
       case Opcode::kBuildInterpolation: {

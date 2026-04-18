@@ -22,6 +22,18 @@
 #include "cinderx/Jit/frame.h"
 #include "cinderx/Jit/generators_rt.h"
 
+// G2: C-level type+state+value check for kSend LIR fast path.
+int JITRT_G2CheckSendFastPath(PyObject* gen_obj, PyObject* value) {
+  if (value == Py_None &&
+      Py_TYPE(gen_obj) == cinderx::getModuleState()->genType()) {
+    auto* gen = reinterpret_cast<PyGenObject*>(gen_obj);
+    if (gen->gi_frame_state == FRAME_SUSPENDED) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 // G2: C-level type+state check for kInvokeIterNext LIR fast path.
 // Checks if iterator is a suspended JitGen generator.
 int JITRT_G2CheckFastPath(PyObject* iterator) {
@@ -2377,17 +2389,89 @@ PyObject JITRT_IterDoneSentinel = {
     nullptr};
 
 // G2 Step 4: Resume helper returning GenSendRes for kSend fast path.
-// Wraps JITRT_ResumeJitGen result into the struct that kSend expects.
-JITRT_GenSendRes JITRT_ResumeJitGenForSend(PyObject* gen) {
-  PyObject* result = JITRT_ResumeJitGen(gen);
-  if (result != nullptr && result != &JITRT_IterDoneSentinel) {
-    return {result, 0};  // yielded value, not done
+// Does the same work as JITRT_ResumeJitGen but preserves the generator's
+// return value for yield_from delegation instead of converting to sentinel.
+JITRT_GenSendRes JITRT_ResumeJitGenForSend(PyObject* gen_obj) {
+  jit::JitGenObject* gen = jit::JitGenObject::cast(
+      reinterpret_cast<PyGenObject*>(gen_obj));
+
+  PyThreadState* tstate = PyThreadState_Get();
+
+  // Exception state threading
+  _PyErr_StackItem* prev_exc_info = tstate->exc_info;
+  gen->gi_exc_state.previous_item = prev_exc_info;
+  tstate->exc_info = &gen->gi_exc_state;
+
+  gen->gi_frame_state = FRAME_EXECUTING;
+
+  // Frame linkage
+  jit::GenDataFooter* gen_footer = gen->genDataFooter();
+  _PyInterpreterFrame* frame = generatorFrame(gen);
+  frame->previous = currentFrame(tstate);
+  setCurrentFrame(tstate, frame);
+
+  // Direct call to JIT-compiled generator code
+  PyObject* result = gen_footer->resumeEntry(
+      gen_obj, Py_None, 0, tstate);
+
+  // Post-resume cleanup
+  if (jit::JitGen_CheckAny(gen_obj)) {
+    tstate->exc_info = gen->gi_exc_state.previous_item;
+    gen->gi_exc_state.previous_item = nullptr;
+    setCurrentFrame(tstate, frame->previous);
+    frame->previous = nullptr;
+
+    if (FRAME_STATE_FINISHED(gen->gi_frame_state)) {
+      gen->gi_frame_state = FRAME_CLEARED;
+      jit::jitFrameClearExceptCode(frame);
+#ifdef ENABLE_GENERATOR_AWAITER
+      Py_CLEAR(gen->gi_ci_awaiter);
+#endif
+#if PY_VERSION_HEX < 0x030E0000
+      _PyErr_ClearExcState(&gen->gi_exc_state);
+#endif
+    } else {
+#if PY_VERSION_HEX >= 0x030E0000
+      gen->gi_frame_state = gen_footer->yieldPoint->isYieldFrom()
+          ? FRAME_SUSPENDED_YIELD_FROM
+          : FRAME_SUSPENDED;
+#else
+      gen->gi_frame_state = FRAME_SUSPENDED;
+#endif
+    }
   }
-  if (result == &JITRT_IterDoneSentinel) {
-    Py_DECREF(result);
-    return {nullptr, 1};  // done, no value
+
+  // Handle result for SEND semantics (yield_from)
+  if (result) {
+    if (!FRAME_STATE_FINISHED(gen->gi_frame_state)) {
+      return {result, 0};  // Yielded value, not done
+    }
+    // Generator returned a value — this is the yield_from result
+    return {result, 1};  // done, return value preserved
   }
-  return {nullptr, 1};  // error or done
+
+  // Error or StopIteration
+  if (PyErr_ExceptionMatches(PyExc_StopIteration)) {
+    // Extract return value from StopIteration
+    PyObject *typ, *val, *tb;
+    PyErr_Fetch(&typ, &val, &tb);
+    PyObject* retval = nullptr;
+    if (val) {
+      retval = ((PyStopIterationObject*)val)->value;
+      Py_XINCREF(retval);
+    }
+    Py_XDECREF(typ);
+    Py_XDECREF(val);
+    Py_XDECREF(tb);
+    if (retval == nullptr) {
+      retval = Py_None;
+      Py_INCREF(retval);
+    }
+    return {retval, 1};  // done, with return value
+  }
+
+  // Non-StopIteration exception — propagate
+  return {nullptr, 1};
 }
 
 // G2: Minimal resume helper for JitGen generators.

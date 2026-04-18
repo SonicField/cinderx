@@ -647,6 +647,8 @@ JITRT_GenSendRes JITRT_ResumeJitGenForSend(PyObject* gen);
 
 // G2: C-level type+state check for kInvokeIterNext LIR fast path.
 int JITRT_G2CheckFastPath(PyObject* iterator);
+// G2: C-level type+state+value check for kSend LIR fast path.
+int JITRT_G2CheckSendFastPath(PyObject* gen_obj, PyObject* value);
 
 // Fast-path builtin next() wrapper. Routes through JITRT_InvokeIterNext
 // (G1 fast path for JIT generators), converts sentinel to next() semantics.
