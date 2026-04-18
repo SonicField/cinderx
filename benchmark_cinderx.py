@@ -1992,6 +1992,110 @@ def _worker_spec(args):
     print(json.dumps(results))
 
 
+def _query_python(python_cmd, code):
+    """Run a Python snippet in a subprocess and return stdout."""
+    try:
+        r = subprocess.run(
+            python_cmd + ["-c", code],
+            capture_output=True, text=True, timeout=30,
+        )
+        return r.stdout.strip() if r.returncode == 0 else None
+    except Exception:
+        return None
+
+
+def _readelf_comment(binary_path):
+    """Extract .comment section from ELF binary via readelf."""
+    try:
+        r = subprocess.run(
+            ["readelf", "-p", ".comment", binary_path],
+            capture_output=True, text=True, timeout=10,
+        )
+        return r.stdout if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def _readelf_dwarf_producer(binary_path):
+    """Extract DW_AT_producer lines from DWARF info (first 3 matches)."""
+    try:
+        r = subprocess.run(
+            ["readelf", "--debug-dump=info", binary_path],
+            capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode != 0:
+            return ""
+        lines = [l for l in r.stdout.splitlines() if "DW_AT_producer" in l]
+        return "\n".join(lines[:3])
+    except Exception:
+        return ""
+
+
+def _preflight_checks(jit_cmd, vanilla_cmd):
+    """Validate benchmark invariants before running. Aborts on failure."""
+    errors = []
+    jit_bin = jit_cmd[0]
+    vanilla_bin = vanilla_cmd[0]
+
+    ver_code = "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
+    jit_ver = _query_python(jit_cmd, ver_code)
+    van_ver = _query_python(vanilla_cmd, ver_code)
+    if jit_ver != van_ver:
+        errors.append(f"Version mismatch: JIT={jit_ver}, vanilla={van_ver}")
+    else:
+        print(f"  [OK] Version match: {jit_ver}")
+
+    cinderx_code = (
+        "import _cinderx; _cinderx.install_frame_evaluator(); "
+        "import cinderjit; print('loaded')"
+    )
+    if _query_python(jit_cmd, cinderx_code) != "loaded":
+        errors.append("CinderX NOT loaded in JIT python — _cinderx.so missing or broken")
+    else:
+        print("  [OK] CinderX loaded in JIT python")
+
+    jit_dwarf = _readelf_dwarf_producer(jit_bin)
+    van_dwarf = _readelf_dwarf_producer(vanilla_bin)
+    jit_lto = "-flto" in jit_dwarf or "-flto" in _readelf_comment(jit_bin)
+    van_lto = "-flto" in van_dwarf or "-flto" in _readelf_comment(vanilla_bin)
+    if not jit_dwarf and not van_dwarf:
+        errors.append("LTO detection failed: no DWARF info in either binary")
+    elif jit_lto != van_lto:
+        errors.append(f"LTO mismatch: JIT={'lto' if jit_lto else 'no-lto'}, "
+                       f"vanilla={'lto' if van_lto else 'no-lto'}")
+    else:
+        print(f"  [OK] LTO match: {'lto' if jit_lto else 'no-lto'}")
+
+    jit_pgo = "-fprofile-use" in jit_dwarf
+    van_pgo = "-fprofile-use" in van_dwarf
+    if jit_pgo or van_pgo:
+        errors.append(f"PGO detected: JIT={'pgo' if jit_pgo else 'no-pgo'}, "
+                       f"vanilla={'pgo' if van_pgo else 'no-pgo'}")
+    else:
+        print("  [OK] No PGO detected")
+
+    jit_comment = _readelf_comment(jit_bin)
+    van_comment = _readelf_comment(vanilla_bin)
+    print(f"  [INFO] JIT compiler: {jit_comment.strip()[:120]}")
+    print(f"  [INFO] Vanilla compiler: {van_comment.strip()[:120]}")
+
+    cinderx_so_code = "import _cinderx; print(_cinderx.__file__)"
+    so_path = _query_python(jit_cmd, cinderx_so_code)
+    if so_path:
+        so_comment = _readelf_comment(so_path)
+        print(f"  [INFO] _cinderx.so compiler: {so_comment.strip()[:120]}")
+
+    if errors:
+        print("\n  PREFLIGHT FAILED:")
+        for e in errors:
+            print(f"    - {e}")
+        print("\n  Aborting. Fix the above issues or set BENCHMARK_SKIP_PREFLIGHT=1 to override.")
+        if not os.environ.get("BENCHMARK_SKIP_PREFLIGHT"):
+            sys.exit(1)
+    else:
+        print("  All preflight checks passed.\n")
+
+
 def cmd_jit(args):
     """Run JIT vs vanilla Python benchmarks (subprocess isolated)."""
     print("=" * 72)
@@ -2024,6 +2128,9 @@ def cmd_jit(args):
     print(f"JIT ON:  {venv_python}")
     print(f"JIT OFF: {vanilla_python} -I")
     print()
+
+    print("Preflight checks:")
+    _preflight_checks(venv_cmd, vanilla_cmd)
 
     # ABBA runs
     on_results = []
