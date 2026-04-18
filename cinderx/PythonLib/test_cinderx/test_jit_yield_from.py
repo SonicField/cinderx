@@ -171,13 +171,19 @@ class TestYieldFrom(unittest.TestCase):
             yield 2
             yield 3
 
+        def consumer():
+            total = 0
+            for v in gen():
+                total += v
+            return total
+
         for _ in range(1200):
-            list(gen())
-        self.assertTrue(cinderjit.is_jit_compiled(gen))
+            consumer()
+        self.assertTrue(cinderjit.is_jit_compiled(consumer))
 
         cinderjit.clear_generator_fast_path_stats()
         for _ in range(100):
-            list(gen())
+            consumer()
         stats = cinderjit.get_generator_fast_path_stats()
         self.assertGreater(stats['iter_fast'], 0,
             "kInvokeIterNext fast path did not fire — may be dead code")
