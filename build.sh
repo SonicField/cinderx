@@ -98,6 +98,7 @@ cmake \
     -DENABLE_SYMBOLIZER:BOOL=ON \
     -DENABLE_USDT:BOOL=ON \
     -DENABLE_XXCLASSLOADER:BOOL=ON \
+    -DENABLE_LTO:BOOL=ON \
     -B "$BUILD_DIR" .
 
 # --- Copy usdt header (required by build) ---
