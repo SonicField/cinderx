@@ -720,6 +720,9 @@ int get_current_code_flags(PyThreadState* tstate) {
 }
 
 int cinderx_code_watcher(PyCodeEvent event, PyCodeObject* co) {
+  if (jit::getConfig().state != jit::State::kRunning) {
+    return 0;
+  }
   switch (event) {
     case PY_CODE_EVENT_CREATE:
       break;
@@ -741,6 +744,9 @@ int cinderx_dict_watcher(
     PyObject* dict_obj,
     PyObject* key_obj,
     PyObject* new_value) {
+  if (jit::getConfig().state != jit::State::kRunning) {
+    return 0;
+  }
   JIT_DCHECK(PyDict_Check(dict_obj), "Expecting dict from dict watcher");
   BorrowedRef<PyDictObject> dict{dict_obj};
 
@@ -848,6 +854,9 @@ int cinderx_func_watcher(
 }
 
 int cinderx_type_watcher(PyTypeObject* type) {
+  if (jit::getConfig().state != jit::State::kRunning) {
+    return 0;
+  }
 #if PY_VERSION_HEX < 0x030C0000
   _PyShadow_TypeModified(type);
 #endif
