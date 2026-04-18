@@ -86,6 +86,20 @@ JIT_TESTS=(
     test_jit_speculative_inlining
     test_jit_support_instrumentation
     test_jit_type_annotations
+    test_binary_subscr_correctness
+    test_binary_subscr_deopt
+    test_diamond_self_identity
+    test_exception_handler_inlining
+    test_for_iter_list_mutation
+    test_for_iter_polymorphic_deopt
+    test_load_attr_instance_value
+    test_load_attr_module_inline
+    test_store_attr_instance_value
+    test_adversarial_emitcond
+    test_adversarial_multiop
+    test_adversarial_recompilation
+    test_adversarial_selective
+    test_adversarial_valuechain
 )
 
 RUNTIME_TESTS=(
