@@ -2133,7 +2133,6 @@ def _setup_benchmark_log():
 
 def cmd_jit(args):
     """Run JIT vs vanilla Python benchmarks (subprocess isolated)."""
-    log_path = _setup_benchmark_log()
     print("=" * 72)
     print("CinderX JIT vs Vanilla Python — Subprocess ABBA")
     print("=" * 72)
@@ -2141,7 +2140,6 @@ def cmd_jit(args):
     print(f"Reps:         {args.reps} (= {args.reps * 4} runs, "
           f"{args.reps * 2} per condition)")
     print(f"Compile mode: {args.compile}")
-    print(f"Log file:     {log_path}")
     print()
 
     # Determine Python commands
@@ -2165,9 +2163,6 @@ def cmd_jit(args):
     print(f"JIT ON:  {venv_python}")
     print(f"JIT OFF: {vanilla_python} -I")
     print()
-
-    print("Preflight checks:")
-    _preflight_checks(venv_cmd, vanilla_cmd)
 
     # ABBA runs
     on_results = []
@@ -2647,6 +2642,21 @@ Environment variables:
     if not args.subcommand:
         parser.print_help()
         sys.exit(1)
+
+    # Auto-save benchmark output
+    log_path = _setup_benchmark_log()
+
+    # Preflight checks (all modes)
+    venv_python = os.environ.get(
+        "CINDERX_PYTHON",
+        os.path.join(os.environ.get("CINDERX_VENV", ""), "bin/python3"),
+    )
+    vanilla_python = os.environ.get("VANILLA_PYTHON", "")
+    if not vanilla_python:
+        import shutil
+        vanilla_python = shutil.which("python3.12") or "python3.12"
+    print("Preflight checks:")
+    _preflight_checks([venv_python], [vanilla_python, "-I"])
 
     dispatch = {
         "abba": cmd_abba,
