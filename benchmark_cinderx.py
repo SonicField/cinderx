@@ -2097,7 +2097,7 @@ def _preflight_checks(jit_cmd, vanilla_cmd):
 
 
 def _setup_benchmark_log():
-    """Create a log file in speculation-benchmark/ with systematic naming."""
+    """Create a log file in benchmarks/ with systematic naming."""
     import datetime
     now = datetime.datetime.now()
     try:
@@ -2110,7 +2110,7 @@ def _setup_benchmark_log():
     arch = platform.machine()
     ts = now.strftime("%Y-%m-%d_%H%M%S")
     filename = f"{ts}_{git_hash}_{arch}_abba.txt"
-    log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "speculation-benchmark")
+    log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "benchmarks")
     os.makedirs(log_dir, exist_ok=True)
     log_path = os.path.join(log_dir, filename)
 
