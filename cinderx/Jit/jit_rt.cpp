@@ -22,6 +22,18 @@
 #include "cinderx/Jit/frame.h"
 #include "cinderx/Jit/generators_rt.h"
 
+// G2: C-level type+state check for kInvokeIterNext LIR fast path.
+// Checks if iterator is a suspended JitGen generator.
+int JITRT_G2CheckFastPath(PyObject* iterator) {
+  if (Py_TYPE(iterator) == cinderx::getModuleState()->genType()) {
+    auto* gen = reinterpret_cast<PyGenObject*>(iterator);
+    if (gen->gi_frame_state == FRAME_SUSPENDED) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 // Forward declarations for generator fast-path (Approach A-lite).
 // Defined in generators_rt.cpp inside namespace jit.
 namespace jit {
