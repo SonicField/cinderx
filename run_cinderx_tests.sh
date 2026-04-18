@@ -81,6 +81,7 @@ JIT_TESTS=(
     test_jit_inline_exception
     test_jit_kwarg_fastpath
     test_jit_lazy_init
+    test_jit_yield_from
     test_jit_specialised_opcode_deopt
     test_jit_speculative_inlining
     test_jit_support_instrumentation
