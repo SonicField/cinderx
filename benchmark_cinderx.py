@@ -2416,10 +2416,7 @@ def cmd_target(args):
             "bin/python3",
         ),
     )
-    vanilla_python = os.environ.get("VANILLA_PYTHON", "")
-    if not vanilla_python:
-        import shutil
-        vanilla_python = shutil.which("python3.12") or "python3.12"
+    vanilla_python = os.environ["VANILLA_PYTHON"]
 
     venv_cmd = [venv_python]
     vanilla_cmd = [vanilla_python, "-I"]
