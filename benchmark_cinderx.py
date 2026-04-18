@@ -2096,8 +2096,44 @@ def _preflight_checks(jit_cmd, vanilla_cmd):
         print("  All preflight checks passed.\n")
 
 
+def _setup_benchmark_log():
+    """Create a log file in speculation-benchmark/ with systematic naming."""
+    import datetime
+    now = datetime.datetime.now()
+    try:
+        git_hash = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.strip() or "unknown"
+    except Exception:
+        git_hash = "unknown"
+    arch = platform.machine()
+    ts = now.strftime("%Y-%m-%d_%H%M%S")
+    filename = f"{ts}_{git_hash}_{arch}_abba.txt"
+    log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "speculation-benchmark")
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(log_dir, filename)
+
+    class TeeWriter:
+        def __init__(self, original, logfile):
+            self.original = original
+            self.logfile = logfile
+        def write(self, data):
+            self.original.write(data)
+            self.logfile.write(data)
+        def flush(self):
+            self.original.flush()
+            self.logfile.flush()
+
+    logfile = open(log_path, "w")
+    tee = TeeWriter(sys.stdout, logfile)
+    sys.stdout = tee
+    return log_path
+
+
 def cmd_jit(args):
     """Run JIT vs vanilla Python benchmarks (subprocess isolated)."""
+    log_path = _setup_benchmark_log()
     print("=" * 72)
     print("CinderX JIT vs Vanilla Python — Subprocess ABBA")
     print("=" * 72)
@@ -2105,6 +2141,7 @@ def cmd_jit(args):
     print(f"Reps:         {args.reps} (= {args.reps * 4} runs, "
           f"{args.reps * 2} per condition)")
     print(f"Compile mode: {args.compile}")
+    print(f"Log file:     {log_path}")
     print()
 
     # Determine Python commands
