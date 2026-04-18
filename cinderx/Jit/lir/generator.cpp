@@ -2895,21 +2895,46 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
         break;
       }
       case Opcode::kInvokeIterNext: {
-        // G2: Type+state check via C helper, fast/slow path with Phi merge.
+        // G2: Inline type+state check with LIR Phi for output merge.
         auto instr = static_cast<const InvokeIterNext*>(&i);
+        auto* iter_reg = bbb.getDefInstr(instr->GetOperand(0));
 
         auto* fast_path = bbb.allocateBlock();
         auto* slow_path = bbb.allocateBlock();
         slow_path->setSection(codegen::CodeSection::kCold);
         auto* done = bbb.allocateBlock();
 
-        // Call C helper to check type+state (replaces inline LIR checks)
-        auto* check_tmp = const_cast<hir::Function*>(GetHIRFunction())
-            ->env.AllocateRegister();
-        auto* check_result = bbb.appendCallInstruction(
-            check_tmp, JITRT_G2CheckFastPath, instr->GetOperand(0));
+        // Type check: Py_TYPE(iter) == JitGen type
+        constexpr int32_t kObTypeOffset = offsetof(PyObject, ob_type);
+        auto* iter_type = bbb.appendInstr(
+            Instruction::kMove, OutVReg{}, Ind{iter_reg, kObTypeOffset});
+        auto* gen_type = bbb.appendInstr(
+            Instruction::kMove, OutVReg{},
+            Imm{reinterpret_cast<uint64_t>(
+                static_cast<PyTypeObject*>(
+                    cinderx::getModuleState()->genType())),
+                DataType::kObject});
+        auto* type_ok = bbb.appendInstr(
+            Instruction::kEqual, OutVReg{OperandBase::k8bit},
+            iter_type, gen_type);
+
+        auto* type_ok_block = bbb.allocateBlock();
         bbb.appendBranch(
-            Instruction::kCondBranch, check_result, fast_path, slow_path);
+            Instruction::kCondBranch, type_ok, type_ok_block, slow_path);
+
+        // State check: gen->gi_frame_state == FRAME_SUSPENDED
+        bbb.switchBlock(type_ok_block);
+        constexpr int32_t kFrameStateOffset =
+            offsetof(PyGenObject, gi_frame_state);
+        auto* frame_state = bbb.appendInstr(
+            Instruction::kMovSX, OutVReg{OperandBase::k32bit},
+            Ind{iter_reg, kFrameStateOffset, OperandBase::k8bit});
+        auto* is_suspended = bbb.appendInstr(
+            Instruction::kEqual, OutVReg{OperandBase::k8bit},
+            frame_state,
+            Imm{static_cast<uint64_t>(FRAME_SUSPENDED)});
+        bbb.appendBranch(
+            Instruction::kCondBranch, is_suspended, fast_path, slow_path);
 
         // Fast path: call JITRT_ResumeJitGen → fast_output
         bbb.switchBlock(fast_path);
@@ -3633,21 +3658,58 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
         break;
       }
       case Opcode::kSend: {
+        // G2: Inline type+state+value check for inner delegation.
         auto& hir_instr = static_cast<const Send&>(i);
+        auto* gen_reg = bbb.getDefInstr(hir_instr.GetOperand(0));
+        auto* val_reg = bbb.getDefInstr(hir_instr.GetOperand(1));
 
         auto* fast_path = bbb.allocateBlock();
         auto* slow_path = bbb.allocateBlock();
         slow_path->setSection(codegen::CodeSection::kCold);
         auto* done = bbb.allocateBlock();
 
-        // Call C helper to check type+state+value
-        auto* check_tmp = const_cast<hir::Function*>(GetHIRFunction())
-            ->env.AllocateRegister();
-        auto* check_result = bbb.appendCallInstruction(
-            check_tmp, JITRT_G2CheckSendFastPath,
-            hir_instr.GetOperand(0), hir_instr.GetOperand(1));
+        // Type check: is gen a JitGen?
+        constexpr int32_t kObTypeOffset = offsetof(PyObject, ob_type);
+        auto* gen_type = bbb.appendInstr(
+            Instruction::kMove, OutVReg{}, Ind{gen_reg, kObTypeOffset});
+        auto* jitgen_type = bbb.appendInstr(
+            Instruction::kMove, OutVReg{},
+            Imm{reinterpret_cast<uint64_t>(
+                static_cast<PyTypeObject*>(
+                    cinderx::getModuleState()->genType())),
+                DataType::kObject});
+        auto* type_ok = bbb.appendInstr(
+            Instruction::kEqual, OutVReg{OperandBase::k8bit},
+            gen_type, jitgen_type);
+
+        auto* type_ok_block = bbb.allocateBlock();
         bbb.appendBranch(
-            Instruction::kCondBranch, check_result, fast_path, slow_path);
+            Instruction::kCondBranch, type_ok, type_ok_block, slow_path);
+
+        // State check: FRAME_SUSPENDED
+        bbb.switchBlock(type_ok_block);
+        constexpr int32_t kFrameStateOffset =
+            offsetof(PyGenObject, gi_frame_state);
+        auto* frame_state = bbb.appendInstr(
+            Instruction::kMovSX, OutVReg{OperandBase::k32bit},
+            Ind{gen_reg, kFrameStateOffset, OperandBase::k8bit});
+        auto* is_suspended = bbb.appendInstr(
+            Instruction::kEqual, OutVReg{OperandBase::k8bit},
+            frame_state,
+            Imm{static_cast<uint64_t>(FRAME_SUSPENDED)});
+
+        auto* state_ok_block = bbb.allocateBlock();
+        bbb.appendBranch(
+            Instruction::kCondBranch, is_suspended, state_ok_block, slow_path);
+
+        // Value check: v == Py_None (only fast-path for next(), not send(value))
+        bbb.switchBlock(state_ok_block);
+        auto* is_none = bbb.appendInstr(
+            Instruction::kEqual, OutVReg{OperandBase::k8bit},
+            val_reg,
+            Imm{reinterpret_cast<uint64_t>(Py_None), DataType::kObject});
+        bbb.appendBranch(
+            Instruction::kCondBranch, is_none, fast_path, slow_path);
 
         // Fast path: call JITRT_ResumeJitGenForSend(gen)
         bbb.switchBlock(fast_path);

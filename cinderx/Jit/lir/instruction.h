@@ -299,7 +299,8 @@ class Instruction {
           first_arg.base,
           first_arg.index,
           first_arg.multiplier,
-          first_arg.offset);
+          first_arg.offset)
+          ->setDataType(first_arg.data_type);
     } else if constexpr (std::is_same_v<FT, OutPhyReg>) {
       output()->setPhyRegister(first_arg.value);
       output()->setDataType(first_arg.data_type);
@@ -325,6 +326,7 @@ class Instruction {
           first_arg.index,
           first_arg.multiplier,
           first_arg.offset);
+      output()->setDataType(first_arg.data_type);
     } else {
       static_assert(!sizeof(FT*), "Bad argument type.");
     }
