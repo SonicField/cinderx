@@ -6,9 +6,12 @@ Verifies that yield_from delegation:
 - Handles generator.throw() through delegation
 - Handles generator.close() through delegation
 - Works with nested yield_from chains
+- G2 fast paths activate (not dead code)
 """
 import cinderjit
 import unittest
+
+HAS_FAST_PATH_STATS = hasattr(cinderjit, 'get_generator_fast_path_stats')
 
 
 class TestYieldFrom(unittest.TestCase):
@@ -160,6 +163,44 @@ class TestYieldFrom(unittest.TestCase):
             list(outer())
         self.assertTrue(cinderjit.is_jit_compiled(outer))
         self.assertEqual(list(outer()), [1, 42])
+
+    @unittest.skipUnless(HAS_FAST_PATH_STATS, "requires counter API (48f95bd5)")
+    def test_invoke_iter_next_fast_path_fires(self):
+        def gen():
+            yield 1
+            yield 2
+            yield 3
+
+        for _ in range(1200):
+            list(gen())
+        self.assertTrue(cinderjit.is_jit_compiled(gen))
+
+        cinderjit.clear_generator_fast_path_stats()
+        for _ in range(100):
+            list(gen())
+        stats = cinderjit.get_generator_fast_path_stats()
+        self.assertGreater(stats['iter_fast'], 0,
+            "kInvokeIterNext fast path did not fire — may be dead code")
+
+    @unittest.skipUnless(HAS_FAST_PATH_STATS, "requires counter API (48f95bd5)")
+    def test_send_fast_path_fires(self):
+        def inner():
+            yield 1
+            yield 2
+
+        def outer():
+            yield from inner()
+
+        for _ in range(1200):
+            list(outer())
+        self.assertTrue(cinderjit.is_jit_compiled(outer))
+
+        cinderjit.clear_generator_fast_path_stats()
+        for _ in range(100):
+            list(outer())
+        stats = cinderjit.get_generator_fast_path_stats()
+        self.assertGreater(stats['send_fast'], 0,
+            "kSend fast path did not fire — may be dead code")
 
 
 if __name__ == '__main__':
