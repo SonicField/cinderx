@@ -373,17 +373,8 @@ void InlineFunctionCalls::Run(Function& irfunc) {
         irfunc.fullname);
     return;
   }
-  if constexpr (PY_VERSION_HEX >= 0x030C0000) {
-    for (int i = 0; i < irfunc.code->co_nlocalsplus; i++) {
-      if (_PyLocals_GetKind(irfunc.code->co_localspluskinds, i) & CO_FAST_FREE) {
-        LOG_INLINER(
-            "Refusing to inline functions into {}: caller has freevars",
-            irfunc.fullname);
-        return;
-      }
-    }
-  } else {
-    if (PyTuple_GET_SIZE(PyCode_GetFreevars(irfunc.code)) > 0) {
+  for (int i = 0; i < irfunc.code->co_nlocalsplus; i++) {
+    if (_PyLocals_GetKind(irfunc.code->co_localspluskinds, i) & CO_FAST_FREE) {
       LOG_INLINER(
           "Refusing to inline functions into {}: caller has freevars",
           irfunc.fullname);
