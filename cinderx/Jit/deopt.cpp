@@ -57,17 +57,13 @@ hir::ValueKind deoptValueKind(hir::Type type) {
   // works fine at runtime and a proper fix likely involves reworking HIR's
   // support for constant values, so we paper over the issue here for the
   // moment.
-  if (type.couldBe(jit::hir::TCUnsigned | jit::hir::TCSigned)) {
+  if (type.couldBe(jit::hir::TCUnsigned | jit::hir::TCInt64)) {
     if (type <= (jit::hir::TCUnsigned | jit::hir::TNullptr)) {
       return jit::hir::ValueKind::kUnsigned;
     }
-    if (type <= (jit::hir::TCSigned | jit::hir::TNullptr)) {
+    if (type <= (jit::hir::TCInt64 | jit::hir::TNullptr)) {
       return jit::hir::ValueKind::kSigned;
     }
-    // After Phi unboxing, a register may carry CInt64 with a union type
-    // (e.g., CInt64|ImmortalLongExact from Phi merging an unboxed loop-back
-    // with a constant initial value). Accept only CInt64-containing unions
-    // where the type is consistent with integer values (safe to re-box).
     if (type.couldBe(jit::hir::TCInt64)) {
       JIT_DCHECK(
           type <= (jit::hir::TCInt64 | jit::hir::TLong | jit::hir::TNullptr),
