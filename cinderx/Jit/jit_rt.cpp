@@ -7,6 +7,7 @@
 #include "internal/pycore_call.h"
 #include "internal/pycore_ceval.h"
 #include "internal/pycore_object.h"
+#include "internal/pycore_range.h"
 #include "internal/pycore_pyerrors.h"
 #include "internal/pycore_pystate.h"
 
@@ -2647,6 +2648,18 @@ PyObject* JITRT_InvokeIterNext(PyObject* iterator) {
   return &JITRT_IterDoneSentinel;
 }
 
+
+PyObject* JITRT_RangeIterNext(PyObject* iterator) {
+  _PyRangeIterObject* r = reinterpret_cast<_PyRangeIterObject*>(iterator);
+  if (r->len <= 0) {
+    Py_INCREF(&JITRT_IterDoneSentinel);
+    return &JITRT_IterDoneSentinel;
+  }
+  long value = r->start;
+  r->start = value + r->step;
+  r->len--;
+  return PyLong_FromLong(value);
+}
 
 // JITRT_BuiltinNext: Fast-path wrapper for builtin next().
 // Routes through JITRT_InvokeIterNext which has a G1 fast path for JIT

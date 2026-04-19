@@ -638,6 +638,8 @@ extern PyObject JITRT_IterDoneSentinel;
  */
 PyObject* JITRT_InvokeIterNext(PyObject* iterator);
 
+PyObject* JITRT_RangeIterNext(PyObject* iterator);
+
 // G2: Minimal resume helper for suspended JitGen generators.
 // Called after type+state checks pass. Does frame linkage + resumeEntry.
 PyObject* JITRT_ResumeJitGen(PyObject* iterator);

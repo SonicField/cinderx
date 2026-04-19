@@ -2237,26 +2237,28 @@ Register* simplifyInstr(Env& env, const Instr* instr) {
       return nullptr;
     }
     case Opcode::kInvokeIterNext: {
-      // C->C inlining: skip JitGen check for known non-generator iterators
       Register* iterator = instr->GetOperand(0);
       PyTypeObject* iter_type = iterator->type().runtimePyType();
-      if (iter_type != nullptr &&
-          ((jit::g_range_iterator_type != nullptr &&
-            iter_type == jit::g_range_iterator_type) ||
-           (jit::g_list_iterator_type != nullptr &&
-            iter_type == jit::g_list_iterator_type) ||
-           (jit::g_tuple_iterator_type != nullptr &&
-            iter_type == jit::g_tuple_iterator_type))) {
-        // Known non-generator iterator: use direct JITRT_InvokeIterNext
-        // which still handles sentinel conversion but skips the JitGen check
-        auto* iter_next = static_cast<const InvokeIterNext*>(instr);
-        auto call = env.emitRawInstr<CallStatic>(
-            1,
-            env.func.env.AllocateRegister(),
-            reinterpret_cast<void*>(JITRT_InvokeIterNext),
-            TObject);
-        call->SetOperand(0, iterator);
-        return call->output();
+      if (iter_type != nullptr) {
+        void* target = nullptr;
+        if (jit::g_range_iterator_type != nullptr &&
+            iter_type == jit::g_range_iterator_type) {
+          target = reinterpret_cast<void*>(JITRT_RangeIterNext);
+        } else if ((jit::g_list_iterator_type != nullptr &&
+                    iter_type == jit::g_list_iterator_type) ||
+                   (jit::g_tuple_iterator_type != nullptr &&
+                    iter_type == jit::g_tuple_iterator_type)) {
+          target = reinterpret_cast<void*>(JITRT_InvokeIterNext);
+        }
+        if (target != nullptr) {
+          auto call = env.emitRawInstr<CallStatic>(
+              1,
+              env.func.env.AllocateRegister(),
+              target,
+              TObject);
+          call->SetOperand(0, iterator);
+          return call->output();
+        }
       }
       return nullptr;
     }
