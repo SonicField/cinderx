@@ -645,6 +645,22 @@ bool HIRBuilder::getSimpleExceptInfo(
     return false;
   }
 
+  // Scan except body for YIELD_VALUE — inline match_block lacks
+  // yield/resume infrastructure, so deopt at YIELD_VALUE offset crashes.
+  {
+    BytecodeInstruction scan{code_, except_body};
+    while (scan.baseOffset().asIndex().value() <
+           static_cast<int>(countIndices(code_))) {
+      if (scan.opcode() == YIELD_VALUE) {
+        return false;
+      }
+      if (scan.isTerminator()) {
+        break;
+      }
+      scan = scan.nextInstr();
+    }
+  }
+
   info.name_idx = name_idx;
   info.exc_type = exc_type;
   info.except_body = except_body;
