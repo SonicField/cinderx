@@ -700,10 +700,21 @@ void HIRBuilder::emitInlineExceptionMatch(
   {
     TranslationContext exc_tc{exc_match_block, tc.frame};
 
-    // Decref stack items above handler depth.
+    // Pop stack items above handler depth. Only Decref values that are
+    // NOT aliased to localsplus — LOAD_FAST pushes the same register
+    // without Incref, so Decref'ing it would over-decrement.
     while (static_cast<int>(exc_tc.frame.stack.size()) > handler.depth) {
       Register* excess = exc_tc.frame.stack.pop();
-      exc_tc.emit<Decref>(excess);
+      bool is_local = false;
+      for (auto* reg : exc_tc.frame.localsplus) {
+        if (reg == excess) {
+          is_local = true;
+          break;
+        }
+      }
+      if (!is_local) {
+        exc_tc.emit<Decref>(excess);
+      }
     }
 
     // Load exception type as a constant (resolved at compile time).
@@ -724,14 +735,6 @@ void HIRBuilder::emitInlineExceptionMatch(
     exc_tc.emit<CondBranch>(match_result, match_block, deopt_block);
 
     // === Match block: emit except body with deopt at loop back-edge ===
-    // WARNING: Do NOT Branch to the loop header from here. The root cause
-    // is adding a new predecessor to an already-finalised loop header —
-    // its Phi nodes are fixed and SSAify cannot reconcile mismatched
-    // registers from the new edge. Two approaches failed:
-    //   1. Inline Branch to loop header (328038e4, reverted c193d3d2)
-    //   2. Queue-based emission via pending_b2_blocks_ (session 8)
-    // Both crash because JUMP_BACKWARD targets the loop header. The fix
-    // requires merge block insertion or two-pass block ordering.
     {
       TranslationContext match_tc{match_block, exc_tc.frame};
       match_tc.frame.cur_instr_offs = info.except_body;
