@@ -214,6 +214,8 @@ class LoadAttrCache : public AttributeCache {
 
   PyObject* doInvoke(PyObject* obj, PyObject* name);
   PyObject* invokeSlowPath(PyObject* obj, PyObject* name);
+
+  bool skip_cache_{false};
 };
 
 // A cache for LoadAttr instructions where we expect the receiver to be a type

@@ -970,6 +970,9 @@ StoreAttrCache::invokeSlowPath(PyObject* obj, PyObject* name, PyObject* value) {
 
 PyObject*
 LoadAttrCache::invoke(LoadAttrCache* cache, PyObject* obj, PyObject* name) {
+  if (cache->skip_cache_) {
+    return Ref<>::steal(PyObject_GetAttr(obj, name)).release();
+  }
   // Inline the fast path: check first cache entry directly.
   // This avoids one layer of function call indirection.
   PyTypeObject* tp = Py_TYPE(obj);
@@ -1021,6 +1024,8 @@ PyObject* __attribute__((noinline)) LoadAttrCache::invokeSlowPath(
   BorrowedRef<PyTypeObject> type{Py_TYPE(obj)};
   if (type->tp_getattro == PyObject_GenericGetAttr) {
     fill(type, name);
+  } else {
+    skip_cache_ = true;
   }
 
   return result.release();
