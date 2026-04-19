@@ -1494,6 +1494,11 @@ Register* simplifyLoadAttrGenericDescriptor(Env& env, const DescrInfo& info) {
 }
 
 Register* simplifyLoadAttrSpecial(Env& env, const LoadAttrSpecial* instr) {
+  BorrowedRef<> attr_id{instr->id()};
+  if (attr_id == &_Py_ID(__enter__) || attr_id == &_Py_ID(__exit__)) {
+    return nullptr;
+  }
+
   Register* receiver = instr->GetOperand(0);
   Type type = receiver->type();
   BorrowedRef<PyTypeObject> py_type{type.runtimePyType()};
