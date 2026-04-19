@@ -154,9 +154,6 @@ bool canInline(Function& caller, AbstractCall* call_instr) {
   if (code->co_flags & kCoFlagsAnyGenerator) {
     return fail(InlineFailureType::kIsGenerator);
   }
-#if PY_VERSION_HEX >= 0x030C0000
-  // Avoid the allocation that can happen in
-  // PyCode_GetCellvars and PyCode_GetFreevars
   for (int offset = 0; offset < code->co_nlocalsplus; offset++) {
     _PyLocals_Kind k = _PyLocals_GetKind(code->co_localspluskinds, offset);
     if (k & CO_FAST_CELL) {
@@ -165,16 +162,6 @@ bool canInline(Function& caller, AbstractCall* call_instr) {
       return fail(InlineFailureType::kHasFreevars);
     }
   }
-#else
-  Py_ssize_t ncellvars = PyTuple_GET_SIZE(PyCode_GetCellvars(code));
-  if (ncellvars > 0) {
-    return fail(InlineFailureType::kHasCellvars);
-  }
-  Py_ssize_t nfreevars = PyTuple_GET_SIZE(PyCode_GetFreevars(code));
-  if (nfreevars > 0) {
-    return fail(InlineFailureType::kHasFreevars);
-  }
-#endif
 
   if constexpr (PY_VERSION_HEX >= 0x030C0000) {
     // This requires access to the frame so we can't inline it.
