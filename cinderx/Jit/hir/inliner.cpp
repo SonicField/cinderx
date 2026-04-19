@@ -373,6 +373,12 @@ void InlineFunctionCalls::Run(Function& irfunc) {
         irfunc.fullname);
     return;
   }
+  if (PyTuple_GET_SIZE(PyCode_GetFreevars(irfunc.code)) > 0) {
+    LOG_INLINER(
+        "Refusing to inline functions into {}: caller has freevars",
+        irfunc.fullname);
+    return;
+  }
 
   // Scan through all function calls in `irfunc` and mark the ones that are
   // suitable for inlining.
