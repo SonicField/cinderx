@@ -651,10 +651,13 @@ bool HIRBuilder::getSimpleExceptInfo(
     BytecodeInstruction scan{code_, except_body};
     while (scan.baseOffset().asIndex().value() <
            static_cast<int>(countIndices(code_))) {
-      if (scan.opcode() == YIELD_VALUE) {
+      int op = scan.opcode();
+      if (op == YIELD_VALUE) {
         return false;
       }
-      if (scan.isTerminator()) {
+      if (op == RETURN_VALUE || op == RETURN_CONST ||
+          op == JUMP_BACKWARD || op == JUMP_BACKWARD_NO_INTERRUPT ||
+          op == JUMP_FORWARD || op == RERAISE || op == RAISE_VARARGS) {
         break;
       }
       scan = scan.nextInstr();
