@@ -72,7 +72,7 @@ No single extractable component — the overhead is the sum of many small per-ca
 
 **Location:** `cinderx/Jit/code_allocator.cpp:191-194` and `:323-327`
 
-Both `releaseCode()` implementations are no-ops with `TODO(T233607793)`. JIT-compiled code is allocated but never freed, even when functions are recompiled or garbage collected.
+Both `releaseCode()` implementations are no-ops (marked TODO). JIT-compiled code is allocated but never freed, even when functions are recompiled or garbage collected.
 
 In short-lived processes this is harmless. In long-running servers, JIT code memory accumulates indefinitely.
 
@@ -101,12 +101,12 @@ The deopt value reconstruction code accepts any type containing `TCSigned` for r
 **Location:** `cinderx/Jit/hir/simplify.cpp` (6 sites), `builder.cpp` (2 sites)
 
 Under free-threading (`Py_GIL_DISABLED`), these optimisations are compiled out:
-- `simplifyLoadAttr` (TODO T255262756)
-- `simplifyLoadMethod` (TODO T255263721)
+- `simplifyLoadAttr`
+- `simplifyLoadMethod`
 - `simplifyLoadAttrSpecial`
-- `emitGetLengthInt64` for list/dict/set (TODO T255264007)
-- List/tuple binary operations (TODO T255264263)
-- UNPACK_SEQUENCE fast paths (TODO T255264577)
+- `emitGetLengthInt64` for list/dict/set
+- List/tuple binary operations
+- UNPACK_SEQUENCE fast paths
 
 Not blocking the current branch (runs without GIL-disabled) but represents significant missing optimisations for free-threaded builds.
 
