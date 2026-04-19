@@ -100,6 +100,8 @@ JIT_TESTS=(
     test_adversarial_recompilation
     test_adversarial_selective
     test_adversarial_valuechain
+    test_double_binary_op
+    test_jit_exception_edge_cases
 )
 
 RUNTIME_TESTS=(

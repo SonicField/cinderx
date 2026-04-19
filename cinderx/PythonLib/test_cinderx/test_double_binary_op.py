@@ -3,8 +3,8 @@
 Verifies that DoubleBinaryOp correctly handles kModulo and kFloorDivide
 after the fix in generator.cpp. Tests both force_compile and auto-JIT paths.
 """
-import sys
 import math
+import unittest
 
 try:
     import cinderjit
@@ -12,116 +12,94 @@ try:
 except ImportError:
     HAS_CINDERJIT = False
 
-def double_mod(a, b):
-    """Float modulo — triggers DoubleBinaryOp kModulo when JIT-compiled."""
-    return a % b
-
-def double_floordiv(a, b):
-    """Float floor division — triggers DoubleBinaryOp kFloorDivide."""
-    return a // b
-
-def double_combined(a, b):
-    """Both ops in one function."""
-    return (a % b, a // b)
-
-# Test cases: (a, b, expected_mod, expected_floordiv)
 TEST_CASES = [
     (7.5, 2.5, 0.0, 3.0),
     (10.0, 3.0, 1.0, 3.0),
-    (-10.0, 3.0, 2.0, -4.0),      # Python: mod has same sign as divisor
-    (10.0, -3.0, -2.0, -4.0),     # Python: mod has same sign as divisor
-    (-10.0, -3.0, -1.0, 3.0),     # Negative divisor
+    (-10.0, 3.0, 2.0, -4.0),
+    (10.0, -3.0, -2.0, -4.0),
+    (-10.0, -3.0, -1.0, 3.0),
     (1.5, 0.5, 0.0, 3.0),
     (2.5, 1.0, 0.5, 2.0),
     (0.0, 1.0, 0.0, 0.0),
-    (1e-10, 1.0, 1e-10, 0.0),     # Very small numerator
-    (1e10, 3.0, 1.0, 3333333333.0),  # Large numerator
+    (1e-10, 1.0, 1e-10, 0.0),
+    (1e10, 3.0, 1.0, 3333333333.0),
 ]
 
-passed = 0
-failed = 0
 
-print("=== Double BinaryOp Test Suite ===")
-print()
+def double_mod(a, b):
+    return a % b
 
-# Test 1: Correctness without JIT
-print("--- Test 1: Interpreter correctness baseline ---")
-for a, b, exp_mod, exp_floordiv in TEST_CASES:
-    got_mod = double_mod(a, b)
-    got_fdiv = double_floordiv(a, b)
-    mod_ok = math.isclose(got_mod, exp_mod, rel_tol=1e-9, abs_tol=1e-15)
-    fdiv_ok = math.isclose(got_fdiv, exp_floordiv, rel_tol=1e-9, abs_tol=1e-15)
-    if mod_ok and fdiv_ok:
-        passed += 1
-    else:
-        failed += 1
-        if not mod_ok:
-            print(f"  FAIL: {a} % {b} = {got_mod}, expected {exp_mod}")
-        if not fdiv_ok:
-            print(f"  FAIL: {a} // {b} = {got_fdiv}, expected {exp_floordiv}")
 
-print(f"  {passed} passed, {failed} failed")
-print()
+def double_floordiv(a, b):
+    return a // b
 
-# Test 2: Force compile (may not trigger DoubleBinaryOp — uses generic path)
-if HAS_CINDERJIT:
-    print("--- Test 2: force_compile path ---")
-    try:
+
+def double_combined(a, b):
+    return (a % b, a // b)
+
+
+class TestDoubleBinaryOpInterpreter(unittest.TestCase):
+    """Verify correctness without JIT compilation."""
+
+    def test_mod(self):
+        for a, b, exp_mod, _ in TEST_CASES:
+            with self.subTest(a=a, b=b):
+                self.assertTrue(
+                    math.isclose(double_mod(a, b), exp_mod, rel_tol=1e-9, abs_tol=1e-15),
+                    f"{a} % {b} = {double_mod(a, b)}, expected {exp_mod}",
+                )
+
+    def test_floordiv(self):
+        for a, b, _, exp_fdiv in TEST_CASES:
+            with self.subTest(a=a, b=b):
+                self.assertTrue(
+                    math.isclose(double_floordiv(a, b), exp_fdiv, rel_tol=1e-9, abs_tol=1e-15),
+                    f"{a} // {b} = {double_floordiv(a, b)}, expected {exp_fdiv}",
+                )
+
+
+@unittest.skipUnless(HAS_CINDERJIT, "CinderX JIT not available")
+class TestDoubleBinaryOpJIT(unittest.TestCase):
+    """Verify correctness after force_compile."""
+
+    @classmethod
+    def setUpClass(cls):
         cinderjit.force_compile(double_mod)
         cinderjit.force_compile(double_floordiv)
-        print(f"  double_mod compiled: {cinderjit.is_jit_compiled(double_mod)}")
-        print(f"  double_floordiv compiled: {cinderjit.is_jit_compiled(double_floordiv)}")
-
-        for a, b, exp_mod, exp_floordiv in TEST_CASES:
-            got_mod = double_mod(a, b)
-            got_fdiv = double_floordiv(a, b)
-            mod_ok = math.isclose(got_mod, exp_mod, rel_tol=1e-9, abs_tol=1e-15)
-            fdiv_ok = math.isclose(got_fdiv, exp_floordiv, rel_tol=1e-9, abs_tol=1e-15)
-            if mod_ok and fdiv_ok:
-                passed += 1
-            else:
-                failed += 1
-                if not mod_ok:
-                    print(f"  FAIL: {a} % {b} = {got_mod}, expected {exp_mod}")
-                if not fdiv_ok:
-                    print(f"  FAIL: {a} // {b} = {got_fdiv}, expected {exp_floordiv}")
-
-        print(f"  {passed} passed (cumulative), {failed} failed")
-    except Exception as e:
-        print(f"  ERROR: {e}")
-        failed += 1
-    print()
-
-    # Test 3: Force compile combined function
-    print("--- Test 3: Combined ops in single function ---")
-    try:
         cinderjit.force_compile(double_combined)
-        for a, b, exp_mod, exp_floordiv in TEST_CASES[:5]:
-            got = double_combined(a, b)
-            mod_ok = math.isclose(got[0], exp_mod, rel_tol=1e-9, abs_tol=1e-15)
-            fdiv_ok = math.isclose(got[1], exp_floordiv, rel_tol=1e-9, abs_tol=1e-15)
-            if mod_ok and fdiv_ok:
-                passed += 1
-            else:
-                failed += 1
-                print(f"  FAIL: ({a} % {b}, {a} // {b}) = {got}, "
-                      f"expected ({exp_mod}, {exp_floordiv})")
-        print(f"  {passed} passed (cumulative), {failed} failed")
-    except Exception as e:
-        print(f"  ERROR: {e}")
-        failed += 1
-    print()
 
-else:
-    print("--- CinderX not available, skipping JIT tests ---")
-    print()
+    def test_mod_jit(self):
+        self.assertTrue(cinderjit.is_jit_compiled(double_mod))
+        for a, b, exp_mod, _ in TEST_CASES:
+            with self.subTest(a=a, b=b):
+                self.assertTrue(
+                    math.isclose(double_mod(a, b), exp_mod, rel_tol=1e-9, abs_tol=1e-15),
+                    f"{a} % {b} = {double_mod(a, b)}, expected {exp_mod}",
+                )
 
-# Summary
-print("=== SUMMARY ===")
-print(f"Total: {passed} passed, {failed} failed")
-if failed == 0:
-    print("ALL TESTS PASSED")
-    sys.exit(0)
-else:
-    print("SOME TESTS FAILED")
-    sys.exit(1)
+    def test_floordiv_jit(self):
+        self.assertTrue(cinderjit.is_jit_compiled(double_floordiv))
+        for a, b, _, exp_fdiv in TEST_CASES:
+            with self.subTest(a=a, b=b):
+                self.assertTrue(
+                    math.isclose(double_floordiv(a, b), exp_fdiv, rel_tol=1e-9, abs_tol=1e-15),
+                    f"{a} // {b} = {double_floordiv(a, b)}, expected {exp_fdiv}",
+                )
+
+    def test_combined_jit(self):
+        self.assertTrue(cinderjit.is_jit_compiled(double_combined))
+        for a, b, exp_mod, exp_fdiv in TEST_CASES[:5]:
+            with self.subTest(a=a, b=b):
+                got = double_combined(a, b)
+                self.assertTrue(
+                    math.isclose(got[0], exp_mod, rel_tol=1e-9, abs_tol=1e-15),
+                    f"({a} % {b}) in combined = {got[0]}, expected {exp_mod}",
+                )
+                self.assertTrue(
+                    math.isclose(got[1], exp_fdiv, rel_tol=1e-9, abs_tol=1e-15),
+                    f"({a} // {b}) in combined = {got[1]}, expected {exp_fdiv}",
+                )
+
+
+if __name__ == "__main__":
+    unittest.main()
