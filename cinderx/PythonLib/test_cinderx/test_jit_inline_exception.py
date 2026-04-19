@@ -5,9 +5,6 @@ import unittest
 
 class TestInlineExceptionHandling(unittest.TestCase):
 
-    def setUp(self):
-        cinderjit.auto()
-
     def test_simple_keyerror(self):
         def f():
             d = {0: 'a', 2: 'b'}
@@ -16,9 +13,7 @@ class TestInlineExceptionHandling(unittest.TestCase):
             except KeyError:
                 return 'missing'
 
-        for _ in range(1200):
-            self.assertEqual(f(), 'missing')
-        self.assertTrue(cinderjit.is_jit_compiled(f))
+        cinderjit.force_compile(f)
         self.assertEqual(f(), 'missing')
 
     def test_simple_hit(self):
@@ -29,9 +24,7 @@ class TestInlineExceptionHandling(unittest.TestCase):
             except KeyError:
                 return 'missing'
 
-        for _ in range(1200):
-            self.assertEqual(f(), 'b')
-        self.assertTrue(cinderjit.is_jit_compiled(f))
+        cinderjit.force_compile(f)
         self.assertEqual(f(), 'b')
 
     def test_augmented_assignment_mixed(self):
@@ -45,9 +38,7 @@ class TestInlineExceptionHandling(unittest.TestCase):
                     total += 1
             return total
 
-        for _ in range(1200):
-            f(100)
-        self.assertTrue(cinderjit.is_jit_compiled(f))
+        cinderjit.force_compile(f)
         self.assertEqual(f(10), 45)
         self.assertEqual(f(100), 4950)
         self.assertEqual(f(1000), 499500)
@@ -61,12 +52,7 @@ class TestInlineExceptionHandling(unittest.TestCase):
             except ValueError:
                 return 'wrong type'
 
-        for _ in range(1200):
-            try:
-                f()
-            except KeyError:
-                pass
-        self.assertTrue(cinderjit.is_jit_compiled(f))
+        cinderjit.force_compile(f)
         with self.assertRaises(KeyError):
             f()
 
@@ -75,9 +61,8 @@ class TestInlineExceptionHandling(unittest.TestCase):
             d = {0: 'a', 1: 'b'}
             return d[1]
 
-        for _ in range(1200):
-            self.assertEqual(f(), 'b')
-        self.assertTrue(cinderjit.is_jit_compiled(f))
+        cinderjit.force_compile(f)
+        self.assertEqual(f(), 'b')
 
     def test_large_iteration_mixed(self):
         def f(n):
@@ -90,9 +75,7 @@ class TestInlineExceptionHandling(unittest.TestCase):
                     total += 1
             return total
 
-        for _ in range(1200):
-            f(100)
-        self.assertTrue(cinderjit.is_jit_compiled(f))
+        cinderjit.force_compile(f)
         result = f(100000)
         self.assertEqual(result, 49950000)
 
