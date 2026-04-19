@@ -1910,7 +1910,7 @@ def _worker_jit(args):
     default_iter = 10_000 if filter_set else 100_000
     # Auto-compile needs heavy warmup to trigger compilation of all methods.
     # 50K iterations ensures inner methods hit the compilation threshold.
-    n_warmup = 5 if (filter_set and compile_mode == "auto") else (2 if filter_set else 3)
+    n_warmup = 5 if (filter_set and compile_mode == "auto") else (2 if filter_set else 12)
     n_measure = 3 if filter_set else 5
 
     results = {
@@ -1923,9 +1923,10 @@ def _worker_jit(args):
         warmup_iter = 50_000 if (filter_set and compile_mode == "auto") else n_iter
 
         # Warmup — ensure auto-compile triggers. Lower the compile threshold
-        # to 1 so the first warmup call triggers compilation, then restore.
+        # so warmup calls trigger compilation. Threshold=10 allows CPython's
+        # adaptive interpreter to specialize bytecodes before JIT compilation.
         if compile_mode == "auto" and cinderjit_mod:
-            cinderjit_mod.compile_after_n_calls(1)
+            cinderjit_mod.compile_after_n_calls(10)
         for _ in range(n_warmup):
             func(n_iter)
 
