@@ -723,7 +723,15 @@ void HIRBuilder::emitInlineExceptionMatch(
     BasicBlock* deopt_block = cfg.AllocateBlock();
     exc_tc.emit<CondBranch>(match_result, match_block, deopt_block);
 
-    // === Match block: emit except body, Branch to loop header ===
+    // === Match block: emit except body with deopt at loop back-edge ===
+    // WARNING: Do NOT Branch to the loop header from here. The root cause
+    // is adding a new predecessor to an already-finalised loop header —
+    // its Phi nodes are fixed and SSAify cannot reconcile mismatched
+    // registers from the new edge. Two approaches failed:
+    //   1. Inline Branch to loop header (328038e4, reverted c193d3d2)
+    //   2. Queue-based emission via pending_b2_blocks_ (session 8)
+    // Both crash because JUMP_BACKWARD targets the loop header. The fix
+    // requires merge block insertion or two-pass block ordering.
     {
       TranslationContext match_tc{match_block, exc_tc.frame};
       match_tc.frame.cur_instr_offs = info.except_body;
@@ -774,16 +782,9 @@ void HIRBuilder::emitInlineExceptionMatch(
           }
           case JUMP_BACKWARD:
           case JUMP_BACKWARD_NO_INTERRUPT: {
-            if (static_cast<int>(match_tc.frame.stack.size()) !=
-                handler.depth) {
-              match_tc.frame.cur_instr_offs = ebc.getJumpTarget();
-              match_tc.emitSnapshot();
-              match_tc.emit<Deopt>();
-            } else {
-              BCOffset target_off = ebc.getJumpTarget();
-              BasicBlock* target = getBlockAtOff(target_off);
-              match_tc.emit<Branch>(target);
-            }
+            match_tc.frame.cur_instr_offs = ebc.getJumpTarget();
+            match_tc.emitSnapshot();
+            match_tc.emit<Deopt>();
             emitted_terminator = true;
             break;
           }
