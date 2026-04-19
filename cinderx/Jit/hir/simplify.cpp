@@ -301,10 +301,6 @@ Register* simplifyGuardType(Env& env, const GuardType* instr) {
     return env.emit<GuardIs>(Py_None, input);
   }
 
-  // Speculative expansion is handled by the SpeculativeExpansion pass
-  // (speculative_expansion.cpp), which runs after Simplify. That pass
-  // uses structural use-chain analysis and includes Snapshot propagation.
-
   return nullptr;
 }
 

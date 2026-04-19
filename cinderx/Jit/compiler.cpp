@@ -21,7 +21,6 @@
 #include "cinderx/Jit/hir/printer.h"
 #include "cinderx/Jit/hir/refcount_insertion.h"
 #include "cinderx/Jit/hir/simplify.h"
-#include "cinderx/Jit/hir/speculative_expansion.h"
 #include "cinderx/Jit/hir/ssa.h"
 #include "cinderx/Jit/jit_time_log.h"
 
@@ -90,7 +89,6 @@ void Compiler::runPasses(
   };
 
   runPassIf(hir::Simplify{}, PassConfig::kSimplify);
-  runPass(hir::SpeculativeExpansion{}, irfunc, callback);
   runPassIf(
       hir::DynamicComparisonElimination{}, PassConfig::kDynamicComparisonElim);
   runPassIf(hir::GuardTypeRemoval{}, PassConfig::kGuardTypeRemoval);
