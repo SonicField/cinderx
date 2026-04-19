@@ -2449,8 +2449,16 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
             PyList_New,
             static_cast<Py_ssize_t>(instr->nvalues()));
         if (instr->nvalues() > 0) {
-          // TODO(T174544781): need to check for nullptr before initializing,
-          // currently that check only happens after assigning these values.
+          auto done = bbb.allocateBlock();
+          Instruction* is_null = bbb.appendInstr(
+              Instruction::kEqual,
+              OutVReg{OperandBase::k8bit},
+              call,
+              Imm{static_cast<uint64_t>(0), OperandBase::k64bit});
+          auto init_block = bbb.allocateBlock();
+          bbb.appendBranch(
+              Instruction::kCondBranch, is_null, done, init_block);
+          bbb.switchBlock(init_block);
           Instruction* load = bbb.appendInstr(
               Instruction::kMove,
               OutVReg{OperandBase::k64bit},
@@ -2461,6 +2469,7 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
                 Instruction::kMove,
                 instr->GetOperand(valueIdx));
           }
+          bbb.switchBlock(done);
         }
         break;
       }
