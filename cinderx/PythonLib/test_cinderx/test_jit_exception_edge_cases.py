@@ -66,6 +66,19 @@ def exception_in_generator_miss(n):
             yield -1
 
 
+def exception_in_generator_conditional_yield(n):
+    d = {"a": 1}
+    for i in range(n):
+        key = "a" if i % 2 == 0 else "missing"
+        try:
+            yield d[key]
+        except KeyError:
+            if i % 4 == 1:
+                yield -1
+            else:
+                yield -2
+
+
 def callee_in_loop_body(d, key):
     try:
         return d[key]
@@ -226,6 +239,24 @@ class TestExceptionInGenerator(unittest.TestCase):
         misses = sum(1 for v in result if v == -1)
         self.assertEqual(hits, 500)
         self.assertEqual(misses, 500)
+
+    def test_generator_conditional_yield_in_except(self):
+        """Yield behind a conditional in except body.
+
+        This exercises the YIELD_VALUE scan's handling of conditional
+        branches. If the scan stops at POP_JUMP_IF_FALSE (as
+        isTerminator() would), it misses the YIELD_VALUE and crashes.
+        """
+        cinderjit.force_compile(exception_in_generator_conditional_yield)
+        result = list(exception_in_generator_conditional_yield(100))
+        self.assertEqual(len(result), 100)
+        for i, v in enumerate(result):
+            if i % 2 == 0:
+                self.assertEqual(v, 1)
+            elif i % 4 == 1:
+                self.assertEqual(v, -1)
+            else:
+                self.assertEqual(v, -2)
 
 
 @unittest.skipUnless(HAS_CINDERJIT, "requires cinderjit")
