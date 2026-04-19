@@ -705,6 +705,10 @@ void HIRBuilder::emitInlineExceptionMatch(
     exc_tc.emit<CondBranch>(match_result, match_block, deopt_block);
 
     // === Match block: emit except body with deopt at loop back-edge ===
+    // WARNING: match_block is emitted inline, NOT through the builder
+    // queue. Do NOT Branch to queue-processed blocks from here — frame
+    // state propagation and BlockCanonicalizer will be missing, causing
+    // SSA corruption and crashes at higher iteration counts.
     {
       TranslationContext match_tc{match_block, exc_tc.frame};
       match_tc.frame.cur_instr_offs = info.except_body;
