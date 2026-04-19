@@ -128,6 +128,35 @@ void finiCodeExtraIndex();
 // Python error set.
 CodeExtra* codeExtra(PyCodeObject* code);
 
+extern Py_ssize_t Ci_code_extra_index;
+
+// CPython-internal layout of co_extra. Matches CPython 3.12 codeobject.c.
+typedef struct {
+  Py_ssize_t ce_size;
+  void *ce_extras[1];
+} Ci_PyCodeExtra;
+
+// Fast inline lookup — avoids PLT call to PyUnstable_Code_GetExtra and
+// CriticalSectionGuard overhead on the interpreter hot path. Falls back
+// to codeExtra() only when co_extra is uninitialized.
+static inline CodeExtra* codeExtraFast(PyCodeObject* code) {
+#if !USE_CODE_EXTRA
+  return NULL;
+#else
+  if (Ci_code_extra_index < 0) {
+    return NULL;
+  }
+  Ci_PyCodeExtra* co_extra = (Ci_PyCodeExtra*)code->co_extra;
+  if (co_extra != NULL && co_extra->ce_size > Ci_code_extra_index) {
+    void* data = co_extra->ce_extras[Ci_code_extra_index];
+    if (data != NULL) {
+      return (CodeExtra*)data;
+    }
+  }
+  return codeExtra(code);
+#endif
+}
+
 // Count the various frame variables that a code object will use.
 int numLocals(PyCodeObject* code);
 int numCellvars(PyCodeObject* code);

@@ -18,12 +18,7 @@
 
 #endif
 
-namespace {
-
-// Index used for fetching code object extra data.
-Py_ssize_t code_extra_index = -1;
-
-} // namespace
+extern "C" Py_ssize_t Ci_code_extra_index = -1;
 
 namespace jit {
 static std::string fullnameImpl(PyObject* module, PyObject* qualname) {
@@ -203,10 +198,10 @@ void initCodeExtraIndex() {
     return;
   }
   JIT_CHECK(
-      code_extra_index == -1,
+      Ci_code_extra_index == -1,
       "Cannot re-initialize code extra index without finalizing it first");
 
-  code_extra_index = PyUnstable_Eval_RequestCodeExtraIndex(PyMem_Free);
+  Ci_code_extra_index = PyUnstable_Eval_RequestCodeExtraIndex(PyMem_Free);
 }
 
 void finiCodeExtraIndex() {
@@ -214,10 +209,10 @@ void finiCodeExtraIndex() {
     return;
   }
   JIT_CHECK(
-      code_extra_index != -1,
+      Ci_code_extra_index != -1,
       "Cannot finalize code extra index without initializing it first");
 
-  code_extra_index = -1;
+  Ci_code_extra_index = -1;
 }
 
 CodeExtra* codeExtra(PyCodeObject* code) {
@@ -225,7 +220,7 @@ CodeExtra* codeExtra(PyCodeObject* code) {
     return nullptr;
   }
 
-  if (code_extra_index == -1) {
+  if (Ci_code_extra_index == -1) {
     return nullptr;
   }
 
@@ -236,7 +231,7 @@ CodeExtra* codeExtra(PyCodeObject* code) {
   jit::CriticalSectionGuard guard(code_obj);
 
   void* data_ptr = nullptr;
-  if (PyUnstable_Code_GetExtra(code_obj, code_extra_index, &data_ptr) < 0) {
+  if (PyUnstable_Code_GetExtra(code_obj, Ci_code_extra_index, &data_ptr) < 0) {
     JIT_LOG("Failed to get code extra data for {}", codeName(code));
     jit::printPythonException();
     PyErr_Clear();
@@ -251,7 +246,7 @@ CodeExtra* codeExtra(PyCodeObject* code) {
     return nullptr;
   }
 
-  if (PyUnstable_Code_SetExtra(code_obj, code_extra_index, extra) < 0) {
+  if (PyUnstable_Code_SetExtra(code_obj, Ci_code_extra_index, extra) < 0) {
     JIT_LOG("Failed to set code extra data for {}", codeName(code));
     jit::printPythonException();
     PyErr_Clear();
