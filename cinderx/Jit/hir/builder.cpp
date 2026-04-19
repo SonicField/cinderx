@@ -2470,10 +2470,7 @@ void HIRBuilder::emitBinaryOp(
 
   // B2: For subscript inside try block with simple except pattern,
   // emit inline exception match instead of BinaryOp (which auto-deopts).
-  // Skip for generators: inline-emitted match_block uses frame layout
-  // assumptions that don't hold for generator frames (GenDataFooter).
-  if (op_kind == BinaryOpKind::kSubscript &&
-      !(code_->co_flags & (CO_GENERATOR | CO_COROUTINE | CO_ASYNC_GENERATOR))) {
+  if (op_kind == BinaryOpKind::kSubscript) {
     BCOffset cur_off = bc_instr.baseOffset();
     auto* handler = findExceptionHandler(cur_off);
     if (handler != nullptr) {
