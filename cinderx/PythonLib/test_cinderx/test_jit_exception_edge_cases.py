@@ -202,7 +202,6 @@ class TestExceptionInGenerator(unittest.TestCase):
         self.assertEqual(result[0], 1)
         self.assertEqual(result[99], 100)
 
-    @unittest.skip("known crash: generator + inline exception handler (SIGSEGV)")
     def test_generator_mixed_hit_miss(self):
         cinderjit.force_compile(exception_in_generator_miss)
         result = list(exception_in_generator_miss(100))
@@ -219,7 +218,6 @@ class TestExceptionInGenerator(unittest.TestCase):
         self.assertEqual(len(result), 1000)
         self.assertEqual(result[999], 1000)
 
-    @unittest.skip("known crash: generator + inline exception handler (SIGSEGV)")
     def test_generator_mixed_high_n(self):
         cinderjit.force_compile(exception_in_generator_miss)
         result = list(exception_in_generator_miss(1000))
