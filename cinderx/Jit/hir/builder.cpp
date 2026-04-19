@@ -705,10 +705,14 @@ void HIRBuilder::emitInlineExceptionMatch(
     exc_tc.emit<CondBranch>(match_result, match_block, deopt_block);
 
     // === Match block: emit except body with deopt at loop back-edge ===
-    // WARNING: match_block is emitted inline, NOT through the builder
-    // queue. Do NOT Branch to queue-processed blocks from here — frame
-    // state propagation and BlockCanonicalizer will be missing, causing
-    // SSA corruption and crashes at higher iteration counts.
+    // WARNING: Do NOT Branch to the loop header from here. The root cause
+    // is adding a new predecessor to an already-finalised loop header —
+    // its Phi nodes are fixed and SSAify cannot reconcile mismatched
+    // registers from the new edge. Two approaches failed:
+    //   1. Inline Branch to loop header (328038e4, reverted c193d3d2)
+    //   2. Queue-based emission via pending_b2_blocks_ (session 8)
+    // Both crash because JUMP_BACKWARD targets the loop header. The fix
+    // requires merge block insertion or two-pass block ordering.
     {
       TranslationContext match_tc{match_block, exc_tc.frame};
       match_tc.frame.cur_instr_offs = info.except_body;
