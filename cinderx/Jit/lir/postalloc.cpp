@@ -74,18 +74,26 @@ void insertMoveToMemoryLocation(
         instr_iter,
         Instruction::kMove,
         OutInd{base, index, data_type},
-        PhyReg{loc});
+        PhyReg{loc, data_type});
     return;
   }
 
+  // When the operand is a double spilled to the stack, use k64bit for the GP
+  // scratch register since we're moving the raw bits through a GP register.
+  auto scratch_data_type =
+      data_type == DataType::kDouble ? DataType::k64bit : data_type;
+
   PhyLocation loc = operand->getStackSlot();
-  block->allocateInstrBefore(
-      instr_iter, Instruction::kMove, OutPhyReg{temp, data_type}, Stk{loc});
   block->allocateInstrBefore(
       instr_iter,
       Instruction::kMove,
-      OutInd{base, index, data_type},
-      PhyReg{temp, data_type});
+      OutPhyReg{temp, scratch_data_type},
+      Stk{loc});
+  block->allocateInstrBefore(
+      instr_iter,
+      Instruction::kMove,
+      OutInd{base, index, scratch_data_type},
+      PhyReg{temp, scratch_data_type});
 }
 
 int rewriteRegularFunction(instr_iter_t instr_iter) {
@@ -460,6 +468,7 @@ RewriteResult optimizeMoveInstrs(instr_iter_t instr_iter) {
     return kRemoved;
   }
 
+#if defined(CINDER_X86_64)
   if (in->isImm() && !in->isFp() && in->getConstant() == 0 && out->isReg()) {
     auto in_opnd = dynamic_cast<Operand*>(in);
     JIT_CHECK(
@@ -474,6 +483,7 @@ RewriteResult optimizeMoveInstrs(instr_iter_t instr_iter) {
     instr->addOperands(PhyReg{reg, data_type}, PhyReg{reg, data_type});
     return kChanged;
   }
+#endif
 
   return kUnchanged;
 }

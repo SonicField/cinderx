@@ -2107,14 +2107,21 @@ void translateMove(Environ* env, const Instruction* instr) {
           loadToReg(as, output, ptr);
           break;
         }
-        case lir::OperandType::kImm:
+        case lir::OperandType::kImm: {
           // Loading a constant immediate into a register.
+          auto constant = input->getConstant();
+
           if (output->isVecD()) {
-            as->fmov(AT::getVecD(output), input->getConstant());
+            as->fmov(AT::getVecD(output), constant);
+          } else if (constant == 0) {
+            as->mov(
+                AT::getGpWiden(output),
+                AT::getGpWiden(output->dataType(), a64::xzr.id()));
           } else {
-            as->mov(AT::getGp(output), input->getConstant());
+            as->mov(AT::getGpWiden(output), constant);
           }
           break;
+        }
         case lir::OperandType::kNone:
         case lir::OperandType::kVreg:
         case lir::OperandType::kLabel:
@@ -2539,9 +2546,9 @@ void translateExchange(Environ* env, const Instruction* instr) {
     auto vec0 = AT::getVecD(opnd0);
     auto vec1 = AT::getVecD(opnd1);
 
-    as->eor(vec0.v16(), vec0.v16(), vec1.v16());
-    as->eor(vec1.v16(), vec1.v16(), vec0.v16());
-    as->eor(vec0.v16(), vec0.v16(), vec1.v16());
+    as->eor(vec0, vec0, vec1);
+    as->eor(vec1, vec1, vec0);
+    as->eor(vec0, vec0, vec1);
   } else {
     auto reg0 = AT::getGp(opnd0);
     auto reg1 = AT::getGp(opnd1);
