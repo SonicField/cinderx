@@ -56,12 +56,6 @@ void emitCall(Environ& env, uint64_t func, const jit::lir::Instruction* instr) {
 #if defined(CINDER_X86_64)
   env.as->call(func);
 #elif defined(CINDER_AARCH64)
-  // Note that we could do better than this if asmjit knew how to handle arm64
-  // relocations for relative calls. That work is done in
-  // https://github.com/asmjit/asmjit/issues/499, but as of writing is not yet
-  // available.
-  env.as->mov(arch::reg_scratch_br, func);
-  // Save return address to stack before blr, matching x86 call semantics.
   {
     asmjit::Label after_call = env.as->newLabel();
     env.as->adr(arch::reg_scratch_0, after_call);
@@ -75,7 +69,7 @@ void emitCall(Environ& env, uint64_t func, const jit::lir::Instruction* instr) {
           arch::ptr_resolve(
               env.as, arch::fp, env.saved_ip_fp_offset, arch::reg_scratch_1));
     }
-    env.as->blr(arch::reg_scratch_br);
+    env.as->bl(func);
     env.as->bind(after_call);
   }
 #else
