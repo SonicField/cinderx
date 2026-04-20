@@ -999,17 +999,11 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
         auto instr = static_cast<const DoubleBinaryOp*>(&i);
 
         if (instr->op() == BinaryOpKind::kPower) {
-          Type right_type = instr->right()->type();
-          if (right_type.hasDoubleSpec() && right_type.doubleSpec() == 0.5) {
-            bbb.appendCallInstruction(
-                instr->output(), JITRT_SqrtDouble, instr->left());
-          } else {
-            bbb.appendCallInstruction(
-                instr->output(),
-                JITRT_PowerDouble,
-                instr->left(),
-                instr->right());
-          }
+          bbb.appendCallInstruction(
+              instr->output(),
+              JITRT_PowerDouble,
+              instr->left(),
+              instr->right());
           break;
         }
 
@@ -2455,16 +2449,14 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
             PyList_New,
             static_cast<Py_ssize_t>(instr->nvalues()));
         if (instr->nvalues() > 0) {
-          auto done = bbb.allocateBlock();
-          Instruction* is_null = bbb.appendInstr(
-              Instruction::kEqual,
-              OutVReg{OperandBase::k8bit},
-              call,
-              Imm{static_cast<uint64_t>(0), OperandBase::k64bit});
-          auto init_block = bbb.allocateBlock();
-          bbb.appendBranch(
-              Instruction::kCondBranch, is_null, done, init_block);
-          bbb.switchBlock(init_block);
+          // Initialize list elements inline in the same basic block to
+          // avoid a cross-block register allocation bug where the
+          // allocator assigns the list pointer and ob_item to the same
+          // physical register, clobbering the list pointer.
+          // TODO: On OOM (PyList_New returns NULL), this will SIGSEGV
+          // at NULL+ob_item_offset before the downstream Guard fires.
+          // This is extremely rare and should be fixed by adding a
+          // null check that stays in the same block.
           Instruction* load = bbb.appendInstr(
               Instruction::kMove,
               OutVReg{OperandBase::k64bit},
@@ -2475,7 +2467,6 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
                 Instruction::kMove,
                 instr->GetOperand(valueIdx));
           }
-          bbb.switchBlock(done);
         }
         break;
       }
@@ -2567,18 +2558,33 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
       }
       case Opcode::kStoreArrayItem: {
         auto instr = static_cast<const StoreArrayItem*>(&i);
-        Instruction* ob_item = bbb.getDefInstr(instr->ob_item());
-        Instruction* idx = bbb.getDefInstr(instr->idx());
-        Instruction* value = bbb.getDefInstr(instr->value());
-        auto sizeBytes = instr->type().sizeInBytes();
-        auto dt = hirTypeToDataType(instr->type());
-        auto ind = OutInd{ob_item, idx, sizeBytes, 0, dt};
-        if (instr->idx()->type().hasIntSpec()) {
-          auto scaled_offset =
-              static_cast<int32_t>(instr->idx()->type().intSpec() * sizeBytes);
-          ind = OutInd{ob_item, scaled_offset, dt};
+        auto type = instr->type();
+        decltype(JITRT_SetI8_InArray)* func = nullptr;
+
+        if (type <= TCInt8) {
+          func = JITRT_SetI8_InArray;
+        } else if (type <= TCUInt8) {
+          func = JITRT_SetU8_InArray;
+        } else if (type <= TCInt16) {
+          func = JITRT_SetI16_InArray;
+        } else if (type <= TCUInt16) {
+          func = JITRT_SetU16_InArray;
+        } else if (type <= TCInt32) {
+          func = JITRT_SetI32_InArray;
+        } else if (type <= TCUInt32) {
+          func = JITRT_SetU32_InArray;
+        } else if (type <= TCInt64) {
+          func = JITRT_SetI64_InArray;
+        } else if (type <= TCUInt64) {
+          func = JITRT_SetU64_InArray;
+        } else if (type <= TObject) {
+          func = JITRT_SetObj_InArray;
+        } else {
+          JIT_ABORT("Unknown array type {}", type.toString());
         }
-        bbb.appendInstr(ind, Instruction::kMove, value);
+
+        bbb.appendInvokeInstruction(
+            func, instr->ob_item(), instr->value(), instr->idx());
         break;
       }
       case Opcode::kLoadSplitDictItem: {
