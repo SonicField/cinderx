@@ -171,8 +171,7 @@ set(ASMJIT_STATIC TRUE)
 
 FetchContent_Declare(
   asmjit
-  GIT_REPOSITORY https://github.com/asmjit/asmjit
-  GIT_TAG cecc73f2979e9704c81a2c2ec79a7475b31c56ac # 2025-May-10
+  SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/deps/asmjit-src
 )
 FetchContent_MakeAvailable(asmjit)
 
@@ -181,8 +180,7 @@ FetchContent_MakeAvailable(asmjit)
 
 FetchContent_Declare(
   fmt
-  GIT_REPOSITORY https://github.com/fmtlib/fmt
-  GIT_TAG 11.2.0 # 2025-May-03
+  SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/deps/fmt-src
 )
 FetchContent_MakeAvailable(fmt)
 
@@ -191,8 +189,7 @@ FetchContent_MakeAvailable(fmt)
 
 FetchContent_Declare(
   parallel-hashmap
-  GIT_REPOSITORY https://github.com/greg7mdp/parallel-hashmap
-  GIT_TAG 896f1a03e429c45d9fe9638e892fc1da73befadd # 2025-Apr-11
+  SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/deps/parallel-hashmap-src
 )
 FetchContent_MakeAvailable(parallel-hashmap)
 
@@ -201,8 +198,7 @@ FetchContent_MakeAvailable(parallel-hashmap)
 
 FetchContent_Declare(
   usdt
-  GIT_REPOSITORY https://github.com/libbpf/usdt
-  GIT_TAG f4ea2f524efa80d062f4d586d78daafb83dc7d24 # 2025-Apr-24
+  SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/deps/usdt-src
 )
 FetchContent_MakeAvailable(usdt)
 
