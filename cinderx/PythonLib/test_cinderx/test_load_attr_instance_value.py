@@ -218,23 +218,47 @@ class TestLoadAttrInstanceValue(unittest.TestCase):
         self.assertEqual(get_name(cat), "Whiskers")
         self.assertEqual(get_name(fish), "Nemo")
 
-    @unittest.skip("Bug 6: Adding a class attr after JIT causes segfault on deopt")
     def test_08_class_modification_after_jit(self):
-        """Class modification after JIT compilation (type version invalidated).
+        """Class modification after JIT compilation (type version invalidated)."""
 
-        NOTE: Skipped — causes a SEGFAULT on devgpu004 (commit 6a4b2d9d).
-        Adding a class attribute after JIT compilation invalidates the type
-        version, causing GuardType to fire deopt — but deopt crashes.
-        Bug 6: LOAD_ATTR_INSTANCE_VALUE deopt segfault on class mutation.
-        """
+        class Widget:
+            def __init__(self, name):
+                self.name = name
 
-    @unittest.skip("Bug 6: Property descriptor shadows instance attr — deopt segfault")
+        def get_name(obj):
+            return obj.name
+
+        w = Widget("alpha")
+        force_compile(get_name)
+        self.assertEqual(get_name(w), "alpha")
+
+        Widget.new_class_attr = "added"
+
+        w2 = Widget("beta")
+        self.assertEqual(get_name(w2), "beta")
+
+        Widget.name = "class_level_shadow"
+        w3 = Widget("gamma")
+        self.assertEqual(get_name(w3), "gamma")
+
     def test_09_descriptor_shadowing(self):
-        """Descriptor shadowing (same root cause as Bug 6).
+        """Descriptor shadowing — property descriptor shadows instance attr."""
 
-        NOTE: Skipped — adding a property descriptor to a class after JIT
-        compilation invalidates type version, deopt crashes.
-        """
+        class Box:
+            def __init__(self, value):
+                self.value = value
+
+        def get_value(obj):
+            return obj.value
+
+        b = Box(42)
+        force_compile(get_value)
+        self.assertEqual(get_value(b), 42)
+
+        Box.value = property(lambda self: "descriptor_value")
+
+        b2 = Box.__new__(Box)
+        self.assertEqual(get_value(b2), "descriptor_value")
 
     def test_10_rapid_instance_attr_mutations(self):
         """Rapid instance attribute mutations (1000 cycles)."""

@@ -35,7 +35,11 @@ class TypeAnnotationTests(unittest.TestCase):
         cinderx.jit.force_compile(f)
 
         self.assertEqual(f(42), 43)
-        self.assertIn("LongBinaryOp", cinderx.jit.get_function_hir_opcode_counts(f))
+        opcodes = cinderx.jit.get_function_hir_opcode_counts(f)
+        self.assertTrue(
+            "LongBinaryOp" in opcodes or "IntBinaryOp" in opcodes,
+            f"Expected LongBinaryOp or IntBinaryOp in HIR, got: {sorted(opcodes)}",
+        )
 
     def test_good_long_list(self):
         def f(

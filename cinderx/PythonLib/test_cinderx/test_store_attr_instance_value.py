@@ -222,10 +222,26 @@ class TestStoreAttrInstanceValue(unittest.TestCase):
         self.assertEqual(bl.shade, "navy")
         self.assertEqual(g.shade, "emerald")
 
-    @unittest.skip("Bug 6: segfault in JIT type_modified handler (SplitDictDeoptPatcher)")
     def test_08_class_modification_after_jit(self):
-        """Class modification after JIT — skipped due to Bug 6."""
-        pass
+        """Class modification after JIT — store attr still works after type change."""
+
+        class Container:
+            def __init__(self, data):
+                self.data = data
+
+        def set_data(obj, val):
+            obj.data = val
+
+        c = Container("original")
+        force_compile(set_data)
+        set_data(c, "updated")
+        self.assertEqual(c.data, "updated")
+
+        Container.new_attr = "class_level"
+
+        c2 = Container("x")
+        set_data(c2, "post_mod")
+        self.assertEqual(c2.data, "post_mod")
 
     def test_09_slots_based_class_store_attr_slot(self):
         """__slots__-based class (STORE_ATTR_SLOT)."""
