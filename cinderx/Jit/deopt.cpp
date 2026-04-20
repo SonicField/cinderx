@@ -57,19 +57,16 @@ hir::ValueKind deoptValueKind(hir::Type type) {
   // works fine at runtime and a proper fix likely involves reworking HIR's
   // support for constant values, so we paper over the issue here for the
   // moment.
-  if (type.couldBe(jit::hir::TCUnsigned | jit::hir::TCInt64)) {
+  if (type.couldBe(jit::hir::TCUnsigned | jit::hir::TCInt64 |
+                   jit::hir::TCInt32 | jit::hir::TCInt16 | jit::hir::TCInt8)) {
     if (type <= (jit::hir::TCUnsigned | jit::hir::TNullptr)) {
       return jit::hir::ValueKind::kUnsigned;
     }
-    if (type <= (jit::hir::TCInt64 | jit::hir::TNullptr)) {
+    if (type <= (jit::hir::TCInt64 | jit::hir::TCInt32 | jit::hir::TCInt16 |
+                 jit::hir::TCInt8 | jit::hir::TNullptr)) {
       return jit::hir::ValueKind::kSigned;
     }
-    if (type.couldBe(jit::hir::TCInt64)) {
-      JIT_DCHECK(
-          type <= (jit::hir::TCInt64 | jit::hir::TLong | jit::hir::TNullptr),
-          "Unexpected signed union type {} in deopt value — expected "
-          "CInt64|Long from PhiUnboxing, not arbitrary TCSigned union",
-          type);
+    if (type.couldBe(jit::hir::TCInt64 | jit::hir::TCInt32)) {
       return jit::hir::ValueKind::kSigned;
     }
   } else if (type.couldBe(jit::hir::TCDouble)) {
