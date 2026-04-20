@@ -1061,15 +1061,40 @@ Register* simplifyLongBinaryOp(Env& env, const LongBinaryOp* instr) {
 }
 
 Register* simplifyFloatBinaryOp(Env& env, const FloatBinaryOp* instr) {
-  // Convert FloatBinaryOp to native double arithmetic:
-  // PrimitiveUnbox(PyFloat) + DoubleBinaryOp(fadd/fsub/fmul/fdiv) + PrimitiveBox
-  // This avoids the C slot method call and heap allocation per operation.
-  if (instr->op() != BinaryOpKind::kPower &&
-      FloatBinaryOp::slotMethod(instr->op())) {
-    Register* left_unboxed = env.emit<PrimitiveUnbox>(instr->left(), TCDouble);
-    Register* right_unboxed = env.emit<PrimitiveUnbox>(instr->right(), TCDouble);
-    Register* result = env.emit<DoubleBinaryOp>(instr->op(), left_unboxed, right_unboxed);
-    return env.emit<PrimitiveBox>(result, TFloatExact, *instr->frameState());
+  BinaryOpKind op = instr->op();
+
+  // Add/sub/mul never raise for any double inputs — no guards needed.
+  if (op == BinaryOpKind::kAdd || op == BinaryOpKind::kSubtract ||
+      op == BinaryOpKind::kMultiply) {
+    Register* unbox_left = env.emit<PrimitiveUnbox>(instr->left(), TCDouble);
+    Register* unbox_right = env.emit<PrimitiveUnbox>(instr->right(), TCDouble);
+    Register* result = env.emit<DoubleBinaryOp>(op, unbox_left, unbox_right);
+    return env.emit<PrimitiveBox>(result, TCDouble, *instr->frameState());
+  }
+
+  // TrueDivide needs a div-by-zero guard to preserve ZeroDivisionError semantics.
+  if (op == BinaryOpKind::kTrueDivide) {
+    Register* unbox_left = env.emit<PrimitiveUnbox>(instr->left(), TCDouble);
+    Register* unbox_right = env.emit<PrimitiveUnbox>(instr->right(), TCDouble);
+    Register* zero = env.emit<LoadConst>(Type::fromCDouble(0.0));
+    Register* is_nonzero = env.emit<PrimitiveCompare>(
+        PrimitiveCompareOp::kNotEqual, unbox_right, zero);
+    env.emitInstr<Guard>(is_nonzero);
+    Register* result = env.emit<DoubleBinaryOp>(op, unbox_left, unbox_right);
+    return env.emit<PrimitiveBox>(result, TCDouble, *instr->frameState());
+  }
+
+  // `x ** 0.5` → sqrt(x) via unboxed path.
+  if (op == BinaryOpKind::kPower) {
+    Type right_type = instr->right()->type();
+    if (right_type.hasObjectSpec() && PyFloat_Check(right_type.objectSpec()) &&
+        PyFloat_AS_DOUBLE(right_type.objectSpec()) == 0.5) {
+      Register* unbox_left = env.emit<PrimitiveUnbox>(instr->left(), TCDouble);
+      Register* half = env.emit<LoadConst>(Type::fromCDouble(0.5));
+      Register* result =
+          env.emit<DoubleBinaryOp>(BinaryOpKind::kPower, unbox_left, half);
+      return env.emit<PrimitiveBox>(result, TCDouble, *instr->frameState());
+    }
   }
 
   // Constant folding (requires known values at compile time).
@@ -2098,20 +2123,42 @@ Register* simplifyVectorCall(Env& env, const VectorCall* instr) {
 }
 
 Register* simplifyStoreSubscr(Env& env, const StoreSubscr* instr) {
-  if (instr->GetOperand(0)->isA(TDictExact)) {
+  Register* container = instr->GetOperand(0);
+  Register* index = instr->GetOperand(1);
+  Register* value = instr->GetOperand(2);
+
+  if (container->isA(TDictExact)) {
+    env.emit<UseType>(container, TDictExact);
     auto output = env.func.env.AllocateRegister();
     env.emitRawInstr<CallStatic>(
         3,
         output,
         reinterpret_cast<void*>(PyDict_Type.tp_as_mapping->mp_ass_subscript),
         TCInt32,
-        instr->GetOperand(0),
-        instr->GetOperand(1),
-        instr->GetOperand(2));
+        container,
+        index,
+        value);
 
     env.emit<CheckNeg>(output, *instr->frameState());
     return nullptr;
   }
+
+#ifndef Py_GIL_DISABLED
+  if (container->isA(TListExact) && index->isA(TLongExact)) {
+    env.emit<UseType>(container, TListExact);
+    env.emit<UseType>(index, TLongExact);
+    Register* unboxed_idx = env.emit<IndexUnbox>(index);
+    env.emit<IsNegativeAndErrOccurred>(unboxed_idx, *instr->frameState());
+    Register* adjusted_idx = env.emit<CheckSequenceBounds>(
+        container, unboxed_idx, *instr->frameState());
+    Register* ob_item = env.emit<LoadField>(
+        container, "ob_item", offsetof(PyListObject, ob_item), TCPtr);
+    Register* old_value = env.emit<LoadArrayItem>(
+        ob_item, adjusted_idx, container, /*offset=*/0, TObject);
+    env.emit<StoreArrayItem>(ob_item, adjusted_idx, value, old_value, TObject);
+    return nullptr;
+  }
+#endif
 
   return nullptr;
 }
