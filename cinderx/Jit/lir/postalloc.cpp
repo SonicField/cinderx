@@ -537,28 +537,65 @@ RewriteResult rewriteLoadInstrs(instr_iter_t instr_iter) {
 }
 
 // Convert CondBranch to Test and BranchCC instructions.
+Instruction* findFusibleCompare(
+    instr_iter_t cond_branch_iter,
+    BasicBlock* block) {
+  auto cond_branch = cond_branch_iter->get();
+  auto input_reg = cond_branch->getInput(0)->getPhyRegister();
+
+  auto& instrs = block->instructions();
+  for (auto it = cond_branch_iter; it != instrs.begin();) {
+    --it;
+    auto* candidate = it->get();
+
+    if (candidate->isCompare() && candidate->output()->isReg() &&
+        candidate->output()->getPhyRegister() == input_reg) {
+      return candidate;
+    }
+
+    auto effects =
+        InstrProperty::getProperties(candidate->opcode()).flag_effects;
+    if (effects == FlagEffects::kInvalidate) {
+      return nullptr;
+    }
+
+    if (effects == FlagEffects::kSet) {
+      return nullptr;
+    }
+
+    auto output = candidate->output();
+    if (output->isReg() && output->getPhyRegister() == input_reg) {
+      return nullptr;
+    }
+  }
+  return nullptr;
+}
+
 void doRewriteCondBranch(instr_iter_t instr_iter, BasicBlock* next_block) {
   auto instr = instr_iter->get();
 
   auto input = instr->getInput(0);
   auto block = instr->basicblock();
 
-  // insert test Reg, Reg instruction
-  auto size = input->dataType();
-  block->allocateInstrBefore(
-      instr_iter,
-      Instruction::kTest,
-      PhyReg(input->getPhyRegister(), size),
-      PhyReg(input->getPhyRegister(), size));
-
-  // convert the current CondBranch instruction to a BranchCC instruction
   auto true_block = block->getTrueSuccessor();
   auto false_block = block->getFalseSuccessor();
 
   BasicBlock* target_block = nullptr;
   BasicBlock* fallthrough_block = nullptr;
 
-  auto opcode = Instruction::kBranchNZ;
+  Instruction* compare = findFusibleCompare(instr_iter, block);
+  Instruction::Opcode opcode;
+  if (compare != nullptr) {
+    opcode = Instruction::compareToBranchCC(compare->opcode());
+  } else {
+    auto size = input->dataType();
+    block->allocateInstrBefore(
+        instr_iter,
+        Instruction::kTest,
+        PhyReg(input->getPhyRegister(), size),
+        PhyReg(input->getPhyRegister(), size));
+    opcode = Instruction::kBranchNZ;
+  }
   if (true_block == next_block) {
     opcode = Instruction::negateBranchCC(opcode);
     target_block = false_block;
