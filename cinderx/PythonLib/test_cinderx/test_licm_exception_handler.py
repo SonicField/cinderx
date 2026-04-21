@@ -184,11 +184,6 @@ class TestLICMExceptionHandler(unittest.TestCase):
             [11],
         )
 
-    @unittest.skip(
-        "CRASH: force_compile + multiple except clauses → SIGSEGV (RIP=0x0). "
-        "Auto-compile works correctly. Pre-existing JIT bug in exception "
-        "handler code generation without type feedback."
-    )
     def test_multiple_except_clauses_force_compile(self):
         """force_compile crashes on multiple except clauses when exception fires.
 

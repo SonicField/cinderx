@@ -645,22 +645,38 @@ bool HIRBuilder::getSimpleExceptInfo(
     return false;
   }
 
-  // Scan except body for YIELD_VALUE — inline match_block lacks
-  // yield/resume infrastructure, so deopt at YIELD_VALUE offset crashes.
+  // Scan except body — only accept opcodes that emitInlineExceptionMatch
+  // can fully handle. Unhandled opcodes hit the default Deopt path which
+  // crashes because the interpreter expects PUSH_EXC_INFO state the JIT
+  // never established.
   {
     BytecodeInstruction scan{code_, except_body};
-    while (scan.baseOffset().asIndex().value() <
-           static_cast<int>(countIndices(code_))) {
-      int op = scan.opcode();
-      if (op == YIELD_VALUE) {
-        return false;
+    bool found_terminator = false;
+    while (!found_terminator &&
+           scan.baseOffset().asIndex().value() <
+               static_cast<int>(countIndices(code_))) {
+      switch (scan.opcode()) {
+        case POP_EXCEPT:
+        case POP_TOP:
+        case LOAD_FAST:
+        case LOAD_FAST_CHECK:
+        case LOAD_FAST_AND_CLEAR:
+        case LOAD_CONST:
+        case STORE_FAST:
+        case BINARY_OP:
+          break;
+        case RETURN_VALUE:
+        case RETURN_CONST:
+        case JUMP_BACKWARD:
+        case JUMP_BACKWARD_NO_INTERRUPT:
+          found_terminator = true;
+          break;
+        default:
+          return false;
       }
-      if (op == RETURN_VALUE || op == RETURN_CONST ||
-          op == JUMP_BACKWARD || op == JUMP_BACKWARD_NO_INTERRUPT ||
-          op == JUMP_FORWARD || op == RERAISE || op == RAISE_VARARGS) {
-        break;
+      if (!found_terminator) {
+        scan = scan.nextInstr();
       }
-      scan = scan.nextInstr();
     }
   }
 
