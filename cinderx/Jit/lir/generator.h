@@ -92,7 +92,8 @@ class LIRGenerator {
       PyTypeObject* guard_type = guard.target().uniquePyType();
       JIT_CHECK(guard_type != nullptr, "Ensure unique representation exists");
       env_->code_rt->addReference(reinterpret_cast<PyObject*>(guard_type));
-      instr->addOperands(MemImm{guard_type});
+      unsigned int version_tag = guard_type->tp_version_tag;
+      instr->addOperands(Imm{version_tag});
     } else {
       instr->addOperands(Imm{0});
     }

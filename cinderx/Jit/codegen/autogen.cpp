@@ -250,7 +250,11 @@ void TranslateGuard(Environ* env, const Instruction* instr) {
         as->jne(deopt_label);
         break;
       case kHasType: {
-        emit_cmp(x86::qword_ptr(reg, offsetof(PyObject, ob_type)));
+        auto scratch = x86::r11;
+        as->mov(scratch, x86::qword_ptr(reg, offsetof(PyObject, ob_type)));
+        as->cmp(
+            x86::dword_ptr(scratch, offsetof(PyTypeObject, tp_version_tag)),
+            instr->getInput(3)->getConstant());
         as->jne(deopt_label);
         break;
       }
@@ -347,8 +351,12 @@ void TranslateGuard(Environ* env, const Instruction* instr) {
         as->ldr(
             arch::reg_scratch_0,
             arch::ptr_offset(reg, offsetof(PyObject, ob_type)));
-
-        emit_cmp(arch::reg_scratch_0);
+        as->ldr(
+            arch::w_scratch_0,
+            arch::ptr_offset(
+                arch::reg_scratch_0, offsetof(PyTypeObject, tp_version_tag)));
+        auto target = instr->getInput(3)->getConstant();
+        as->cmp(arch::w_scratch_0, target);
         as->b_ne(deopt_label);
         break;
       }
