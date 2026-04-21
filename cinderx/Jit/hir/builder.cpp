@@ -631,6 +631,10 @@ bool HIRBuilder::getSimpleExceptInfo(
   }
   bc = bc.nextInstr();
 
+  if (bc.opcode() == NOT_TAKEN) {
+    bc = bc.nextInstr();
+  }
+
   if (bc.opcode() != POP_TOP) {
     return false;
   }

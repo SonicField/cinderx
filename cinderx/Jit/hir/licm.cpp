@@ -162,9 +162,17 @@ int hoistInvariantGuards(LoopInfo& loop) {
       if (instr.IsPhi()) {
         continue;  // Never hoist phi nodes
       }
-      if (allUsesOutsideLoop(instr, loop.body)) {
-        to_hoist.push_back(&instr);
+      if (!allUsesOutsideLoop(instr, loop.body)) {
+        continue;
       }
+      // Only hoist guards from the loop header block. Guards deeper
+      // in the loop body have FrameState bytecode offsets that are
+      // invalid at the preheader — deopt would reconstruct the wrong
+      // interpreter state, causing SIGSEGV on corrupted jump targets.
+      if (block != loop.header) {
+        continue;
+      }
+      to_hoist.push_back(&instr);
     }
   }
 
