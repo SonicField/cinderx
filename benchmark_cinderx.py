@@ -2054,22 +2054,41 @@ def _preflight_checks(jit_cmd, vanilla_cmd):
     else:
         print("  [OK] CinderX loaded in JIT python")
 
-    # Check LTO on _cinderx.so (where our JIT code lives), not the
-    # python binaries. The vanilla python is a platform build we don't
-    # control — it's typically stripped with no DWARF info.
-    cinderx_so_for_lto = _query_python(jit_cmd, "import _cinderx; print(_cinderx.__file__)")
-    if cinderx_so_for_lto:
-        so_dwarf = _readelf_dwarf_producer(cinderx_so_for_lto)
-        so_lto = "-flto" in so_dwarf or "-flto" in _readelf_comment(cinderx_so_for_lto)
-        if not so_dwarf:
-            errors.append("LTO detection failed: no DWARF info in _cinderx.so")
-        elif not so_lto:
-            print("  [INFO] _cinderx.so built without LTO")
+    # Check LTO via build flags (most reliable) or binary DWARF.
+    # Clang doesn't embed -flto in DWARF producer strings, so checking
+    # the cmake build flags is the primary method.
+    lto_detected = False
+    arch = platform.machine()
+    flags_path = os.path.join("scratch", f"build-{arch}",
+                              "CMakeFiles", "_cinderx.dir", "flags.make")
+    if os.path.exists(flags_path):
+        with open(flags_path) as f:
+            flags_content = f.read()
+        if "-flto" in flags_content:
+            lto_detected = True
+            print("  [OK] LTO detected (build flags)")
         else:
-            print("  [OK] LTO detected in _cinderx.so")
+            print("  [INFO] _cinderx.so built without LTO (build flags)")
     else:
-        errors.append("Cannot locate _cinderx.so for LTO check")
+        cinderx_so_for_lto = _query_python(
+            jit_cmd, "import _cinderx; print(_cinderx.__file__)")
+        if cinderx_so_for_lto:
+            so_dwarf = _readelf_dwarf_producer(cinderx_so_for_lto)
+            so_lto = ("-flto" in so_dwarf
+                      or "-flto" in _readelf_comment(cinderx_so_for_lto))
+            if so_lto:
+                lto_detected = True
+                print("  [OK] LTO detected in _cinderx.so")
+            elif so_dwarf:
+                print("  [INFO] _cinderx.so built without LTO")
+            else:
+                errors.append(
+                    "LTO detection failed: no build flags and no DWARF info")
+        else:
+            errors.append("Cannot locate _cinderx.so for LTO check")
 
+    jit_dwarf = _readelf_dwarf_producer(jit_bin)
+    van_dwarf = _readelf_dwarf_producer(vanilla_bin)
     jit_pgo = "-fprofile-use" in jit_dwarf
     van_pgo = "-fprofile-use" in van_dwarf
     if jit_pgo or van_pgo:
