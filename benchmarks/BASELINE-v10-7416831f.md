@@ -1,11 +1,10 @@
 # CinderX JIT Baseline — Session 10 (v10-baseline)
 
 ## 1. Build Hash
-- Tag commit: b8536831 (Fix LTO preflight detection to use cmake build flags)
-- Binary built from: c3c6d4cc (Fix force_compile crash in inline exception handlers)
+- Tag commit: ca4e19d0 (Fix LICM crash and enable exception handler inlining)
 - Branch: speculation-experiment
-- Full ancestry: b8536831 < c3c6d4cc < 838a2e2d < 7416831f < a4e988ba < 5e73bfc0 < e1566b85 < c559333a < c414d9fd < d16f0373 < df0a6023
-- Note: b8536831 changes only benchmark_cinderx.py (Python); the compiled binary is from c3c6d4cc
+- Full ancestry: ca4e19d0 < a893c51d < 52973b74 < b8536831 < c3c6d4cc < 838a2e2d < 7416831f < a4e988ba < 5e73bfc0 < e1566b85
+- Phase 2 Track 2 commits: FM2 + Branch re-application (a893c51d), LICM header-only + NOT_TAKEN (ca4e19d0)
 
 ## 2. Compiler
 - C/C++ compiler: clang/clang++ 21.1.8 (CentOS 21.1.8-2.el9)
@@ -24,9 +23,9 @@
 - Python target: 3.12.13+meta
 
 ## 5. Binary Checksums
-- _cinderx.so: sha256 `201ca7c168399892b54588877be42b5af96ac3c35772cfa2da34349a7ee9a82f`
-- _cinderx.so size: 45,761,552 bytes
-- _cinderx.so timestamp: 2026-04-21 06:05 UTC (clean LTO build)
+- _cinderx.so: sha256 `d0fbf98ced6168a7fdffe6d3b7d8f05f1fa276ea08973206b407e8bd60471f48`
+- _cinderx.so size: 45,770,472 bytes
+- _cinderx.so timestamp: 2026-04-21 12:55 UTC (clean LTO build)
 - JIT Python: /data/users/alexturner/venv/bin/python3 (Python 3.12.13+meta)
 - Vanilla Python: /usr/local/fbcode/platform010/bin/python3.12 (Python 3.12.13+meta)
 - Vanilla sha256: `796679c04c3e57678ad69f17e9d6a252ec01b38db9fb3392d0d79d79707d23e6`
@@ -38,7 +37,8 @@
 - Warmup: 12 iterations per benchmark
 - Measurement: 5 iterations per benchmark
 - Default iterations: 100,000
-- ABBA output file: benchmarks/2026-04-20_230529_c3c6d4cc_x86_64_abba.txt
+- ABBA output file: benchmarks/2026-04-21_055552_ca4e19d0_x86_64_abba.txt
+- ABBA reps: 5 (20 runs, 10 per condition)
 
 ## 7. Preflight Results
 All checks passed:
@@ -55,7 +55,7 @@ All checks passed:
 | coroutine_chain     |      408.05 |      337.05 |   1.21x |  17.4% |
 | deep_class_super    |      536.44 |      570.70 |   0.94x |  -6.4% |
 | dict_ops            |      604.25 |      625.70 |   0.97x |  -3.6% |
-| exceptions          |      494.37 |      505.31 |   0.98x |  -2.2% |
+| exceptions          |      510.42 |      345.03 |   1.48x |  32.4% |
 | fannkuch            |      705.68 |      583.27 |   1.21x |  17.3% |
 | fibonacci           |     1186.27 |      467.81 |   2.54x |  60.6% |
 | float_arith         |      573.50 |      517.47 |   1.11x |   9.8% |
@@ -81,8 +81,8 @@ All checks passed:
 | unpack_seq          |      692.19 |      497.36 |   1.39x |  28.1% |
 | yield_from          |      384.52 |      387.44 |   0.99x |  -0.8% |
 |---------------------|-------------|-------------|---------|--------|
-| **GEOMEAN**         |             |             | **1.19x** | **18.9%** |
-| **TOTAL**           |    15446.57 |    13071.44 | **1.18x** | **15.4%** |
+| **GEOMEAN**         |             |             | **1.20x** | **19.5%** |
+| **TOTAL**           |    15186.82 |    12772.92 | **1.19x** | **15.9%** |
 
 ## 9. Run Ordering and Timing
 
@@ -111,7 +111,7 @@ No CPU contention (single ABBA, verified by ps).
 - **string_ops 0.91x**: JIT 9% slower. Variance between runs.
 - **deep_class_super 0.94x**: JIT 6% slower. Pre-existing.
 - **yield_from 0.99x**: Near-neutral.
-- **exceptions 0.99x**: Neutral after revert of Branch optimization (63c617ab). Recoverable to ~1.48x with proper LICM fix (theologian's spec, session 11).
+- **exceptions 1.48x**: Recovered from 0.99x via FM2 + Branch + NOT_TAKEN + LICM header-only fix.
 
 ## Test Suite
 
@@ -123,6 +123,6 @@ No CPU contention (single ABBA, verified by ps).
 
 ## Known Deferred Issues
 
-1. 63c617ab Branch optimization reverted (prerequisite LICM fix not yet implemented — theologian's FM2 spec ready for session 11)
-2. No pre-overlay clean-LTO baseline for comparison (MakeList crash prevented prior measurement — cherry-pick experiment planned for Phase 2)
-3. method_calls 0.67x uninvestigated — root cause unknown, Phase 2 priority
+1. method_calls 0.67x in-suite (0.67x is IC pollution ordering effect — 437ms isolated vs 912ms in-suite; recompilation design spec'd for future session)
+2. No pre-overlay clean-LTO baseline for full suite comparison (pre-overlay method_calls isolated: 549ms = 1.11x)
+3. Guard-triggered recompilation design validated but not implemented (D-1776768252)
