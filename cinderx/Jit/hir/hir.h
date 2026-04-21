@@ -3958,6 +3958,9 @@ class BasicBlock {
   codegen::CodeSection section() const { return section_; }
   void setSection(codegen::CodeSection section) { section_ = section; }
 
+  bool isExceptionHandler() const { return is_exc_handler_; }
+  void setIsExceptionHandler(bool v) { is_exc_handler_ = v; }
+
   // Basic blocks belong to a list of all blocks in their CFG
   IntrusiveListNode cfg_node;
 
@@ -3985,6 +3988,8 @@ class BasicBlock {
 
   // Code section for outlining (default: hot).
   codegen::CodeSection section_{codegen::CodeSection::kHot};
+
+  bool is_exc_handler_{false};
 };
 
 class Environment {

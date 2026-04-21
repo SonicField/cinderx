@@ -151,6 +151,9 @@ int hoistInvariantGuards(LoopInfo& loop) {
     if (block == loop.preheader) {
       continue;  // Don't scan the preheader itself
     }
+    if (block->isExceptionHandler()) {
+      continue;  // Don't hoist from exception handler blocks
+    }
     for (auto it = block->begin(); it != block->end(); ++it) {
       Instr& instr = *it;
       if (!isHoistableGuard(instr)) {

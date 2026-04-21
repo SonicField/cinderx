@@ -747,6 +747,7 @@ void HIRBuilder::emitInlineExceptionMatch(
     match_call->SetOperand(0, exc_type_reg);
 
     BasicBlock* match_block = cfg.AllocateBlock();
+    match_block->setIsExceptionHandler(true);
     BasicBlock* deopt_block = cfg.AllocateBlock();
     exc_tc.emit<CondBranch>(match_result, match_block, deopt_block);
 
@@ -801,9 +802,15 @@ void HIRBuilder::emitInlineExceptionMatch(
           }
           case JUMP_BACKWARD:
           case JUMP_BACKWARD_NO_INTERRUPT: {
-            match_tc.frame.cur_instr_offs = ebc.getJumpTarget();
-            match_tc.emitSnapshot();
-            match_tc.emit<Deopt>();
+            BCOffset target_off = ebc.getJumpTarget();
+            BasicBlock* target = getBlockAtOff(target_off);
+            if (target != nullptr) {
+              match_tc.emit<Branch>(target);
+            } else {
+              match_tc.frame.cur_instr_offs = target_off;
+              match_tc.emitSnapshot();
+              match_tc.emit<Deopt>();
+            }
             emitted_terminator = true;
             break;
           }
