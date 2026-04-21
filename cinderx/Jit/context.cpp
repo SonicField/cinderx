@@ -518,7 +518,27 @@ void jitgen_data_free(PyGenObject* gen) {
 #endif // PY_VERSION_HEX < 0x030C0000
 
 void Context::forgetCode(BorrowedRef<PyFunctionObject> func) {
-  compiled_codes_.erase(CompilationKey{func});
+  CompilationKey key{func};
+  auto it = compiled_codes_.find(key);
+  if (it != compiled_codes_.end()) {
+    // Remove this function's patchers from type_deopt_patchers_ before
+    // freeing them. Otherwise notifyTypeModified will dereference freed
+    // patcher pointers (use-after-free during GC type cleanup).
+    for (auto& patcher : it->second->mutableData().code_patchers) {
+      TypeDeoptPatcher* raw = dynamic_cast<TypeDeoptPatcher*>(patcher.get());
+      if (raw == nullptr) {
+        continue;
+      }
+      for (auto& [type, patchers] : type_deopt_patchers_) {
+        auto pit = std::find(patchers.begin(), patchers.end(), raw);
+        if (pit != patchers.end()) {
+          patchers.erase(pit);
+          break;
+        }
+      }
+    }
+    compiled_codes_.erase(it);
+  }
 }
 
 bool Context::didCompile(BorrowedRef<PyFunctionObject> func) {
