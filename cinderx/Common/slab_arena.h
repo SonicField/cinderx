@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <utility>
 #include <vector>
@@ -141,6 +142,7 @@ class SlabArena {
       }
 #endif
     }
+    std::memset(mem, 0, SizeTrait::size());
     return new (mem) T(std::forward<Args>(args)...);
   }
 
