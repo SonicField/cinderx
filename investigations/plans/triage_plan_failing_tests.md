@@ -177,16 +177,80 @@ Within each group: smaller blast-radius first.
 
 ### B1. test_jit_support_instrumentation cluster (8 failures + 8 errors)
 
-- **Symptom:** 16 failures in setprofile/settrace integration with JIT
+- **Symptom (per testkeeper 05:12:46Z chat post):** 16 distinct failures + errors in `test_jit_support_instrumentation` test module covering setprofile / settrace / monitoring / coverage tool integration with JIT-compiled frames
 - **Step B1.0 (classification — must precede hypothesis):** group the 16 by error message + top-of-stack. Are they all the same root cause or multiple?
   - **Falsifier:** if failures split into ≥2 distinct root-cause classes, sub-task each class separately as B1a, B1b, ... Each sub-task gets its own hypothesis + falsifier.
 - **Hypothesis (subject to B1.0 outcome):** single root cause — JIT-compiled frames don't emit profile/trace events, OR emit wrong frame-type for sys.setprofile callback
-- **Verification mode:**
-  - HIR dump of one failing trace to confirm whether trace-event emission is in IR
-  - Compare to interpreter path event emission for same code
-- **Falsifier:** if HIR shows trace events ARE emitted but tests still fail, hypothesis wrong — failure is in event content (frame type, line number, etc.), not event emission. Re-classify.
-- **Fix-success:** 0F/0E across 5 runs; criterion (j) holds at fix commit
-- **Owner:** generalist (impl, requires HIR familiarity), testkeeper (verify)
+- **Verification mode (HIR-final-dump-FIRST per A1 lessons):**
+  - HIR-final-dump for ONE JIT-compiled function in the failing test path (printer.cpp:265 kGuardOverflow case is in tree per 46c26256, unblocks final-HIR-dump diagnostic)
+  - Compare HIR to interpreter-path event-emission for the same Python code
+  - Identify whether trace event ops (e.g., kEmitProfileEvent, kEmitTraceEvent, kCallProfileFunc — verify exact HIR op names same-turn before fix work) are emitted in the JIT path
+- **Falsifier branches (Phase 2 mechanism candidates, mirroring A1 4-branch shape):**
+  - (a) **HIR builder gap:** profile/trace event ops are NOT emitted by HIR builder for relevant bytecode patterns (CALL / RETURN / RESUME / etc.). Fix at HIR builder.
+  - (b) **HIR-pass elision:** event ops emitted by builder but eliminated by DCE / copy-prop / similar pass that doesn't recognize their side-effect semantics. Fix at the eliminating pass.
+  - (c) **LIR codegen bug:** HIR has event ops but LIR translation drops them or emits wrong runtime call. Fix at LIR codegen.
+  - (d) **JITRT runtime bug:** event ops correctly emitted + lowered, but JITRT helper that delivers events to Python sys.setprofile callback either fails or passes wrong frame-type. Fix at runtime helper.
+- **Falsifier on the bug class:** if a failing test method PASSES under cinderx-built python WITHOUT -X jit-all (i.e., interpreter only), bug is JIT-induced. If it ALSO fails interpreter-only, bug is in cinderx runtime not JIT — escalate to runtime triage. (Pre-checked: testkeeper Phase 0 at 05:12:46Z showed these are JIT-related; falsifier expected NOT to fire but worth re-confirming at fix-commit time.)
+- **Bug-class naming convention applied (per A1 entry's convention):** if multiple distinct bugs surface during B1.0 classification, name explicitly as B1-Bug-X / B1-Bug-Y rather than -L / no-L flag distinctions or other ambiguous markers.
+- **Fix-success:** 0F/0E across 5 runs of test_jit_support_instrumentation; gate (j) full-suite re-run shows failure count drops by 16 (cluster fully resolved) OR by N where N is the number of root-cause-classes confirmed-fixed (if B1.0 surfaces ≥2 distinct classes); gate (k) ABBA shows no perf regression (per A1 c64e7682 lesson: HIR-pass changes can have broad cost; profile/trace emission additions could affect hot-path perf if added per-call); criterion (l) holds at fix commit.
+- **Owner:** generalist (impl, requires HIR familiarity for builder/passes/codegen layers), testkeeper (verify), theologian (root-cause + falsifier review)
+- **Priority:** per A-class-partial-close priority rule re-interpretation (theologian 14:39:42Z + supervisor 14:39:38Z concurrence): B1 takes priority over A2 (Bug A latent SIGSEGV) because B1 is in failing list (fixing reduces failure count 9→ depending on cluster split) and A2 is not in failing list (fixing doesn't reduce floor). Rule's stated intent is failure-count-floor reduction; B1 directly serves that.
+
+#### B1 Execution Protocol (5 phases, mirrors A1 protocol)
+
+**Phase 0 — Reproduction + classification (testkeeper)**
+- Run failing test in isolation: `PYTHONPATH=cinderx/PythonLib python3 -m unittest test.test_jit_support_instrumentation -v`
+- Capture stack trace + return code per failing method → `/tmp/B1_repro_TS.log`
+- **Classification (Step B1.0 falsifier check):** group the 16 (8F + 8E) by error message + top-of-stack. If split into ≥2 root-cause classes, file each as B1a / B1b / ... separately.
+- **Falsifier:** if any test method passes 5/5 in isolation, classify as parallel-only (different bug class). Re-route per A1 protocol Phase 0 falsifier.
+
+**Phase 1 — Hypothesis confirmation OR falsification (generalist + theologian)**
+- 1a: pick ONE representative failing test method per root-cause class (per Phase 0 classification)
+- 1b: HIR-final-dump for that test's JIT-compiled function path (per memory feedback_lir_dump_first_for_null_deref_sigsegv.md analog for graceful-failure class)
+- 1c: cinderx-built-without-JIT differential — does the test pass without -X jit-all?
+  - If YES → JIT-induced, hypothesis stands; proceed to Phase 2 with HIR/LIR analysis
+  - If NO → cinderx runtime bug; reroute to runtime triage; B1 falsifier-on-bug-class fires
+- 1d: vanilla CPython 3.12.13 differential — does the test pass under upstream?
+  - If NO → bug is upstream; close-as-upstream OUT of plan
+  - If YES → cinderx-side bug confirmed (combined with 1c result)
+
+**Phase 2 — Root cause (generalist implements, theologian reviews)**
+- Per A1 lessons (LIR-dump-FIRST for SIGSEGV class; HIR-final-dump-FIRST for graceful-failure class): start with EMPIRICAL HIR/LIR data, not chat-reasoning hypothesis chains
+- Discriminate falsifier branches (a)/(b)/(c)/(d) via observable HIR/LIR evidence — same shape as A1 Phase 2 falsifier-discipline
+- Identify the specific HIR op or LIR codegen step responsible for missing/dropped/wrong event emission
+- Document root cause in fix commit message (mechanism, not just symptom)
+
+**Phase 3 — Fix (generalist)**
+- ONE commit per root-cause class (multiple commits if B1.0 surfaced ≥2 classes); each includes regression test (sentinel using sys.setprofile / settrace + JIT-compiled function) in the same commit
+- Discipline: address root cause; NO suppression / skip-list addition (per alexie 11:37:49Z 'no more skips' binding)
+- **Pre-commit gates (all must pass) per A1 Phase 3 protocol:**
+  - 5/5 PASS on the original failing test method(s) in isolation
+  - 5/5 PASS on the new sentinel
+  - Cinderx-built-with-JIT and cinderx-built-without-JIT both pass (regression check)
+  - Criterion (j) full suite at fix-commit vs prior commit (failure count strictly DECREASES — by N for N classes fixed; skip count unchanged)
+  - Criterion (l) staged-diff empty post-stage; matches intended files only
+  - Gate (k) ABBA: no per-benchmark regressions vs baseline (per c64e7682 lesson; profile/trace HIR ops could affect hot-path perf if added per-call)
+
+**Phase 4 — Theologian falsifier review (theologian, post-commit)**
+- Did the fix address the named root cause, or suppress the symptom?
+- Does the regression sentinel actually exercise the originally-failing path?
+- Are the verification gates documented in commit message (Logos-only per alexie 11:38:36Z, no Ethos appeals)?
+- Does the fix close all 16 cluster failures or only the targeted root-cause class? If partial, what's the remaining surface?
+
+**Phase 5 — Plan adaptation log entry (generalist or theologian)**
+- Append to the B1 entry adaptation log section with: timestamp, B1.0 classification outcome, fix outcomes per class, evidence pointers (commit SHA + sentinel test paths), any newly-surfaced adjacent bugs (per A1's Bug A pattern: bug-A-as-spawned may surface; treat as separate workstream NOT bundled into B1 closure)
+
+**Phase exit conditions:**
+- B1 closes when: B1.0 classification complete + each root-cause class has Phase 3+4+5 done + cluster failure count fully accounted for
+- B2 begins per Group B internal ordering (B1→B2→B3 per existing entries)
+
+**Lessons-from-A1 explicitly applied to B1 protocol:**
+- Empirical-data-bounded pivots only (no chat-reasoning hypothesis chains; HIR-final-dump FIRST)
+- Bug-class naming convention from outset (any spawned-adjacent bug gets explicit naming, not flag-distinction)
+- Per-fix-commit-empirical verification: pre-fix-FAIL + post-fix-PASS on the actual failing test (not just on a related repro that may surface different bug class — c64e7682 lesson)
+- Gate (k) ABBA verification at fix-commit (HIR-pass changes can have broad perf cost — c64e7682 -9.24% lesson)
+- Don't claim closure until empirical pre-fix-fail + post-fix-pass on the actual failing test (4 hr Bug-A-misdirection cycle lesson)
+- Future-retry candidates documented in Phase 5 if fix is partial (not all 16 cluster failures resolve in single commit)
 
 ### B2. test_jit_perf_map.test_forked_pid_map
 
