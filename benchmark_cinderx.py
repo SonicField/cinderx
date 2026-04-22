@@ -25,6 +25,16 @@ COMPILE MODES:
                    2026-Feb-22 directive); bypasses type profiling/IC
                    specialization required for representative measurements.
 
+FAST MODE (--fast):
+  Smoke-test mode: filters JIT_BENCHMARKS to ~9 representative benchmarks
+  spanning distinct hot-paths (gen_nested, func_calls, method_calls,
+  coroutine_chain, exceptions, richards_full, nbody, list_comp, pytorch_cm)
+  and defaults --reps=1. Target ~10-15 min vs ~80 min full ABBA.
+  USE FOR: test-only commits, build hygiene fixes, small commits, dev smoke.
+  DO NOT USE FOR: production-behavior changes, pre-push gate (k), HIR /
+  builder / codegen / config-default touches. Per alexie 2026-04-22
+  16:41Z + 23:22Z direction.
+
 FALSIFICATION:
   - Control: run without CinderX → delta should be ~0 for in-process tests
   - IQR must not span zero for a result to be marked significant
@@ -1535,6 +1545,27 @@ JIT_BENCHMARKS = [
     ("pytorch_cm",      bench_pytorch_cm),
 ]
 
+# Fast-mode subset for smoke testing on test-only / small commits.
+# Picked to span distinct hot-paths so a regression in any major class
+# (generators, dispatch, exceptions, OO, numeric, comprehension, framework)
+# surfaces in the subset. NOT a substitute for full ABBA on production-
+# behavior changes. Use --fast for: test-only commits, build hygiene fixes,
+# doc / triage_plan edits with possible code touch, smoke testing during
+# development. Use full (no --fast) for: HIR/builder/codegen/config-default
+# changes, pre-push gate (k), any commit affecting hot paths.
+# Per alexie 2026-04-22 16:41:28Z + 23:22:08Z direction.
+FAST_JIT_BENCHMARK_NAMES = [
+    "gen_nested",       # generators (one of today's biggest losers)
+    "func_calls",       # function dispatch
+    "method_calls",     # method dispatch + IC specialization
+    "coroutine_chain",  # coroutines
+    "exceptions",       # control flow / exception handling
+    "richards_full",    # classic OO workload
+    "nbody",            # numeric / float-heavy
+    "list_comp",        # comprehension hot path
+    "pytorch_cm",       # framework / context manager overhead
+]
+
 # Calibrated iteration counts so each benchmark takes ~500ms on JIT.
 # Prevents fast benchmarks (gen_simple 6ms) from being drowned by slow ones
 # (fibonacci 6.6s). Geomean with rebalanced benchmarks gives equal weight
@@ -2166,7 +2197,14 @@ def cmd_jit(args):
     print(f"Reps:         {args.reps} (= {args.reps * 4} runs, "
           f"{args.reps * 2} per condition)")
     print(f"Compile mode: {args.compile}")
+    if args.fast:
+        print(f"Mode:         FAST (subset of "
+              f"{len(FAST_JIT_BENCHMARK_NAMES)} benchmarks; "
+              f"results indicative not authoritative)")
     print()
+
+    # Fast-mode filter: pass curated subset to worker subprocesses
+    fast_filter = FAST_JIT_BENCHMARK_NAMES if args.fast else None
 
     # Python commands (resolved in main() preflight — no fallbacks)
     venv_python = os.environ.get("CINDERX_PYTHON") or os.path.join(
@@ -2197,7 +2235,10 @@ def cmd_jit(args):
                 end="", flush=True,
             )
 
-            result = _run_worker(cmd, condition, args.compile)
+            result = _run_worker(
+                cmd, condition, args.compile,
+                filter_benchmarks=fast_filter,
+            )
             if result:
                 total_ms = sum(
                     b["mean_ms"] for b in result["benchmarks"].values()
@@ -2634,7 +2675,18 @@ Environment variables:
     )
     parser.add_argument(
         "--reps", type=int, default=2,
-        help="ABBA repetitions for subprocess tests (default: 2)",
+        help="ABBA repetitions for subprocess tests (default: 2; "
+             "--fast forces 1 unless explicitly overridden)",
+    )
+    parser.add_argument(
+        "--fast", action="store_true",
+        help="Fast smoke-test mode: filters JIT_BENCHMARKS to a curated "
+             "subset of ~9 benchmarks spanning distinct hot-paths and "
+             "defaults --reps=1 (overrideable). Target ~10-15 min vs "
+             "~80 min full. Results indicative not authoritative — use "
+             "for test-only / small commits per alexie 2026-04-22 "
+             "16:41Z + 23:22Z direction. Production-behavior changes "
+             "MUST use full mode (no --fast) for pre-push gate (k).",
     )
 
     # Subcommand (positional, optional — worker mode has no subcommand)
@@ -2645,6 +2697,12 @@ Environment variables:
     )
 
     args = parser.parse_args()
+
+    # Fast mode default override: when --fast is set and --reps was not
+    # explicitly passed, drop reps from 2 to 1 to hit the ~10-15 min target.
+    # User can override by passing --reps=N explicitly.
+    if args.fast and "--reps" not in sys.argv:
+        args.reps = 1
 
     # Worker mode — output JSON, no banner
     if args.worker == "jit":
