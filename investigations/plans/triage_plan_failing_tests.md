@@ -50,7 +50,7 @@ Within each group: smaller blast-radius first.
 
 ---
 
-## Group A: Process-killing failures (1 item)
+## Group A: Process-killing failures + active workstream (3 items)
 
 ### A1. test_jit_preload.test_func_destroyed_during_preload
 
@@ -172,6 +172,39 @@ Within each group: smaller blast-radius first.
   - (3) **Defer unbox decision until after Phi resolution** — move simplifyLongBinaryOp specialization to a later pass that runs after Phi-elimination; specialize per-block where types are concrete.
   - (4) **FrameState semantics change** — extend GuardOverflow's deopt path to also cover unbox-failure case via preflight check. Requires understanding deopt path fully.
 - A1 retry workstream sequencing: dedicated cycle, 2-4hr candidate; pick (2) or (3) for narrowest scope. Don't commit until empirical pre/post on Bug-B-repro confirms 5/5 PASS (per pythia 22 + work-cycle Bug-A misdirection lesson). Per Bug-class naming convention (already inline in A1 entry per 56f7603a): cite repros by explicit Bug-B / Bug-A class, not by -L / no-L distinction.
+
+---
+
+### A3. Perf-regression-bisect workstream: c4e1900c..HEAD -10% geomean (active workstream; not in failing-test list)
+
+- **Symptom (per testkeeper 18:58:32Z gate (k) ABBA on post-clean-rebuild HEAD):** speculation-experiment HEAD (post-clean-rebuild, B.1+B.1.ii in worktree but X+Z held per fix #4) shows GEOMEAN 1.07x vs cached baseline c4e1900c GEOMEAN 1.19x → -10% delta. 6 NEW per-benchmark losers + 4 winner→loser flips: gen_nested 1.19x→0.63x (-58%), func_calls 1.15x→0.74x (-34%), gen_simple 1.21x→0.76x (-31%), pytorch_cm 1.27x→0.95x (-25%), coroutine_chain 1.07x→0.88x (-14%), yield_from 0.96x→0.82x (-14%). Generator + dispatch hot-paths most affected. Result: benchmarks/2026-04-22_115805_c1982ca5_b1_postfix_x86_64_abba.txt. Pattern is regression-on-prior-build-state (regression confirmed on stale build that did NOT contain B.1+B.1.ii edits per testkeeper 16:59:01Z); cause is INDEPENDENT of B.1.
+- **Why this is A3 and not in failing-test list:** perf regression doesn't manifest as a test failure (gate (j) full suite GREEN per testkeeper 17:22:37Z); it manifests as gate (k) BLOCK. NO test in current failing list exercises perf threshold. Active workstream because gate (k) BLOCK = bundle BLOCK regardless of attribution per fix #4: X+Z bundle held until A3 resolution.
+- **Hypothesis (root cause class):** cumulative perf cost from one or more commits in 47-commit c4e1900c..HEAD range. Hot-spot candidates per testkeeper diagnostic (19:00:55Z + 18:58:32Z benchmark pattern): 07d938f8 (threading guard mutex; could affect dispatch hot-path), 861762a0 (CLOEXEC fcntl in cinderx-direct opens; init-time cost), 46c26256 (printer.cpp B6 GuardOverflow case; may affect HIR codegen if exercised on hot-path), plus 794d8270 GuardType ABA-safety (already known +5.35% yield_from cost per B5 entry; may compound).
+- **Verification mode (4-step bisect plan per supervisor 19:01:59Z):**
+  - **Step 0 (testkeeper, in flight per testkeeper 19:03:21Z):** rebuild from c4e1900c isolated worktree (/tmp/cinderx-c4e1900c) + ABBA against current HEAD post-clean-rebuild. ETA ~110 min from 19:03:21Z. Quantitative threshold per supervisor 19:20:18Z: `< 5% delta` from cached baseline geomean = "matches 1.19x ± noise" (operationalizes existing memory feedback_gate_j_skip_variance.md ~3-4% noise variance applied symmetrically to perf benches); `> 5% delta` = "differs significantly" → cached baseline stale → recalculate threshold against fresh c4e1900c-rebuild number.
+  - **Step 1 (post Step 0, awaiting fresh-baseline number):** if Step 0 confirms cached baseline current-environment-replicable: bisect midpoint (~commit 24/47 in range). Run ABBA at midpoint vs c4e1900c. If midpoint matches baseline within threshold: regression in second half (commits 24-47); if midpoint matches HEAD-regression: regression in first half (commits 0-24). Iterate.
+  - **Step 2 (per Step 1 outcome):** narrow to single commit causing major share of regression. Hot-spot candidates above are first-priority bisect midpoints per Pareto: pick midpoint nearest to candidate commit cluster.
+  - **Step 3 (post Step 2):** evaluate fix candidates for the identified culprit commit (revert / re-design / acceptance per supervisor scope decision). Land fix; re-ABBA; X+Z bundle re-attempt at fixed HEAD.
+- **Falsifier branches (Phase 2 mechanism candidates):**
+  - (a) **Step 0 baseline non-replicable (delta > 5%):** cached /tmp/abba_fresh_c4e1900c_v2.txt is wrong commit OR environment drift since 02:49Z cache. Recalculate threshold; bisect against fresh c4e1900c-rebuild number.
+  - (b) **Single-commit cause:** one of hot-spot candidates is dominant cost contributor; Step 2 surfaces single revert + bundle re-attempt is ~immediate.
+  - (c) **Multi-commit cumulative cause:** no single commit dominant; multiple sources contribute. Requires per-commit ABBA accumulation; resolution timeline 1-2 day per commit class.
+  - (d) **Architectural cause (irreducible):** regression is from a design choice that can't be cheaply reverted (e.g., 794d8270 ABA-safety GuardType pattern compound across new opcodes). Resolution = supervisor scope decision (accept regression vs major rewrite vs gate_k_correctness_tradeoff_carveout.md Invocation 2).
+- **Falsifier on the bug class:** if Step 0 ABBA shows c4e1900c-fresh-rebuild geomean ALSO -10% from cached baseline (delta > 5%), the cached baseline is stale not the HEAD regression — recalculate threshold; bisect-via-fresh-baseline. Bisect framework holds; baseline number changes.
+- **Fix-success:** A3 closes when bisect identifies cause + fix lands + re-ABBA at fixed HEAD shows < 5% delta from c4e1900c baseline AND no per-benchmark regression beyond threshold. Then X+Z bundle stages + re-runs gate (k); if GREEN, X+Z bundle pushes per fix #4 release path. B1 closure attribution moves from INVESTIGATION-RE-OPEN to FULL CLOSE at that point.
+- **Owner:** testkeeper (coordinate + ABBA cycles), generalist (build cycles + bisect-commit checkout sequence), theologian (root-cause + falsifier review per Step + scope decision validation pre-implementation when fix candidates evaluated).
+- **Priority:** HIGHEST among A-class active items. Per A-class-partial-close priority rule: A3 BLOCKS X+Z bundle ship (gate (k) BLOCK = bundle BLOCK per fix #4); A1 (still open with refined Phi-input hypothesis) + A2 (latent SIGSEGV, default deferred per A2 trigger condition) queue behind A3 for failure-count-floor reduction priority.
+- **Trigger condition for A3 workstream phases:** in flight per testkeeper 19:03:21Z. First decision-point checkpoint when Step 0 ABBA returns (~110 min ETA from 19:03:21Z = ~20:53Z). Subsequent checkpoints per Step 1/2/3 outcome.
+- **Cross-references:**
+  - testkeeper 18:58:32Z gate (k) BLOCK + per-benchmark breakdown
+  - testkeeper 19:00:55Z hot-spot candidates (07d938f8 / 861762a0 / 46c26256 / 794d8270)
+  - testkeeper 19:03:21Z Step 0 in-flight (isolated worktree + clean rebuild)
+  - supervisor 19:01:59Z 4-step bisect plan + A3 owner triple
+  - supervisor 19:20:18Z 5% threshold per memory feedback_gate_j_skip_variance.md
+  - pythia 30 #1 quantitative threshold gap + #2 chat-only-deferral risk surface (this entry IS the artifact-side resolution per pythia 30 #2)
+  - benchmarks/2026-04-22_115805_c1982ca5_b1_postfix_x86_64_abba.txt (gate (k) BLOCK result)
+  - B1 entry STATUS block (cross-references this A3 as the bundle-blocking workstream)
+  - B5 entry (existing yield_from regression workstream; A3 may subsume B5 if 794d8270 surfaces as A3 hot-spot)
 
 ---
 
@@ -484,3 +517,4 @@ Future maintainers: append entries here when a falsifier fires or scope shifts. 
 ```
 
 - 2026-04-22T18:58:32Z — B1 — INVESTIGATION-RE-OPEN per gate (k) BLOCK post-clean-rebuild ABBA — fix B.1+B.1.ii (config-flag-on-by-test-API + cinderx.test_support wrapper + pythia 24 #1 underscore-prefix mitigation at C-method) test-validation-chain integrity confirmed via 16/16 module pass + 15F+1E sanity check without enable() call (testkeeper 17:22:37Z); perf regression cause is INDEPENDENT of B.1 (regression present on pre-rebuild stale build that did NOT contain B.1 changes); per gate (k) BLOCK = bundle BLOCK regardless of attribution (theologian fix #4 + supervisor 18:08:11Z): X + Z bundle held pending separate bisect workstream (47 commits in c4e1900c..HEAD range; cached intermediate ABBA at c1982ca5 available per testkeeper 18:58:32Z diagnostics); Y' (this commit) ships standalone per content-categorization (theologian 18:54:53Z + supervisor 18:55:08Z) with A2 ownership encoding (Edit 2) + hypothesis-revision-budget cross-cutting rule (Edit 4) + B6 struct-layout entry (Edit 5). Pre-rebuild misdirection (16:59Z testkeeper diagnostic): build-state vs source-state divergence at JitConfig offset 0xe (Hypothesis E, residual-by-elimination after A/B/C/D ruled out per testkeeper 17:17:27Z); dual-rebuild post-clean-rebuild verification (testkeeper 17:22:37Z + 17:32:33Z) confirms post-clean-build correctness; does NOT positively confirm struct-layout-divergence mechanism per pythia 27 #3 (overreach retracted per theologian 18:07ish + supervisor 18:08:11Z); positive struct-diff structurally unobtainable (pre-rebuild .so overwritten per testkeeper 17:27:01Z); deferred to B6 implementation work. NO B1c entry per testkeeper 14:10:40Z cascade-not-separate empirical correction. Bundle X + Z re-attempt awaits perf-regression-bisect resolution.
+- 2026-04-22T19:20:18Z — A3 — NEW workstream entry per pythia 30 #2 chat-only-deferral surface — perf-regression-bisect workstream (c4e1900c..HEAD -10% geomean, 6 new losers + 4 winner→loser flips) added as Group A entry with named owners (testkeeper coordinate + generalist build-cycles + theologian falsifier), 4-step bisect plan (Step 0 in flight per testkeeper 19:03:21Z, ~110 min ETA), hot-spot candidates (07d938f8 / 861762a0 / 46c26256 / 794d8270), and quantitative threshold per supervisor 19:20:18Z (5% delta per memory feedback_gate_j_skip_variance.md operationalized). This commit (Y'') ships standalone with the A3 entry as artifact-side resolution to pythia 30 #2 (bisect workstream was chat-only post-Y'); recursive-policy-collapse risk closed for A3. X+Z bundle remains held pending A3 resolution per fix #4.
