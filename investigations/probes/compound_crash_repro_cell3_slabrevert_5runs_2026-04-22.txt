@@ -1,0 +1,40 @@
+=== run 1 ===
+Starting bench_deep_class warmup
+warmup done
+Running bench_deep_class(50000)
+Running bench_json_roundtrip warmup
+Running bench_json_roundtrip(50000)
+DONE
+EXIT=0
+=== run 2 ===
+Starting bench_deep_class warmup
+warmup done
+Running bench_deep_class(50000)
+Running bench_json_roundtrip warmup
+Running bench_json_roundtrip(50000)
+DONE
+EXIT=0
+=== run 3 ===
+Starting bench_deep_class warmup
+warmup done
+Running bench_deep_class(50000)
+Running bench_json_roundtrip warmup
+Running bench_json_roundtrip(50000)
+DONE
+EXIT=0
+=== run 4 ===
+Starting bench_deep_class warmup
+warmup done
+Running bench_deep_class(50000)
+Running bench_json_roundtrip warmup
+Running bench_json_roundtrip(50000)
+DONE
+EXIT=0
+=== run 5 ===
+Starting bench_deep_class warmup
+warmup done
+Running bench_deep_class(50000)
+Running bench_json_roundtrip warmup
+Running bench_json_roundtrip(50000)
+DONE
+EXIT=0
