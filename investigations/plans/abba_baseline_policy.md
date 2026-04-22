@@ -78,6 +78,26 @@ When the canonical baseline changes for reasons other than ratchet — release c
 2. **On gate (k) PASS:** if any benchmark improved ≥2% vs baseline, supervisor commits a baseline.json update with those advances. Commit message lists each advance: `Advance baseline.json: fibonacci 2.44x → 2.49x (+2.1%); int_arith 1.58x → 1.62x (+2.5%)`. Other benchmarks unchanged.
 3. **Periodic re-anchor:** when triggered (release cut, hardware change, etc.), supervisor runs full ABBA on the new anchor commit, regenerates baseline.json with fresh values, appends to `reanchor_history`, commits.
 
+## Baseline-cannot-run carve-out
+
+**Default expectation:** the canonical baseline (the commit that anchors `benchmarks/baseline.json`) can complete a clean ABBA run. Gate (k) compares HEAD ABBA to that baseline ABBA per the operational rules above.
+
+**Carve-out:** when the canonical baseline CANNOT complete ABBA — for example because the bug being fixed in the current bundle crashes the benchmark runner — the bundle uses the **first crash-fix-clean commit** as effective baseline instead of the true parent. Pre-effective-baseline commits in the bundle are gated by **crash-fix evidence** (a falsifier-proven matrix at `investigations/probes/`) instead of ABBA.
+
+**Per-occurrence documentation requirement:** every carve-out invocation MUST land an entry in this section listing (a) the failing baseline commit, (b) the failure evidence (cite the truncated ABBA log), (c) the chosen effective baseline + reason, (d) the crash-fix evidence covering the un-ABBA-able pre-effective-baseline commits, (e) cross-day/cross-environment noise notes if applicable.
+
+### Invocation 1 — speculation-experiment bundle (2026-04-22)
+
+- **Failing baseline commit:** 9df470d0 (parent of 794d8270, the first commit in the bundle).
+- **Failure evidence:** `/tmp/abba_BASE_9df470d0.txt` shows `Run 4/20: JIT_ON (rep 1) ... Worker failed (exit -7): FAILED`. SIGBUS = -7. Bench_deep_class workload triggers the very crash this bundle fixes (slab-init UAF + forgetCode use-after-free). True-parent ABBA is empirically impossible — the parent's own bug crashes the runner. (Testkeeper 05:57:56Z report.)
+- **Chosen effective baseline:** c4e1900c (commit 3 in the bundle; first crash-fix-clean state). ABBA log at `benchmarks/2026-04-21_151928_c4e1900c_x86_64_abba.txt` (mtime 2026-04-21 16:45 UTC, GEOMEAN 1.23x). `benchmarks/baseline.json` initialized from this file with the carve-out cited in `reanchor_history`.
+- **Crash-fix evidence for pre-c4e1900c commits (794d8270, 78cee3c7, c4e1900c, fbefef0a):** `investigations/probes/compound_crash_*` — n=5 4-cell matrix shows 5/5 EXIT=0 on fix tree, 5/5 EXIT=139 SIGSEGV on revert tree. These commits are correctness fixes, never had perf goals; ABBA was never the right gate. (See defensive-patch-tracker.md JOINT entry for 78cee3c7+c4e1900c.)
+- **Cross-day noise note:** the c4e1900c ABBA was captured at 2026-04-21 16:45 UTC; HEAD ABBA will be captured at 2026-04-22 some hours later (exact time when testkeeper completes the run). Cross-day comparison includes hardware/load noise that same-day comparison would not. The 5% per-benchmark threshold absorbs typical noise of this magnitude (per σ ≈ 2% analysis in `abba_fast_mode_proposal.md`); transparency about the cross-day window is the requirement, not a defeating problem.
+
+**Falsifier on the carve-out itself (theologian 05:59:28Z):** this is a ONE-TIME exception for the speculation-experiment bundle because its parent contains the exact bug the bundle fixes. If a FUTURE bundle ALSO requires a non-canonical baseline because its parent crashes ABBA, this exception is no longer one-time and the carve-out has become a recurring pattern. At that point this document needs revision — the policy should explicitly handle 'baseline crashes' as a normal case rather than a deviation, OR investigate why bundles routinely target their own bugs' fixes (which suggests a deeper testing-discipline gap).
+
+After this push lands, the canonical baseline becomes the post-merge HEAD; the next bundle's parent will not have this constraint by construction.
+
 ## Open design choices — autonomous resolutions
 
 These were the open choices in supervisor's 05:34:46Z proposal; resolved per supervisor 05:48:22Z autonomous-mode authority.

@@ -1,0 +1,161 @@
+{
+  "anchor_commit": "c4e1900c",
+  "anchor_date": "2026-04-21",
+  "benchmarks": {
+    "chaos_game": {
+      "cinderx_ms": 506.21,
+      "speedup": 0.99,
+      "vanilla_ms": 499.22
+    },
+    "coroutine_chain": {
+      "cinderx_ms": 350.59,
+      "speedup": 1.18,
+      "vanilla_ms": 415.15
+    },
+    "deep_class_super": {
+      "cinderx_ms": 577.82,
+      "speedup": 0.93,
+      "vanilla_ms": 537.6
+    },
+    "dict_ops": {
+      "cinderx_ms": 588.71,
+      "speedup": 1.02,
+      "vanilla_ms": 600.4
+    },
+    "exceptions": {
+      "cinderx_ms": 351.69,
+      "speedup": 1.44,
+      "vanilla_ms": 507.24
+    },
+    "fannkuch": {
+      "cinderx_ms": 591.7,
+      "speedup": 1.17,
+      "vanilla_ms": 690.42
+    },
+    "fibonacci": {
+      "cinderx_ms": 471.64,
+      "speedup": 2.44,
+      "vanilla_ms": 1152.59
+    },
+    "float_arith": {
+      "cinderx_ms": 514.82,
+      "speedup": 1.11,
+      "vanilla_ms": 570.32
+    },
+    "func_calls": {
+      "cinderx_ms": 307.93,
+      "speedup": 1.17,
+      "vanilla_ms": 360.51
+    },
+    "gen_nested": {
+      "cinderx_ms": 245.28,
+      "speedup": 1.2,
+      "vanilla_ms": 293.26
+    },
+    "gen_simple": {
+      "cinderx_ms": 305.11,
+      "speedup": 1.24,
+      "vanilla_ms": 377.39
+    },
+    "import_callee": {
+      "cinderx_ms": 412.6,
+      "speedup": 1.44,
+      "vanilla_ms": 592.86
+    },
+    "int_arith": {
+      "cinderx_ms": 344.95,
+      "speedup": 1.58,
+      "vanilla_ms": 545.56
+    },
+    "json_roundtrip": {
+      "cinderx_ms": 519.84,
+      "speedup": 1.13,
+      "vanilla_ms": 587.06
+    },
+    "list_comp": {
+      "cinderx_ms": 551.98,
+      "speedup": 0.88,
+      "vanilla_ms": 487.31
+    },
+    "method_calls": {
+      "cinderx_ms": 908.61,
+      "speedup": 0.68,
+      "vanilla_ms": 620.34
+    },
+    "nbody": {
+      "cinderx_ms": 554.13,
+      "speedup": 1.27,
+      "vanilla_ms": 703.24
+    },
+    "nn_module": {
+      "cinderx_ms": 470.44,
+      "speedup": 1.05,
+      "vanilla_ms": 495.36
+    },
+    "nqueens": {
+      "cinderx_ms": 515.75,
+      "speedup": 1.55,
+      "vanilla_ms": 799.5
+    },
+    "positional_dispatch": {
+      "cinderx_ms": 441.61,
+      "speedup": 1.36,
+      "vanilla_ms": 600.57
+    },
+    "pytorch_cm": {
+      "cinderx_ms": 188.29,
+      "speedup": 1.26,
+      "vanilla_ms": 237.24
+    },
+    "richards_full": {
+      "cinderx_ms": 172.38,
+      "speedup": 1.63,
+      "vanilla_ms": 281.55
+    },
+    "richards_slots": {
+      "cinderx_ms": 390.26,
+      "speedup": 1.3,
+      "vanilla_ms": 507.41
+    },
+    "spectral_norm": {
+      "cinderx_ms": 401.64,
+      "speedup": 1.19,
+      "vanilla_ms": 479.78
+    },
+    "store_subscr": {
+      "cinderx_ms": 561.96,
+      "speedup": 1.09,
+      "vanilla_ms": 615.17
+    },
+    "string_ops": {
+      "cinderx_ms": 516.74,
+      "speedup": 1.05,
+      "vanilla_ms": 540.88
+    },
+    "try_except_callee": {
+      "cinderx_ms": 416.79,
+      "speedup": 1.59,
+      "vanilla_ms": 662.96
+    },
+    "unpack_seq": {
+      "cinderx_ms": 488.38,
+      "speedup": 1.53,
+      "vanilla_ms": 749.27
+    },
+    "yield_from": {
+      "cinderx_ms": 385.47,
+      "speedup": 1.06,
+      "vanilla_ms": 409.91
+    }
+  },
+  "geomean_speedup": 1.23,
+  "hardware": "x86_64",
+  "reanchor_history": [
+    {
+      "commit": "c4e1900c",
+      "date": "2026-04-21",
+      "reason": "effective baseline due to 9df470d0 ABBA crash on bench_deep_class workload (testkeeper 05:57:56Z); see investigations/probes/compound_crash_*; one-time per falsifier in abba_baseline_policy.md"
+    }
+  ],
+  "vanilla_python": "3.12.13"
+}
