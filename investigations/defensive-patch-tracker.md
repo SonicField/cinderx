@@ -1,5 +1,22 @@
 # Defensive Patch Tracker
 
+## MAIN-MERGE PRE-FLIGHT CHECKLIST
+
+**Read this before approving any sonicfield/speculation-experiment → facebookincubator/main merge.**
+
+For every entry in this tracker:
+
+1. **Read the entry.** Note the commit SHA(s) and the audit triggers.
+2. **Run each audit trigger against the current code state.** Use the cited probes (e.g., `investigations/probes/`) and config grep commands verbatim where given.
+3. **Decide go-or-revert PER ENTRY before merge.** If any audit trigger fires, the merge is NOT auto-approved on the basis of overall green; the entry's commit must either be reverted from the merge OR re-justified with new evidence.
+4. **Record the decision.** Add a 'Last main-merge audit' row update to each entry: date, commit reviewed, verdict (kept / reverted / re-justified with link).
+
+This checklist is the deferral mechanism the entries below depend on. Defensive patches in this tracker were committed under the asymmetric (d) policy on the basis that criterion-(d) gating applies at main-merge, NOT at feature-branch sync push. If this checklist is skipped, that policy collapses — defensive-only patches accumulate in main without verification.
+
+**Falsifier on the checklist:** if a main-merge happens without a 'Last main-merge audit' row update on any entry, the checklist was skipped. The next maintainer to notice should escalate to the team's policy thread.
+
+---
+
 Audit registry for defensive-only patches: patches that protect against bug classes that were not reachable in default config at the time of commit, but could become reachable via config flips, new emit sites, or upstream changes. Each entry records the reachability gates whose state determines whether the patch is still necessary.
 
 ## Audit policy
