@@ -19,8 +19,11 @@ SUBCOMMANDS:
   all     — Run all of the above
 
 COMPILE MODES:
-  --compile=force  Force-compile via cinderjit.force_compile() (default)
-  --compile=auto   Use cinderjit.auto() and warmup to trigger compilation
+  --compile=auto   Use cinderjit.auto() and warmup to trigger compilation (default)
+  --compile=force  Force-compile via cinderjit.force_compile()
+                   WARNING: NOT diagnostic of production performance (alexie
+                   2026-Feb-22 directive); bypasses type profiling/IC
+                   specialization required for representative measurements.
 
 FALSIFICATION:
   - Control: run without CinderX → delta should be ~0 for in-process tests
@@ -2612,8 +2615,10 @@ Environment variables:
 
     # Common options
     parser.add_argument(
-        "--compile", choices=["force", "auto"], default="force",
-        help="Compile mode: force (force_compile) or auto (warmup-driven)",
+        "--compile", choices=["force", "auto"], default="auto",
+        help="Compile mode: auto (warmup-driven; default per alexie "
+             "2026-Feb-22 directive D-1776273371) or force (force_compile; "
+             "NOT diagnostic of production)",
     )
     parser.add_argument(
         "--blocks", type=int, default=ABBA_BLOCKS,
@@ -2653,6 +2658,23 @@ Environment variables:
     if not args.subcommand:
         parser.print_help()
         sys.exit(1)
+
+    # Per alexie 2026-Feb-22 binding directive (D-1776273371): force-compile
+    # results are NOT diagnostic of production performance because they bypass
+    # type profiling / IC specialization required by speculative dispatch.
+    # Warn loudly when force mode is explicitly chosen.
+    if args.compile == "force":
+        print(
+            "=" * 78 + "\n"
+            "WARNING: --compile=force results are NOT diagnostic of production\n"
+            "performance per alexie 2026-Feb-22 binding directive (D-1776273371).\n"
+            "Force-compile bypasses type profiling and IC specialization required\n"
+            "for representative measurements (analogous to PGO in C/C++).\n"
+            "Use --compile=auto (now the default) for production-representative\n"
+            "benchmarks. Force mode remains available for diagnostic isolation.\n"
+            + "=" * 78,
+            file=sys.stderr,
+        )
 
     # Auto-save benchmark output
     log_path = _setup_benchmark_log()
