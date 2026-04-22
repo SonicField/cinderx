@@ -157,8 +157,29 @@ Within each group: smaller blast-radius first.
 - 2026-04-22 13:40Z: gate (k) ABBA at fix-tree HEAD shows -9.24% geomean, 12 regressions (gen_nested +85%, gen_simple +57%, etc.). c64e7682 imposed unacceptable perf cost via CheckExc-as-deopt-point on every for-loop iteration (architectural hypothesis, not empirically verified).
 - 2026-04-22 13:50Z: revert via b50319ef (revert c64e7682 + 621b44ad + 2355bd0c) + 46c26256 (re-apply orphaned priority rule + B6 printer fix). Pushed to sonicfield 14:11:39Z.
 - 2026-04-22 14:10Z: testkeeper empirical correction surfaced — A1 (the test, with -L) was always failing via FOR_ITER list-iter int corruption (Bug B); Bug A (no-L SIGSEGV) was a SEPARATE diagnostic-only bug. The 4-hour Bug-A investigation didn't address A1. Hypothesis re-pointed to Bug B per testkeeper 14:10:40Z + theologian 14:10:35Z self-correction.
-- 2026-04-22 14:13Z: this commit — A1 hypothesis updated to Bug B; A1 retry scaffolding (HIR-final-dump-FIRST + 4 falsifier branches) attached; Bug A noted as adjacent separate workstream not affecting A1.
-- A1 retry workstream begins from this entry's Phase 0 (already done) + Phase 1 verification (HIR-final-dump diagnostic).
+- 2026-04-22 14:13Z: A1 hypothesis updated to Bug B (FOR_ITER list-iter int corruption); A1 retry scaffolding attached.
+- 2026-04-22 14:18Z–14:33Z: A1 retry Phase 1 + Phase 2 + Phase 3 attempted by generalist:
+  - Phase 1 (HIR-final-dump): empirically located the corruption mechanism. JIT compiles `hi = hi + 1` (re._parser.py:209/210) via `simplifyLongBinaryOp` (cinderx/Jit/hir/simplify.cpp:1011-1032) which emits `PrimitiveUnbox<CInt64>` + `IntBinaryOp` + `GuardOverflow` + `PrimitiveBox`. When `hi = MAXWIDTH` (= 1 << 64 in re._parser.py, > INT64_MAX = Py_ssize_t max), `PrimitiveUnbox<CInt64>` raises OverflowError "Python int too large to convert to C ssize_t" directly, BEFORE the GuardOverflow check fires. The error surfaces at the outer FOR_ITER caller frame because that's where the call originated.
+  - Phase 1 falsifier (bounded-quantifier control): `b'a{1,5}b'` PASSES under -X jit-all -L (5/5 exit 0). HIR shape is IDENTICAL to `b'a*b'`; only RUNTIME values differ (bounded path never assigns MAXWIDTH to hi/lo). Confirms attribution to MAXWIDTH-touching unboxing path; (a)+(d) joint mechanism per generalist 14:24:09Z.
+  - Phase 3 fix attempt #6 (valueOutsideCInt64 surgical check at simplify.cpp:1011-1032): emits the helper `valueOutsideCInt64(Type)` that returns true when type has objectSpec with overflow per `PyLong_AsLongLongAndOverflow`, then skips the unbox path. EMPIRICALLY FALSIFIED via post-fix HIR diff: same GuardOverflow / IntBinaryOp / PrimitiveUnbox count as pre-fix; Bug B repro still 5/5 OverflowError exit 1. Reverted cleanly (single Edit, no commit).
+  - Mechanism deepens: the value flowing into `simplifyLongBinaryOp` is a Phi-merged register (e.g., `v235:Object = Phi v226 v371 v798 ...` per /tmp/A1retry_finalhir_postfix.txt:58). Phi merging at loop-recursive accumulators widens the [overflow] spec away — by the time the unbox check sees its operand, the static type is plain LongExact (no spec). Single-function spec-check at `simplifyLongBinaryOp` is too late in the pipeline.
+  - Refined hypothesis (post-Fix-#6): PrimitiveUnbox<CInt64> on values that exceed Py_ssize_t raises OverflowError. The HIR builder should not emit such an unbox when the value's source MAY include MAXWIDTH-class values (Phi-input analysis required). Static-objectSpec check at the consumer is insufficient when the value passes through Phi merges.
+- 2026-04-22 14:34Z (this commit): OPTION B (defer A1 retry) per supervisor 14:34:22Z + theologian 14:34:25Z. A1 stays open with refined hypothesis. Future retry candidates (per generalist 14:33:36Z + theologian 14:34:25Z):
+  - (1) **Flow-sensitive Phi-input analysis** — recursively check Phi inputs for [overflow] spec; conservative if any input has it. ~2-4hr novel HIR pass work; risk = c64e7682-style broad-impact uncertainty.
+  - (2) **PrimitiveUnbox runtime-deopt-on-overflow** — instead of raising OverflowError from PrimitiveUnbox<CInt64> when value doesn't fit, deopt to interpreter (re-execute BINARY_OP). LIR codegen change for kPrimitiveUnbox; per feedback_hir_not_lir.md this is wrong-level but pragmatic.
+  - (3) **Defer unbox decision until after Phi resolution** — move simplifyLongBinaryOp specialization to a later pass that runs after Phi-elimination; specialize per-block where types are concrete.
+  - (4) **FrameState semantics change** — extend GuardOverflow's deopt path to also cover unbox-failure case via preflight check. Requires understanding deopt path fully.
+- A1 retry workstream sequencing: dedicated cycle, 2-4hr candidate; pick (2) or (3) for narrowest scope. Don't commit until empirical pre/post on Bug-B-repro confirms 5/5 PASS (per pythia 22 + work-cycle Bug-A misdirection lesson).
+
+#### Bug-class file-naming convention (canonical)
+
+Per librarian 14:33:42Z (recursive-policy-collapse close) + theologian reconflation pattern N=3+ in same day:
+
+When citing repros / test variants in chat, commits, or future investigation:
+- **Bug-B repro** = `/tmp/A1_minimal_repro.py` invoked WITH `-L` flag = OverflowError 'Python int too large to convert to C ssize_t' = the actual A1 failing-test mode = TARGET of A1 retry work
+- **Bug-A repro** = `/tmp/A1_minimal_repro_no_L.py` invoked WITHOUT `-L` flag = SIGSEGV exit 139 = adjacent diagnostic-only bug = TARGET of A2 retry work (separate cycle)
+
+Refer EXPLICITLY by Bug class (Bug-B-repro / Bug-A-repro). Do NOT cite -L vs no-L in isolation; reconflation cost is high (theologian self-corrected the same A1↔Bug-A confusion at 11:52Z, 14:11Z, 14:28Z). File naming may be revised in a future cleanup commit (e.g., `/tmp/A1_BugB_repro.py` / `/tmp/A2_BugA_repro.py`); until then, use the explicit-bug-class language.
 
 ---
 
