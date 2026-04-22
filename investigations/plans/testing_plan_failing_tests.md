@@ -54,25 +54,42 @@ spec her plan elides.
 **Existing test:** `cinderx/PythonLib/test_cinderx/test_jit_preload.py:test_func_destroyed_during_preload`
 asserts subprocess returncode 0; currently asserts fail (returncode=1).
 
+**Hypothesis (corrected post-c64e7682-revert per testkeeper 14:10:40Z + theologian 14:11:26Z empirical reframe):**
+JIT FOR_ITER list-iterator specialization corrupts int representation
+during tuple-unpack `for op, av in self.data`, causing OverflowError
+('Python int too large to convert to C ssize_t') in
+re._parser.SubPattern.getwidth — surfaced via the `b'a*b'` regex
+compilation path triggered by the test's `-L -mcinderx.compiler`
+subprocess invocation. (Earlier hypothesis chain: 'JIT-preload
+mid-flight invalid argument' → falsified Phase 0; 'NULL-deref via
+missing CheckExc on InvokeIterNext' → was a SEPARATE adjacent bug
+visible only via no-L diagnostic variant; c64e7682 attempted that
+fix, REVERTED for -9.24% geomean cost. The test's actual failure
+mode under -L was always the FOR_ITER OverflowError.)
+
 **Fix-time test requirements:**
 - The existing test is the regression test. It already asserts the
   invariant. No new test needed; the existing assertion becomes
   passing.
-- If theologian's hypothesis is wrong and the bug is upstream
-  (CPython 3.12.13 OverflowError without cinderx), the test must
-  remain in tree as `@unittest.skip("upstream OverflowError, see
-  tracker entry for X")` — NOT a quiet skip. The skip annotation
-  makes the deferral visible in the gate-(j) skip count.
-- **Coverage gap to close:** add a sibling test
-  `test_func_destroyed_during_preload_minimal_repro` that exercises
-  the same code path with a smaller repro than the current test —
-  if the original test falls into upstream-skip, the minimal repro
-  may avoid the upstream trigger AND still catch the JIT-side bug.
+- Per alexie 11:37:49Z 'no more skips': test stays in failing list
+  until Bug B (FOR_ITER int corruption) is fixed. NO upstream-skip
+  fallback — vanilla CPython 3.12.13 passes the same regex (testkeeper
+  Phase 1c at 10:25:36Z), so close-as-upstream is not available.
+- **Coverage gap to close:** add a focused sentinel test that
+  exercises the FOR_ITER list-iter int-preservation invariant
+  (mirrors theologian's 12:42:18Z draft: list of (op, int) tuples,
+  JIT-compile a consumer that totals int values, assert correctness +
+  no OverflowError). Should fail pre-fix, pass post-fix.
+- **Adjacent surface to test:** generator iteration via FOR_ITER (not
+  list-iter); large-int-bound stress (2**60 values). Verify whether
+  the int-corruption is list-iter-specific or affects all iter
+  specializations.
 
 **Falsifier-proof cycle (testkeeper):**
 - Before fix lands: rerun test on bug-present tree → confirm
-  returncode=1 still observed (5/5).
+  returncode=1 still observed (5/5) with OverflowError stack (re._parser:202 → 183 FOR_ITER chain).
 - After fix lands: rerun on bug-fixed tree → returncode=0 (5/5).
+- Falsifier on the hypothesis: if pre-fix repro shows OverflowError stack diverges from re._parser FOR_ITER chain, hypothesis is incomplete; investigate other corruption sources.
 
 ### Group B — Reproducible test assertion failures
 
