@@ -1,21 +1,26 @@
-"""Compound-crash regression test for 78cee3c7 + c4e1900c.
+"""Crash regression test for the bench_deep_class SIGSEGV class
+(load-bearing fix 78cee3c7; defense-in-depth fix c4e1900c).
 
 Falsification target:
   The original-crash workload (cinderjit.auto + bench_deep_class +
   bench_json_roundtrip with compile_after_n_calls=10) must complete
   without SIGSEGV.
 
-Empirical matrix (testkeeper, 2026-04-21; archived at
+Empirical matrix (testkeeper, n=5/cell, 2026-04-22; archived at
 investigations/probes/compound_crash_falsifier_matrix_2026-04-21.md):
-  - Both fixes applied (HEAD): 5/5 EXIT=0
-  - 78cee3c7 reverted only:    EXIT=0
-  - c4e1900c reverted only:    EXIT=0
-  - BOTH reverted:             5/5 EXIT=139 (SIGSEGV)
+  - Both fixes applied (HEAD):   5/5 EXIT=0     (cell 1)
+  - 78cee3c7 reverted only:      5/5 EXIT=139   (cell 2 — load-bearing)
+  - c4e1900c reverted only:      5/5 EXIT=0     (cell 3 — defense-in-depth)
+  - BOTH reverted:               5/5 EXIT=139   (cell 4)
 
-The two fixes are JOINTLY necessary in default-config builds; neither
-alone surfaces the crash. This test drives the workload via subprocess
-so a SIGSEGV on revert exits the worker (returncode != 0) without
-killing the unittest runner.
+78cee3c7 (forgetCode patcher cleanup) is independently load-bearing;
+c4e1900c (slab arena zero-init) is defense-in-depth — ASan caught the
+underlying corruption pattern (real C-level UAF), but the workload does
+not surface SIGSEGV from c4e1900c alone in default config on the tested
+host. This test drives the workload via subprocess so a SIGSEGV on
+revert exits the worker (returncode != 0) without killing the unittest
+runner. It catches 78cee3c7 regressions (cell 2) and joint regressions
+(cell 4); slab-only regressions (cell 3) are a known soft-coverage gap.
 
 Why the inlined version (drafted 2026-04-21 ~15:50 PDT, deleted in
 the same session) was insufficient:
