@@ -38,8 +38,9 @@ These bind every fix landing under theologian's plan:
    needed, it's a separate documented decision, not a quiet test marker.
 6. **Source-attribution discipline.** Every claim about a test's behavior
    must cite the same-turn tool call (Read of file, Bash run of test,
-   chat-record cross-reference). Per session-end memory
-   project_recursive_policy_collapse_pattern.md + 5 in-session catches.
+   chat-record cross-reference). Per memory
+   project_recursive_policy_collapse_pattern.md + 5 catches in this
+   work-cycle.
 
 ## Per-bug testing requirements
 
@@ -306,7 +307,7 @@ For every fix commit landing under theologian's plan:
 
 3. **CI integration for regression tests:** RESOLVED.
    - Rule: manual cross-validation by gatekeeper + the rest of the
-     team is acceptable. No per-commit CI required this session.
+     team is acceptable. No per-commit CI required for this work-cycle.
    - Implication: each fix commit passes through gatekeeper +
      testkeeper + theologian review (three-agent cross-check) before
      landing. This is the enforcement mechanism for gate-(j).
