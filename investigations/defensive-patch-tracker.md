@@ -10,6 +10,7 @@ For every entry in this tracker:
 2. **Run each audit trigger against the current code state.** Use the cited probes (e.g., `investigations/probes/`) and config grep commands verbatim where given.
 3. **Decide go-or-revert PER ENTRY before merge.** If any audit trigger fires, the merge is NOT auto-approved on the basis of overall green; the entry's commit must either be reverted from the merge OR re-justified with new evidence.
 4. **Record the decision.** Add a 'Last main-merge audit' row update to each entry: date, commit reviewed, verdict (kept / reverted / re-justified with link).
+5. **Traverse the `Pre-existing test failures` section at the bottom of this file.** For each row, re-verify the failure mode against current HEAD and current main; if a row's failure mode no longer reproduces or has changed, update the row (or remove it) before approving the merge. Inherited tech-debt rows do NOT block the merge by default, but unverified rows hide regressions — the traversal is what keeps the section from becoming theatre.
 
 This checklist is the deferral mechanism the entries below depend on. Defensive patches in this tracker were committed under the asymmetric (d) policy on the basis that criterion-(d) gating applies at main-merge, NOT at feature-branch sync push. If this checklist is skipped, that policy collapses — defensive-only patches accumulate in main without verification.
 
@@ -68,3 +69,34 @@ Each entry records:
 - **Last audit:** 2026-04-22 (initial registration; n=5 single-host matrix observed once)
 - **Audit verdict:** 78cee3c7 `necessary` (load-bearing). c4e1900c `still-defensive` — defense-in-depth confirmed at n=5 single-host. Mechanism (silent UAF, fatal only with another bug) is ASan-detectable but does not produce default-config SIGSEGV in isolation on the tested host. Treat single-fix-c4e1900c-revert-is-safe as "shadow risk pending replication," not "verified safe."
 - **Cross-references:** `investigations/probes/compound_crash_falsifier_matrix_2026-04-21.md` (raw n=5 matrix); `investigations/probes/compound_crash_repro.py` (workload); `cinderx/PythonLib/test_cinderx/test_small_warmup_smoke.py` (criterion-d falsifier); D-1776809795 (original ASan trace); D-1776820345 (initial n=1 matrix discovery, since corrected); D-1776820847 (pythia 4 single-host caveat); D-1776821441 (testkeeper n=5 narrative correction); D-1776821479 (theologian RETRACT JOINT, post single-fix second draft, since superseded); D-1776821596 (current live softened doctrine entry, supersedes D-1776820463 + D-1776821015); D-1776821694 (theologian third-draft JOINT framing per gatekeeper discoverability suggestion — this entry).
+
+## Pre-existing test failures (tech debt, separate from gate decisions)
+
+Suites in this section fail on HEAD AND on a parent commit (testkeeper-verified — the relevant parent is recorded per row). They predate the change that surfaced them and were not introduced by it. Per the asymmetric (d) policy applied to test gates: pre-existing failures are tech debt gated separately, not regression blockers. The MAIN-MERGE PRE-FLIGHT CHECKLIST (top of file) traverses this section as step 5 — the traversal is what prevents the section from becoming theatre.
+
+**Status conventions:**
+
+- `PreExistingProven` — same failure mode reproduced on the cited parent commit (testkeeper protocol §165-174). Not introduced by this push.
+- `PreExistingClaimed-flake-hypothesis` — fails on HEAD but the falsifier appropriate to the failure mode has not been run; structural reasoning ("looks unrelated") is **not** a falsifier. Track the owed falsifier per row.
+- `superseded` — fixed, removed, or moved to defensive-patch tracker (= now reachable / load-bearing for some push).
+
+| Suite | Failure | Status | First-seen | Parent verified | Falsifier owed | Notes |
+|---|---|---|---|---|---|---|
+| `test_jit_perf_map` | `test_forked_pid_map` | PreExistingProven | session ≤8 (project memory: project_session8_tech_debt) | c4e1900c (testkeeper 2026-04-22 01:39:16Z, `/tmp/test_preexisting_check.log`) | none | perf-map fork interaction; not exercised by 78cee3c7 / c4e1900c paths. |
+| `test_jit_preload` | `test_func_destroyed_during_preload` | PreExistingProven | session ≤8 | c4e1900c (same log) | none | preloader teardown ordering; touches `Preloader` class. |
+| `test_jit_support_instrumentation` | 8 tests in `setprofile`/`settrace` integration (8 fail + 8 error) | PreExistingProven | session ≤8 | c4e1900c (same log) | none | `sys.setprofile` / `sys.settrace` integration with JIT — most invasive of the four. |
+| `test_cpython_overrides.test__opcode` | `KeyError` on `DUP_TOP_TWO` + `JUMP_IF_TRUE_OR_POP` (2 errors) | PreExistingProven | session ≤8 | c4e1900c (same log) | none | 3.10 → 3.12 opcode renaming gap in our overrides — likely small fix. |
+| `test_cmd_line` | CPython stdlib failure (EXIT=2) | PreExistingProven | 2026-04-22 (CPython regression suite) | c4e1900c (testkeeper Option-B parent-verify, `/tmp/cpython_check.log`) | none | CPython stdlib; does not exercise JIT internals (forgetCode / slab / type_deopt_patchers_ / GuardType). |
+| `test_urllib` | CPython stdlib failure (EXIT=2) | PreExistingProven | 2026-04-22 | c4e1900c (same log) | none | CPython stdlib network test. |
+| `test_urllib2` | CPython stdlib failure (EXIT=2) | PreExistingProven | 2026-04-22 | c4e1900c (same log) | none | CPython stdlib network test. |
+| `test_uu` | CPython stdlib failure (EXIT=2) | PreExistingProven | 2026-04-22 | c4e1900c (same log) | none | CPython stdlib uuencode test. |
+| `test_zipfile` | CPython stdlib failure (EXIT=2) | PreExistingProven | 2026-04-22 | c4e1900c (same log) | none | CPython stdlib zip test. |
+| `test_docxmlrpc` | Full-suite parallel-run failure; passes 5/5 individually on parent + HEAD | PreExistingClaimed-flake-hypothesis | 2026-04-22 | c4e1900c individual-PASS confirmed; full-suite cause UNVERIFIED | **N full-suite runs at HEAD vs N at parent, compare flake rates** (~10×3-5 min × 2 = ~60-100 min compute, deferred per supervisor decision) | Structural reasoning (socket/port collision under parallel load) is plausible but is **not** the falsifier; only the N-run comparison is. Hypothesis must be promoted to `PreExistingProven` or escalated once the falsifier runs. |
+
+**Audit triggers** (in addition to MAIN-MERGE PRE-FLIGHT CHECKLIST step 5 traversal):
+
+1. Any push touching JIT compilation, preloader, instrumentation hooks, opcode tables, or CPython stdlib interop should re-verify the relevant rows against the new parent commit. If failure modes change, move the row from `PreExistingProven` to defensive-patch tracker (= now considered relevant to that push) or to fix-now backlog.
+2. Any row sitting at `PreExistingClaimed-flake-hypothesis` for more than one push without the owed falsifier running is a discipline gap; the next maintainer to notice should escalate or run the falsifier.
+3. Any row whose failure mode disappears on parent re-verification at audit time is a candidate for removal from this section.
+
+**Resolution policy:** project session priority decides which to fix when. Crash fixes and correctness regressions take precedence; these can wait. Adding a row without a parent-verify run is forbidden — `PreExistingClaimed` (without `-flake-hypothesis`) and `PreExistingProven` both require the parent-verify column to be populated.
