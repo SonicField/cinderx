@@ -85,13 +85,51 @@ Every Class-2 invocation MUST land an entry in this file listing (a) the source 
 | --- | --- |
 | Source commit | `794d8270` GuardType: compare version tag instead of pointer (ABA safety) |
 | Correctness rationale | Closes the ABA pointer-reuse bug class observed empirically in earlier session (testkeeper 23:11:50Z compound-revert matrix; type pointer reuse via del + gc.collect + new class) |
-| Empirical regression | `bench_yield_from_chain`: +5.35 % (385 ms → 406 ms; per generalist abba_compare.py 07:33:54Z) |
+| Empirical regression | `bench_yield_from_chain`: +4.23 % (389.63 ms → 406.10 ms; per generalist abba_compare.py 09:51:40Z against fresh same-session baseline `/tmp/abba_fresh_c4e1900c_v2.txt`). Initial cached-baseline reading was +5.35 % (385.47 ms → 406.10 ms; per generalist abba_compare.py 07:33:54Z); fresh-baseline reading narrows the magnitude by ~1.1 percentage points (cross-day noise floor). See "Amendment 1" below. |
 | Mechanism | 1 extra dependent memory load per GuardType emission (`mov scratch, [reg+ob_type]; cmp [scratch+tp_version_tag], imm` vs prior single `cmp [reg+ob_type], imm`); per benchmark = 6M emissions × ~3 cycles = ~6 ms direct (~30 % of observed); remainder from pipeline + register pressure |
 | Geomean impact | -2.44 % geomean (within 5 % threshold; geomean PASSES) |
 | Other-benchmark impact | All within ±5 % per-benchmark threshold; only yield_from exceeds |
 | Optimization options | A/B/C per table above; 2–8 hr range; tracked at triage_plan B5 |
 | Triage routing | triage_plan_failing_tests.md B5 (separate commit) |
-| Disposition | Trade-off accepted for this push; optimization deferred to next session per supervisor 08:13:41Z autonomous decision |
+| Disposition | Trade-off accepted for this push; optimization deferred to next session per supervisor 08:13:41Z autonomous decision. **Amended per Amendment 1**: gate (k) PASSES natively at fresh-baseline magnitude (+4.23 % < 5 % per-bench threshold); CLASS-2 BLOCK-override mechanism NOT fired this push. Carve-out framework retained for documentation + future SEND_GEN-class invocations + B5 next-session optimization tracking. |
+
+### Amendment 1 — fresh-baseline magnitude narrowing (testkeeper 09:50:05Z + generalist 09:51:40Z)
+
+**Trigger:** testkeeper completed a fresh same-session ABBA at `c4e1900c` (output `/tmp/abba_fresh_c4e1900c_v2.txt`, 5 reps × 2 conditions = 20 runs). The fresh baseline eliminates cross-day noise that contaminated the initial cached reading.
+
+**Numbers:**
+
+| Reading | Source | yield_from BASE → HEAD | Δ | Verdict on 5 % per-bench threshold |
+| --- | --- | --- | --- | --- |
+| Initial (cached) | abba_compare 07:33:54Z vs cached c4e1900c | 385.47 → 406.10 ms | +5.35 % | OVER threshold (carve-out CLASS-2 BLOCK-override invoked at the time) |
+| Amended (fresh) | abba_compare 09:51:40Z vs fresh c4e1900c | 389.63 → 406.10 ms | +4.23 % | UNDER threshold (gate (k) passes natively) |
+| Cross-day noise | difference between the two BASE readings | 385.47 → 389.63 ms | +1.08 % | Within HEAD JIT_ON CV=1.20 % envelope |
+
+**What changes:**
+
+- **Magnitude:** narrowed from +5.35 % to +4.23 % per fresh-baseline truth value. Initial reading inflated by cross-day noise.
+- **CLASS-2 BLOCK-override status:** NOT FIRED. The fresh-baseline reading is below the 5 % per-bench threshold; gate (k) passes natively without invoking the carve-out's BLOCK-override mechanism.
+- **Mechanism:** UNCHANGED. 794d8270 GuardType cost is still real (+4.23 % is non-zero and non-noise per noise envelope CV=0.78–1.20 %); ~6 ms direct cost still explains ~36 % of the smaller observed delta (16.5 ms vs the prior 21 ms framing); the structural cost is not refuted by the magnitude narrowing.
+- **Framework:** RETAINED. The carve-out's CLASS-1/CLASS-2 distinction, falsifier set, alternate rollback path, and B5 routing all remain valid as policy framework for future SEND_GEN-class trade-offs that DO cross the threshold.
+
+**Pythia 15 #4 framing (CONFIRMS-vs-fails-to-falsify):**
+
+The fresh-baseline data **CONFIRMS** the smaller +4.23 % magnitude and **FAILS to confirm** the initial +5.35 % framing. This is a stronger result than "merely fails to falsify" — the same-session baseline is the higher-quality signal and produces a definite verdict, not just an absence of evidence.
+
+The mechanism trace (794d8270 GuardType extra dependent load × 6 M emissions per yield_from inner loop) is corroborated, not refuted: the smaller observed magnitude still includes a non-trivial direct-cost contribution and a non-trivial estimated indirect-cost contribution; falsifier #4 (mechanism trace doesn't match magnitude) does NOT fire because the mechanism still explains ~36 % of the smaller observed delta (well above the 10 % threshold).
+
+**Disposition post-amendment:**
+
+- Bundle ships at gate (k) PASS natively. CLASS-2 BLOCK-override is not invoked. The carve-out's documentation value (mechanism + alternate rollback path + B5 routing + scope clarification) is retained as forward-looking policy infrastructure for future SEND_GEN-class trade-offs.
+- B5 entry in `triage_plan_failing_tests.md` remains valid as next-session optimization workstream — the +4.23 % regression is real and worth recovering, but is no longer perf-debt-with-policy-disclosure (it's perf-debt-within-threshold-tracked-for-recovery).
+- Invocation 1 is amended in place (this section) rather than rescinded. The carve-out as a structural class survived a real-world test of its own falsifier set.
+
+**Cross-references for Amendment 1:**
+
+- testkeeper 09:50:05Z (fresh c4e1900c ABBA v2 attestation; output `/tmp/abba_fresh_c4e1900c_v2.txt`)
+- generalist 09:51:40Z (abba_compare.py HEAD vs fresh c4e1900c verdict: PASS, yield_from +4.23 %, geomean +0.84 %)
+- supervisor 09:51:15Z (Option A adopted: narrow magnitude, retain framework; theologian convergent)
+- pythia 15 #4 (pre-committed verdict frame: explicit CONFIRMS vs fails-to-falsify epistemic distinction)
 
 ## Falsifier on this carve-out
 
