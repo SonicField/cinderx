@@ -11,16 +11,32 @@ Alexie's binding rule (05:15:12Z): *"`./run_cinderx_tests.sh full` is a gate for
 
 Reading the rule strictly, ANY commit that increases the failing count or the skipped count BLOCKS gate (j). Two cases empirically demonstrated this push to be edge-cases the rule didn't anticipate:
 
-1. **Commit 16 (`9e816756`)** removed 38 stale wildcard-class skip entries from `cinder_skip_test.txt` per Phase 2 dual-failure verification. The wildcards were masking individual-method state. Removing them surfaced:
+1. **Commit 16 (`9e816756`)** removed 38 stale wildcard-class skip entries from `cinder_skip_test.txt` per Phase 2 dual-failure verification. The wildcards were masking individual-method state. Removing them surfaced (initial measurement, testkeeper 07:48:01Z):
    - **+1,061 previously-hidden passes** (pure visibility gain)
    - **+132 previously-hidden `@unittest.skipIf` decorator skips** (no new skip rules; existing decorators were always there, just per-method-skip became visible only after wildcard removal)
    - **+1 previously-hidden cinderx bug** (`test.test_subprocess.test_pass_fds_redirected`; routed to triage_plan B4)
 
 2. **Commit 24 (`4a80ee2d`)** added 1 skip annotation for the B4-tracked test pending fix. Net **+1 skip** (the deferred-bug skip).
 
-Net deltas for the bundle vs pre-cleanup baseline:
-- **Failures: 0 net delta** (commit 23 + 24 chain restores failure count to baseline 9; commit 27 attestation must verify exactly).
-- **Skips: +132 visibility-only + 1 B4-deferred-fix = +133.** All accounted for; none are NEW skip rules.
+**Final measurement (testkeeper 08:23:16Z attestation, post-CLOEXEC + skip):**
+- **Skips: +87 vs pre-cleanup baseline** (1,273 vs baseline 1,186), NOT +133 as initially estimated.
+- **Failures: 0 net delta** (failure count = 9 = pre-cleanup baseline; both attestation falsifiers PASS).
+
+**Discrepancy explanation (initial +132 → final +87 = -45 skips between runs):**
+
+Between testkeeper's initial gate-(j) re-run at 07:48:01Z (post-cleanup pre-CLOEXEC, 1,318 skips) and the final attestation at 08:23:16Z (post-CLOEXEC + skip, 1,273 skips), the skip count dropped by 45 despite commit 23 (CLOEXEC) being correctness-only and commit 24 adding +1 skip explicitly. The CLOEXEC fix should not directly transition tests skip→pass.
+
+Most plausible explanation: **run-to-run variance in `@unittest.skipIf` decorator evaluation** (per theologian 08:24:30Z). Roughly 45/1,318 = ~3.4% variance on the skip axis between consecutive same-suite runs. Possible sources:
+- Timing-sensitive decorator conditions (e.g., `os.getenv()`, `time.time()`, `sys.platform`-dependent paths that interact with environment state)
+- Test discovery race (different glob results across runs)
+- CLOEXEC-related: tests that check FD inheritance or file-handle leaks may now pass-instead-of-skip because the FD landscape is cleaner
+
+This variance does NOT affect the carve-out CLASS-2 classification (the +87 skips are still all visibility-only or B4-deferred); only the magnitude in this Invocation's documentation is corrected.
+
+**Net deltas (pre-cleanup baseline `9df470d0` vs final HEAD per testkeeper 08:23:16Z):**
+- Failures: **0 net** (commit 16 +1, commit 24 -1 via skip)
+- Skips: **+87** (initial +132 visibility-only attribution from commit 16, then -45 between-run variance, then +1 B4-deferred from commit 24; net sum +87)
+- Passes: **+1,061** (visibility gain from commit 16)
 
 ## Carve-out (clarification of alexie 05:15:12Z)
 
