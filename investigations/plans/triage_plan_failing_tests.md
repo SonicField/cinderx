@@ -60,7 +60,50 @@ Within each group: smaller blast-radius first.
   - Confirm OverflowError fires inside `re._compiler` not from JIT proper (stack trace inspection)
 - **Falsifier:** if minimal repro triggers OverflowError under VANILLA CPython 3.12.13 (same env, no cinderx), bug is upstream — close-as-upstream with tracker entry; OUT of this plan
 - **Fix-success:** 5/5 runs return 0; **ASan clean on repro** (so memory-corruption masquerade does not slip through); sentinel test added; criterion (j) holds at fix commit
-- **Owner:** generalist (impl), testkeeper (verify)
+- **Owner:** generalist (impl), testkeeper (verify), theologian (root-cause + falsifier review)
+
+#### A1 Execution Protocol (5 phases)
+
+**Phase 0 — Reproduction (testkeeper)**
+- Run failing test in isolation: `PYTHONPATH=cinderx/PythonLib python3 -m unittest test.test_jit_preload.test_func_destroyed_during_preload -v`
+- Capture stack trace + return code → `/tmp/A1_repro_TS.log`
+- **Falsifier:** if test passes 5/5 in isolation, reroute to D1 (parallel-only class). Do NOT proceed to Phase 1. Log the reroute in the plan adaptation log below.
+
+**Phase 1 — Hypothesis confirmation OR falsification (generalist + theologian)**
+- 1a: construct minimal repro (smallest input that triggers OverflowError via JIT-preload)
+- 1b: ASan run on repro
+  - If ASan fires BEFORE OverflowError → hypothesis falsified (memory-corruption masquerade, not arg-passing). Reroute to memory-corruption triage; new triage_plan item added to Group A.
+  - If ASan clean and OverflowError persists → hypothesis stands; proceed to 1c.
+- 1c: vanilla CPython 3.12.13 differential on minimal repro
+  - If OverflowError fires under vanilla → close-as-upstream per A1 falsifier above; OUT of plan; tracker entry created.
+  - If vanilla passes → cinderx-side bug confirmed; proceed to Phase 2.
+
+**Phase 2 — Root cause (generalist implements, theologian reviews)**
+- Trace destroyed-function-mid-preload code path; identify the arg passed to `re._compiler`
+- Read `cinderx/Jit/hir/preload.cpp` + adjacent
+- Document root cause in fix commit message (cause + mechanism, not just symptom)
+
+**Phase 3 — Fix (generalist)**
+- ONE commit; includes regression sentinel that drives the original failing scenario via subprocess (returncode-asserting, similar shape to `test_small_warmup_smoke.py` from this bundle)
+- Discipline: address root cause; NO try/except suppression of the OverflowError
+- **Pre-commit gates (all must pass):**
+  - 5/5 PASS on the original failing test in isolation
+  - 5/5 PASS on the new sentinel
+  - ASan clean on the minimal repro
+  - Criterion (j) full suite at fix-commit vs prior commit (failing+skipped both ≤)
+  - Criterion (l) staged-diff empty post-stage; matches intended files only
+
+**Phase 4 — Theologian falsifier review (theologian, post-commit)**
+- Did the fix address the named root cause, or suppress the symptom?
+- Does the regression sentinel actually exercise the originally-failing path? (coverage.py verification per testkeeper testing_plan C1.x sub-step)
+- Are the verification gates documented in commit message?
+
+**Phase 5 — Plan adaptation log entry (generalist or theologian)**
+- Append to the adaptation log section below with: timestamp, A1 outcome (fix landed / closed-as-upstream / falsified-and-reclassified), evidence pointer (commit SHA or tracker entry ID)
+
+**Phase exit conditions:**
+- A1 closes when Phase 4 + Phase 5 complete with no unresolved falsifier-fires
+- B1 begins per Group A→B ordering
 
 ---
 
