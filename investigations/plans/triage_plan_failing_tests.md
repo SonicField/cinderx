@@ -17,7 +17,7 @@
 - **Roles:** generalist = implementation; gatekeeper = gating; testkeeper = runtime verification + regression tests; theologian = root-cause analysis review + falsifier validity per step
 - **Falsifier discipline:** every step's hypothesis MUST be explicitly falsifiable. If hypothesis is falsified, plan adapts (re-classify, re-prioritize) — silent drop is not allowed
 - **Source-attribution discipline:** every claim about a test's behavior must be cited (chat-record, file Read, or same-turn tool call)
-- **A-class partial-close priority rule** (added 2026-04-22 per supervisor 12:16:04Z + pythia 19 #2 floor-not-ceiling concern; originally landed in 2355bd0c, re-applied here after revert b50319ef of the failed A1 fix bundle): when an A-class triage item PARTIAL-CLOSES by spawning a B-class entry (e.g., A1→A2), the spawned entry takes PRIORITY over not-yet-started A-class items in the next-priority queue. Specifically, A-class spawned siblings must be fully closed before continuing other A-class work. Prevents the failure-count-9-as-floor pattern where A-class partial-closes accumulate B-class siblings without ever reducing the failing count.
+- **A-class partial-close priority rule** (added 2026-04-22 per supervisor 12:16:04Z + pythia 19 #2 floor-not-ceiling concern; originally landed in 2355bd0c, re-applied here after revert b50319ef of the failed A1 fix bundle): when an A-class triage item PARTIAL-CLOSES by spawning a sibling A-class or B-class entry, the spawned entry takes PRIORITY over not-yet-started A-class items in the next-priority queue. Specifically, A-class spawned siblings must be fully closed before continuing other A-class work. Prevents the failure-count-N-as-floor pattern where A-class partial-closes accumulate sibling entries without ever reducing the failing count. (Note: prior example "A1→A2" referenced an A2 entry that was deleted by b50319ef revert; current A2 is a separate adjacent-bug retry workstream per testkeeper 14:10:40Z framing correction. Rule shape applies generally to any A-class partial-close pattern.)
 
 ## Step 0: Baseline establishment
 
@@ -118,7 +118,36 @@ Within each group: smaller blast-radius first.
 
 **Phase exit conditions:**
 - A1 closes when Phase 4 + Phase 5 complete with no unresolved falsifier-fires
-- B1 begins per Group A→B ordering
+- B1 begins per Group A→B ordering AFTER A2 closes (per A-class-partial-close priority rule + adjacent-bug discipline; A2 is theologian-spec'd retry of c64e7682 fix attempt class)
+
+---
+
+### A2. Latent Bug A: SIGSEGV in InvokeIterNext NULL-on-iter-exception path (no-L diagnostic variant; not in failing-test list)
+
+- **Symptom:** `python -X jit-all script.py` (without `-L`) where script triggers an iterator whose `__next__` raises an exception → JIT-compiled FOR_ITER calls JITRT_InvokeIterNext which returns NULL on the exception path; downstream CondBranchCheckType reads ob_type at offset 8 from NULL → SIGSEGV exit 139. Reproducible 5/5 via `/tmp/A1_minimal_repro_no_L.py` per work-cycle 11:33Z investigation.
+- **Why this is A2 and not in failing-test list:** Bug A is a real production-shape SIGSEGV bug class (any process running JIT without lazy imports + raising iterator hits it), but NO test in the current cinderx test suite exercises this code path. test_jit_preload (the closest test) uses `-L`, which surfaces a DIFFERENT bug (Bug B = A1) that masks Bug A. Bug A was discovered as a diagnostic-side observation during A1 investigation (work-cycle 11:33Z–13:40Z). Failure count = 9 unchanged whether A2 is fixed or not (no test in failing list).
+- **Hypothesis (root-cause already identified per work-cycle):** InvokeIterNext returns sentinel | NULL-on-iter-exception | iter value (per its hir.h doc). emitForIter at builder.cpp:4569-4584 emits CondBranchIterNotDone which only distinguishes sentinel-vs-non-sentinel; NULL flows through as 'not done' to body; downstream CondBranchCheckType reads ob_type from NULL → segfault. Coredump RIP confirmed at 0x...c32 / 0x...b7e (work-cycle 10:35Z testkeeper + 10:42Z generalist + 11:05Z generalist mapping to re._parser:SubPattern.getwidth, but the bug class is GENERAL — affects any JIT-compiled FOR_ITER over a raising iterator, not just SubPattern).
+- **Prior fix attempt (REVERTED, do not retry as-is):** c64e7682 + 621b44ad + 2355bd0c added CheckExc on InvokeIterNext output + simplify substitution returning TOptObject + pass.cpp returnType TOptObject. EMPIRICALLY FIXED Bug A (SIGSEGV → graceful exception) but imposed gate (k) BLOCK with -9.24% geomean / 12 regressions / gen_nested +85% / gen_simple +57%. Reverted via b50319ef. Mechanism candidate: CheckExc-as-deopt-point inhibits HIR optimization passes from moving state across every for-loop iter (theologian 13:46:35Z architectural hypothesis, NOT empirically verified).
+- **Future retry candidate (Option G per theologian 13:48:32Z):** modify CondBranchIterNotDone HIR op to handle 3 outcomes (sentinel / NULL / iter value) via 3-way branch instead of 2-way. NULL goes directly to except handler, NOT deopt-point. Avoids c64e7682's broad perf cost. ~4-8hr generalist work; substantial change scope (HIR op + LIR codegen + simplify substitution all touched).
+- **Verification mode (when retry begins):**
+  - Re-confirm Bug A reproduces 5/5 SIGSEGV at current HEAD via /tmp/A1_minimal_repro_no_L.py
+  - HIR-dump pre-Option-G HIR for a function that hits CondBranchIterNotDone (gen_nested per work-cycle 14:11Z generalist HIR-pre-prepped)
+  - Implement Option G; rebuild
+  - Empirical gate (k) ABBA: HEAD vs c4e1900c-baseline; verify NO regressions on iteration-heavy benches (gen_nested, gen_simple, coroutine_chain etc.)
+  - 5/5 PASS on minimal repro (Bug A converted to controlled deopt or except-handler, NOT SIGSEGV)
+- **Falsifier branches:**
+  - (a) Option G implementation works + no perf regression → A2 closes; Bug A class fixed at HIR level cleanly
+  - (b) Option G implementation works but introduces NEW perf regression on a different benchmark class → Option G has hidden cost; iterate per Phase 5 log
+  - (c) Option G architecturally infeasible (e.g., 3-way branch can't be expressed in current HIR/LIR without invasive changes) → defer to deeper architectural workstream; A2 stays open as known-unfixable-cheaply
+- **Fix-success:** 5/5 PASS on /tmp/A1_minimal_repro_no_L.py (no SIGSEGV); gate (k) ABBA shows zero per-benchmark regressions vs baseline; gate (j) failure count UNCHANGED at 9 (no test was failing for Bug A; failure count math doesn't change).
+- **Owner:** generalist (impl), testkeeper (verify), theologian (root-cause review + Option G architectural validation pre-implementation)
+- **Priority:** LOWER than A1 per A-class-partial-close priority rule. A1 is in failing-test list (affects failure count); A2 is latent (does not affect failure count). A1 fix has direct gate (j) impact; A2 fix has zero gate (j) impact but eliminates a real production-shape SIGSEGV crash class.
+- **Cross-references:**
+  - work-cycle 10:18Z–13:40Z full investigation log (Bug A identification + 4hr work + gate (k) BLOCK + revert)
+  - testkeeper 10:35Z + generalist 10:42Z + generalist 11:05Z (coredump + HIR + function mapping)
+  - theologian 13:48:32Z (Option G as future retry candidate)
+  - revert b50319ef (commit message preserves c64e7682 details for retrieval)
+  - testkeeper 14:10:40Z framing correction (Bug A separate from A1)
 
 #### A1 Phase 5 plan adaptation log (2026-04-22 work-cycle)
 
