@@ -2700,8 +2700,12 @@ Environment variables:
 
     # Fast mode default override: when --fast is set and --reps was not
     # explicitly passed, drop reps from 2 to 1 to hit the ~10-15 min target.
-    # User can override by passing --reps=N explicitly.
-    if args.fast and "--reps" not in sys.argv:
+    # User can override by passing --reps=N (or --reps N) explicitly.
+    # Detect both forms: '--reps' (space-separated) and '--reps=N' (equals).
+    reps_explicit = any(
+        a == "--reps" or a.startswith("--reps=") for a in sys.argv
+    )
+    if args.fast and not reps_explicit:
         args.reps = 1
 
     # Worker mode — output JSON, no banner
