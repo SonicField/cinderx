@@ -62,10 +62,12 @@ Every Class-2 invocation MUST land an entry in this file listing (a) the cleanup
 | `861762a0` (commit 23) | n/a (CLOEXEC fix on cinderx-direct opens) | n/a | n/a | 0 (defensive depth; doesn't change test outcomes) | n/a |
 | `4a80ee2d` (commit 24) | n/a (added skip for B4-tracked bug) | n/a | +1 | -1 (offsets the +1 from commit 16 surfacing) | Test now skipped pending B4 fix |
 
-**Net deltas (pre-cleanup baseline `9df470d0` vs current bundle HEAD):**
+**Net deltas (pre-cleanup baseline `9df470d0` vs final bundle HEAD per testkeeper attestation 08:23:16Z):**
 - Failures: **0 net** (commit 16 +1, commit 24 -1 via skip)
-- Skips: **+133** (commit 16 +132 visibility-only, commit 24 +1 B4-deferred)
+- Skips: **+87** (initial estimate +132 from commit 16 → final measured +87 after commit 23 CLOEXEC + commit 24 skip; -45 between-run variance per the discrepancy explanation in §"Final measurement" above)
 - Passes: **+1,061** (visibility gain from commit 16)
+
+(Discrepancy from initial +133 estimate is explained in detail in the "Final measurement" + "Discrepancy explanation" sections above; both numbers are now consistent with testkeeper's 08:23:16Z attestation log.)
 
 ## Attestation requirement (commit 27 — testkeeper)
 
