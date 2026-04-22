@@ -17,6 +17,7 @@
 - **Roles:** generalist = implementation; gatekeeper = gating; testkeeper = runtime verification + regression tests; theologian = root-cause analysis review + falsifier validity per step
 - **Falsifier discipline:** every step's hypothesis MUST be explicitly falsifiable. If hypothesis is falsified, plan adapts (re-classify, re-prioritize) — silent drop is not allowed
 - **Source-attribution discipline:** every claim about a test's behavior must be cited (chat-record, file Read, or same-turn tool call)
+- **A-class partial-close priority rule** (added 2026-04-22 per supervisor 12:16:04Z + pythia 19 #2 floor-not-ceiling concern): when an A-class triage item PARTIAL-CLOSES by spawning a B-class entry (e.g., A1→A2), the spawned entry takes PRIORITY over not-yet-started A-class items in the next-priority queue. Specifically, A-class spawned siblings must be fully closed before continuing other A-class work. Prevents the failure-count-9-as-floor pattern where A-class partial-closes accumulate B-class siblings without ever reducing the failing count.
 
 ## Step 0: Baseline establishment
 
@@ -149,10 +150,12 @@ Investigation traced the failing test to TWO separable bugs (the original A1 hyp
   - Compare LIR codegen for the list-iter specialization path (CallStatic(JITRT_InvokeIterNext)) vs generic InvokeIterNext path (which doesn't have this corruption)
 - **Fix-success:** 5/5 PASS on b'a*b' minimal repro; original test_jit_preload.test_func_destroyed_during_preload subprocess returncode=0; failure count drops to 8 (A1 fully closes when A2 closes).
 - **Owner:** generalist (impl), testkeeper (verify), theologian (root-cause review)
+- **Priority:** A2 takes priority over not-yet-started A-class items per A-class-partial-close priority rule (cross-cutting rules section). Specifically A2 must close before B1 (test_jit_support_instrumentation cluster) begins. Rationale: prevent failure-count-9-as-floor pattern.
 - **Cross-references:**
   - generalist 11:33Z investigation summary
   - theologian 11:47:12Z PATH 1 endorsement
-  - supervisor 11:47:16Z PATH 1 decision
+  - supervisor 11:47:16Z PATH 1 decision + 12:16:04Z A-class-partial-close priority rule
+  - pythia 19 #2 floor-not-ceiling concern (originating critique)
   - Bug A fix commit (this commit) for the unmasking event
 
 ---
