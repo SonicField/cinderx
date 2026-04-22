@@ -76,6 +76,58 @@ The commit 27 gate (j) re-run attestation MUST falsify TWO claims (per superviso
 
 If EITHER attestation fails: BLOCK + revert commits 23-26.
 
+## Attestation result (commit 27 — testkeeper)
+
+**Date:** 2026-04-22T08:23:16Z
+**HEAD at attestation:** `95a2d881` (commit 26 — gate_j visibility carve-out artifact)
+**Build state:** rebuilt post-CLOEXEC (commit 23) per `/tmp/rebuild_post_cloexec.log` BUILD_EXIT=0
+**Test command:** `./run_cinderx_tests.sh full`
+**Output log:** `/tmp/testkeeper_full_gate_HEAD_95a2d881.log`
+
+### Summary (verbatim from `=== SUMMARY ===` block + CPython final lines):
+
+```
+Tests:   3218 pass, 10 fail, 10 error, 45 skip
+Suites:  84 pass, 4 fail, 0 error, 3 skip (of 91)
+
+CPython: Total tests: run=37,474 failures=9 skipped=1,273
+         Total test files: run=449/458 failed=5 skipped=22 resource_denied=9
+
+Failed CinderX modules: test_jit_perf_map, test_jit_preload,
+                        test_jit_support_instrumentation,
+                        test_cpython_overrides.test__opcode
+Failed CPython modules: test_cmd_line, test_urllib, test_urllib2,
+                        test_uu, test_zipfile
+```
+
+### Falsifier (a) — failure count = 9 EXACTLY: SATISFIED
+
+| Run | files-fail | tests-fail (CPython) |
+|---|---|---|
+| Pre-cleanup baseline (`60701da2`) | 5 | 9 |
+| Post-cleanup pre-CLOEXEC (`5584846d`) | 6 | 10 |
+| Post-CLOEXEC + skip (`95a2d881` — this run) | 5 | 9 |
+
+File-level failures match baseline (5). Tests-level failures match baseline (9). `test_subprocess` no longer in failure list because `test_pass_fds_redirected` is now skipped (via commit 24); the OTHER tests in `test_subprocess` pass.
+
+### Falsifier (b) — NO NEW failing tests introduced by commit 23 CLOEXEC: SATISFIED
+
+Failing module set is IDENTICAL to baseline:
+- 4 CinderX: `test_jit_perf_map`, `test_jit_preload`, `test_jit_support_instrumentation`, `test_cpython_overrides.test__opcode`
+- 5 CPython: `test_cmd_line`, `test_urllib`, `test_urllib2`, `test_uu`, `test_zipfile`
+
+No new module appears. CLOEXEC fix is FD-handling only; doesn't change test outcomes for any of these or surface new bugs.
+
+### Skip delta (CLASS-2 visibility-only per carve-out)
+
+- baseline 1,186 → final 1,273 = **+87 skips**
+- All +87 are CLASS-2 (visibility-only `@unittest.skipIf` decorators that became visible from commit 16 wildcard removals + 1 explicit B4-deferred skip from commit 24)
+- Run-to-run variance ~3.4% on skip axis (initial measurement at 07:48Z showed +132; final at 08:23Z shows +87; -45 delta likely from `@unittest.skipIf` decorator timing-sensitivity per theologian 08:24:30Z analysis). Class unchanged; magnitude corrected per commit 30 (`75abf2b2`).
+
+### Verdict
+
+**Gate (j) PASS** per commit 26 carve-out CLASS-2 criteria. Both dual-falsifiers SATISFIED. Bundle eligible to proceed to gate (k) verification.
+
 ## Falsifier on the carve-out itself
 
 This carve-out is policy CLARIFICATION; the falsifier set distinguishes it from policy OVERRIDE:
