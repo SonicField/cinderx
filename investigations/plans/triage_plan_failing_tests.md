@@ -442,6 +442,23 @@ D. **Default-off `jit_perfmap`** — changes user-visible default; affects produ
   - testkeeper 17:22:37Z + 17:32:33Z dual-rebuild post-clean-rebuild verification (post-clean-build correctness; does NOT positively confirm struct-layout-divergence mechanism per pythia 27 #3)
   - Pre-rebuild .so overwritten before objdump diff feasible (testkeeper 17:27:01Z); positive struct-diff confirmation deferred to B6 implementation work per option (c) (theologian 17:26:57Z + supervisor 17:28:42Z endorsement)
 
+### B7. 8b74c4c2 AUTO+threshold=10 SIGSEGV (latent class; not in failing-test list; previously-fixed crash recovery record)
+
+- **Symptom (per testkeeper 23:32:05Z):** running ABBA against 8b74c4c2 source state today (clean rebuild, AUTO mode, per-test threshold=10 override at benchmark_cinderx.py:1929) → ALL 10 JIT_ON workers crash with SIGSEGV exit -11. JIT_OFF workers complete normally. Result: benchmarks/2026-04-22_163205_8b74c4c2_auto_FAILED_x86_64_abba.txt; no GEOMEAN computable.
+- **Why this is B7 and not in failing-test list:** 8b74c4c2 source state is pre-c4e1900c; HEAD has the fix; crash does NOT manifest in current production runtime. Defensive engineering record only — captures what happens if anyone rebuilds 8b74c4c2 source for diagnostic purposes.
+- **Hypothesis (root cause class, per scribe D-1776820345 + supervisor 23:39:52Z):** likely the same mid-recursion JIT crash class fixed by 78cee3c7 (forgetCode use-after-free) + c4e1900c (slab arena zero-init). Both fixes shipped 2026-04-22 morning. 8b74c4c2 (4/19) predates both; AUTO+threshold=10 mode triggers JIT compilation of recursive call paths that hit the unfixed crash. Force mode with threshold=999_999_999 (the directive-violating earlier ABBA at 22:21Z) hit a DIFFERENT crash (LICM SIGABRT at licm.cpp:182) per testkeeper 22:43:47Z — also a known crash class fixed later (per memory project_generator_optimization 'LICM SIGBUS fixed').
+- **Verification mode:** if anyone needs to confirm: check 8b74c4c2 .so coredump RIP against the 78cee3c7+c4e1900c fix-context; expect match in forgetCode path or slab-init path.
+- **Fix candidates:** N/A — fixes already shipped (78cee3c7 + c4e1900c). B7 is recovery-record, not open-bug.
+- **Trigger condition for B7 investigation:** only if (a) future bug investigation surfaces same crash signature on a NEW commit (not 8b74c4c2 source replay) OR (b) someone proposes to bisect or run perf on pre-78cee3c7 source state and gets the SIGSEGV. Default: do NOT re-investigate 8b74c4c2 source-state crash; the symptom is artifact of unfixed historical state.
+- **Owner:** N/A — no active workstream. Knowledge-record only.
+- **Priority:** N/A — already fixed, captured for future-cycle deduplication.
+- **Cross-references:**
+  - testkeeper 23:32:05Z FAILED ABBA report + benchmarks/2026-04-22_163205_8b74c4c2_auto_FAILED_x86_64_abba.txt
+  - testkeeper 22:43:47Z earlier force-mode LICM SIGABRT (different crash class, also pre-fix)
+  - scribe D-1776820345 (mid-recursion JIT crash discussion + 78cee3c7+c4e1900c fix)
+  - commits 78cee3c7 (forgetCode use-after-free fix) + c4e1900c (slab arena zero-init fix)
+  - supervisor 23:39:52Z direction (capture as B-class entry to prevent rediscovery from zero in future cycles)
+
 ---
 
 ## Group C: Environment / stale failures (5 items)
