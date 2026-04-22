@@ -518,6 +518,7 @@ void jitgen_data_free(PyGenObject* gen) {
 #endif // PY_VERSION_HEX < 0x030C0000
 
 void Context::forgetCode(BorrowedRef<PyFunctionObject> func) {
+  ThreadedCompileSerialize guard;
   CompilationKey key{func};
   auto it = compiled_codes_.find(key);
   if (it != compiled_codes_.end()) {
