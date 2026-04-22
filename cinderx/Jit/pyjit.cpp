@@ -2716,6 +2716,38 @@ void patchSysSetProfileAndSetTrace(PyObject* cinderjit_module) {
 #endif // PY_VERSION_HEX >= 0x030C0000
 }
 
+// TEST/DIAGNOSTIC ONLY: enable sys.setprofile/settrace/monitoring deopt
+// support. Patches sys.setprofile, sys.settrace, and
+// sys.monitoring.register_callback so JIT-compiled functions are deopted
+// when a profiler/tracer/monitor attaches. Patches are install-once +
+// irreversible per process (idempotent: repeated calls no-op after first).
+//
+// NOT recommended for production code: use the -X jit-support-instrumentation
+// CLI flag for production opt-in. The original opt-in default (false) was
+// set deliberately to gate invasive sys-module hooks; this runtime API
+// honors the same default but allows explicit opt-in from in-process tests
+// that cannot pass CLI flags (per supervisor 14:59:06Z + theologian
+// 14:59:06Z B.1 endorsement; per pythia 23 6mo-regret framing this API
+// preserves Subbarao Garlapati 2026-01-23 opt-in caution).
+//
+// Underscore-prefix is private-by-convention at C-method level (per
+// pythia 24 #1 convention-vs-enforcement gap mitigation). Production
+// code MUST NOT call this directly; use cinderx.test_support wrapper
+// from test code only. Detective control: pre-stage grep for non-test
+// callers (gatekeeper criterion g.3).
+PyObject* _enable_support_instrumentation_for_tests(
+    PyObject* self,
+    PyObject*) {
+  auto& cfg = getMutableConfig();
+  if (!cfg.support_instrumentation) {
+    cfg.support_instrumentation = true;
+    // self is the cinderjit module (module-level function pattern).
+    patchSysMonitoringFunctions(self);
+    patchSysSetProfileAndSetTrace(self);
+  }
+  Py_RETURN_NONE;
+}
+
 void restoreSysMonitoringRegisterCallback() {
 #if PY_VERSION_HEX >= 0x030C0000
 
@@ -3002,6 +3034,17 @@ PyMethodDef jit_methods[] = {
      disable_specialized_opcodes,
      METH_NOARGS,
      PyDoc_STR("Disable compiling specialized opcodes.")},
+    {"_enable_support_instrumentation_for_tests",
+     _enable_support_instrumentation_for_tests,
+     METH_NOARGS,
+     PyDoc_STR(
+         "TEST/DIAGNOSTIC ONLY: Enable sys.setprofile/settrace/monitoring "
+         "deopt support. Patches sys.* hooks (install-once, irreversible). "
+         "Use the -X jit-support-instrumentation CLI flag for production "
+         "opt-in instead. Underscore prefix signals private-by-convention "
+         "at C-method level (pythia 24 #1 mitigation); production callers "
+         "MUST go through cinderx.test_support wrapper from test code "
+         "only.")},
     {"get_inlined_functions_stats",
      get_inlined_functions_stats,
      METH_O,

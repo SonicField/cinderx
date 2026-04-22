@@ -7,11 +7,25 @@ import unittest
 from types import CodeType, FrameType
 
 from cinderx.jit import force_compile, is_jit_compiled
-from cinderx.test_support import passUnless, skip_unless_jit
+from cinderx.test_support import (
+    enable_support_instrumentation,
+    passUnless,
+    skip_unless_jit,
+)
 
 
 # sys.monitoring is only available in Python 3.12+
 AT_LEAST_312: bool = sys.version_info[:2] >= (3, 12)
+
+
+# These tests exercise sys.setprofile/settrace/sys.monitoring deopt
+# behavior. The patches required for that behavior are gated on
+# the support_instrumentation config flag (default false per Subbarao
+# Garlapati 2026-01-23 opt-in caution); enable them in-process here so
+# the tests run without needing -X jit-support-instrumentation at the
+# CLI.
+def setUpModule() -> None:
+    enable_support_instrumentation()
 
 
 def dummy_callback(
@@ -35,6 +49,32 @@ class JitMonitoringIntegrationTest(unittest.TestCase):
     3. Re-optimize when all callbacks are removed
     4. Not interfere with callback invocation
     """
+
+    def tearDown(self) -> None:
+        # Clean residual sys.monitoring state so a failed test in this class
+        # doesn't cascade. Three steps per tool_id:
+        # 1) Deregister all callbacks via register_callback(..., None) — this
+        #    is the cinderx-patched entry point that triggers JIT re-enable
+        #    via toggleJitBasedOnInstrumentationState. set_events and
+        #    free_tool_id are NOT patched, so they alone don't re-enable JIT.
+        # 2) Clear events.
+        # 3) Free tool ID so next test can use_tool_id() it without
+        #    "tool already in use" ValueError.
+        for tool_id in (sys.monitoring.DEBUGGER_ID, sys.monitoring.PROFILER_ID):
+            try:
+                sys.monitoring.register_callback(
+                    tool_id, sys.monitoring.events.CALL, None
+                )
+            except (ValueError, TypeError):
+                pass
+            try:
+                sys.monitoring.set_events(tool_id, 0)
+            except ValueError:
+                pass
+            try:
+                sys.monitoring.free_tool_id(tool_id)
+            except ValueError:
+                pass
 
     def test_new_functions_not_compiled_while_callback_registered(self) -> None:
         sys.monitoring.use_tool_id(sys.monitoring.DEBUGGER_ID, "test_debugger")

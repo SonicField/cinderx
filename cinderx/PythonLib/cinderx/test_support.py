@@ -31,6 +31,28 @@ except ImportError:
         return False
 
 
+def enable_support_instrumentation() -> None:
+    """TEST/DIAGNOSTIC ONLY: Enable sys.setprofile/settrace/monitoring deopt support.
+
+    Patches sys.setprofile, sys.settrace, and sys.monitoring.register_callback
+    so JIT-compiled functions are deopted when a profiler/tracer/monitor
+    attaches. Patches are install-once + irreversible per process; repeated
+    calls no-op after the first.
+
+    NOT recommended for production code: use the -X jit-support-instrumentation
+    CLI flag for production opt-in. The default (false) is set deliberately to
+    gate invasive sys-module hooks; this runtime API exists for in-process
+    tests that cannot pass CLI flags.
+    """
+    try:
+        from cinderjit import _enable_support_instrumentation_for_tests
+
+        _enable_support_instrumentation_for_tests()
+    except ImportError:
+        # No JIT installed; nothing to patch.
+        pass
+
+
 # String encoding to use for subprocesses.
 ENCODING: str = sys.stdout.encoding or sys.getdefaultencoding()
 
