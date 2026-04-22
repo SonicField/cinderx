@@ -4577,6 +4577,13 @@ void HIRBuilder::emitForIter(
   }
   Register* next_val = temps_.AllocateStack();
   tc.emit<InvokeIterNext>(next_val, iterator, tc.frame);
+  // InvokeIterNext returns one of: sentinel (iterator exhausted), NULL (error),
+  // or the iterator value (per the InvokeIterNext class doc in hir.h). The
+  // following CondBranchIterNotDone only distinguishes sentinel from non-sentinel,
+  // so a NULL would flow into the "not done" body and downstream type-checks
+  // would dereference NULL. CheckExc deopts to the interpreter on NULL so the
+  // exception path is taken correctly.
+  tc.emit<CheckExc>(next_val, next_val, tc.frame);
   tc.frame.stack.push(next_val);
   BasicBlock* footer = getBlockAtOff(bc_instr.getJumpTarget());
   BasicBlock* body = getBlockAtOff(bc_instr.nextInstrOffset());

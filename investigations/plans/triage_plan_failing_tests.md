@@ -105,6 +105,56 @@ Within each group: smaller blast-radius first.
 - A1 closes when Phase 4 + Phase 5 complete with no unresolved falsifier-fires
 - B1 begins per Group A→B ordering
 
+#### A1 Phase 5 plan adaptation log (2026-04-22 11:47Z)
+
+Investigation traced the failing test to TWO separable bugs (the original A1 hypothesis "JIT-preload mid-flight" was wrong on both source and class):
+
+**Bug A (FIXED in this commit):** JIT NULL-deref via missing CheckExc on InvokeIterNext output.
+- Empirical: pre-fix 5/5 SIGSEGV (exit 139); post-fix 5/5 graceful Python exception (exit 1). LIR + coredump traced to `mov 0x8(%rax),%rcx` with rax=NULL at the first cascading CondBranchCheckType after CallStatic(JITRT_InvokeIterNext) in re._parser:SubPattern.getwidth +0x368.
+- Mechanism: InvokeIterNext can return NULL on iterator-raised exception (per its hir.h class doc); CondBranchIterNotDone only distinguishes sentinel-vs-non-sentinel, NOT NULL; NULL flows into the body and the next CondBranchCheckType reads ob_type from NULL.
+- Repair (HIR-level per feedback_hir_not_lir.md): 3 changes
+  - cinderx/Jit/hir/builder.cpp emitForIter: emit CheckExc on InvokeIterNext output before CondBranchIterNotDone
+  - cinderx/Jit/hir/simplify.cpp: JITRT_InvokeIterNext substitution sets output type to TOptObject (so CheckExc isn't DCE'd as redundant)
+  - cinderx/Jit/hir/pass.cpp: kInvokeIterNext outputType returns TOptObject (consistent with the substitution + the doc'd NULL-on-error semantics)
+- Sentinel: cinderx/PythonLib/test_cinderx/test_for_iter_raises.py (2 tests; pass post-fix)
+- A1 Group reclassifies: Group A (process-killing) → Group B (test failure with graceful exception). The crash class is closed; the test still fails for Bug B.
+
+**Bug B (NEW entry A2):** JIT FOR_ITER list-iterator specialization corrupts int representation.
+- Symptom: post-Bug-A-fix, b'a*b' minimal repro raises OverflowError "Python int too large to convert to C ssize_t" at the recursive `for op, av in self.data:` (line 183 of re/_parser.py). Vanilla CPython 3.12.13 PASSES the same code → cinderx-JIT bug confirmed.
+- Phase 0 already complete (vanilla differential per generalist 11:09:52Z).
+- See A2 entry below.
+
+**Pivot history (this investigation, ~4 hr):** Fix #1 (CheckExc after CallMethod) → falsified empirically; Fix #3 (CheckExc at UNPACK_SEQUENCE) → falsified empirically; Fix #4 (returnType TObject → TOptObject broad) → assertion-bounded by simplify.cpp:2370 type-narrowing requirement; Fix #5 (FOR_ITER CheckExc + targeted simplify substitution + targeted outputType) → empirically works for Bug A. Each pivot was empirical-data-bounded, not speculative; HIR/LIR dump was the load-bearing diagnostic. Bug B was masked by Bug A's earlier crash; surfaced once NULL deref was repaired.
+
+**Surfaced infrastructure bugs (handled in same commit OR companion commit):**
+- cinderx/Jit/hir/printer.cpp format_immediates() switch lacked a case for kGuardOverflow → JIT_ABORT on -X jit-dump-final-hir for any function with a GuardOverflow op. Single-line addition. Required for the diagnostic that found Bug A.
+
+**Bigger-than-thought finding (to be filed as B-group, separate workstream):**
+- HIR type-inference returnType() at pass.cpp:56-88 returns TObject (non-null) by default for callable outputs, causing systematic CheckExc DCE elision wherever Python calls return NULL on exception. Bug A is a specific instance of this class; the broader audit of returnType paths + consumer-side null-handling is a multi-file, multi-commit workstream. To be tracked as separate triage entry.
+
+---
+
+## Group A — followup (1 item)
+
+### A2. JIT FOR_ITER list-iterator specialization corrupts int representation during unpack
+
+- **Symptom:** with -X jit-all, code path that JIT-compiles `for op, av in self.data:` (where self.data is a list of tuples) raises OverflowError "Python int too large to convert to C ssize_t". Vanilla CPython passes; cinderx-JIT-bug confirmed. Reproducible 5/5 on /tmp/A1_minimal_repro_no_L.py post-Bug-A-fix.
+- **How it surfaced:** masked by A1 Bug A (SIGSEGV) for 4 hr; surfaces post-Bug-A-fix as the test's actual failure mode.
+- **Phase 0 status:** done. Minimal repro = `re.compile(rb'a*b')` after importing cinderx.compiler.pycodegen under -X jit-all.
+- **Hypothesis:** FOR_ITER specialization for list iterators (emitGetIter at cinderx/Jit/hir/builder.cpp:4521-4567 emits GuardType<ListIter>; Simplify pass converts InvokeIterNext to CallStatic(JITRT_InvokeIterNext)) mishandles tuple unpacking from the returned int-containing-tuple — the int representation gets corrupted on the JIT path such that downstream `int(value)` or ssize_t conversion fails.
+- **Falsifier:** if vanilla CPython raises the same OverflowError on the same input, bug is upstream — close-as-upstream. (Pre-checked: vanilla passes; falsifier does not fire.)
+- **Verification mode:**
+  - Reduce to minimal repro that doesn't depend on re._parser internals (a list of tuples with int elements iterated via FOR_ITER over JIT-compiled function)
+  - HIR dump for the JIT-compiled iteration path
+  - Compare LIR codegen for the list-iter specialization path (CallStatic(JITRT_InvokeIterNext)) vs generic InvokeIterNext path (which doesn't have this corruption)
+- **Fix-success:** 5/5 PASS on b'a*b' minimal repro; original test_jit_preload.test_func_destroyed_during_preload subprocess returncode=0; failure count drops to 8 (A1 fully closes when A2 closes).
+- **Owner:** generalist (impl), testkeeper (verify), theologian (root-cause review)
+- **Cross-references:**
+  - generalist 11:33Z investigation summary
+  - theologian 11:47:12Z PATH 1 endorsement
+  - supervisor 11:47:16Z PATH 1 decision
+  - Bug A fix commit (this commit) for the unmasking event
+
 ---
 
 ## Group B: Reproducible test assertion failures (3 items)
