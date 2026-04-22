@@ -165,7 +165,7 @@ The leak source is the cinderx `after_fork_child` callback, NOT a cinderx-direct
 
 Empirical confirmation (generalist 08:03:54Z): post-CLOEXEC-fix (commit 861762a0), all cinderx-direct opens (including jit_perfmap when enabled, jit_gdb_support, mmap_file, perf_jitdump's own opens, symbolizer, pyjit log) verified `FD_CLOEXEC=True` via `fcntl(F_GETFD)`. Despite this, test_pass_fds_redirected still fails 5/5 with the same shape, confirming the leak source is the post-fork CPython API call, not a cinderx-direct open.
 
-**Three architectural fix options for next session (theologian 08:05:03Z):**
+**Three architectural fix options as next-priority work (theologian 08:05:03Z):**
 
 A. **Get CLOEXEC on the CPython-opened FD** — requires upstream CPython API support OR a way for cinderx to discover the FD post-open and `fcntl(fd, F_SETFD, FD_CLOEXEC)`. May be blocked on upstream changes.
 
@@ -191,7 +191,7 @@ D. **Default-off `jit_perfmap`** — changes user-visible default; affects produ
 **Disposition this push:**
 - Parent-side cinderx-direct opens fixed via O_CLOEXEC in commit 861762a0 (defensive depth value; closes leak class even though doesn't fix this specific test)
 - Test skipped via cinder_skip_test.txt entry in commit 4a80ee2d pending B4 deeper-fix
-- Skip is TEMPORARY pending next-session B4 work; NOT a scope-limitation declaration
+- Skip is TEMPORARY pending B4 work landing; NOT a scope-limitation declaration
 
 **Owner:** theologian (architectural decision A/B/C/D), generalist (impl after decision), testkeeper (verify)
 
@@ -212,7 +212,7 @@ D. **Default-off `jit_perfmap`** — changes user-visible default; affects produ
 - **Hypothesis (already root-caused, this is the fix-not-the-investigation entry):**
   - 794d8270 changed GuardType from 1-instruction `cmp [reg+ob_type], imm` to 2-instruction `mov scratch, [reg+ob_type]; cmp [scratch+tp_version_tag], imm`.
   - Per `bench_yield_from_chain` run: ~6M GuardType emissions × ~3 cycles per L1-hit dependent load = ~6 ms direct cost. Observed +21 ms / +5.35 %. Direct cost explains ~30%; remainder from pipeline stalls (dependent load + dependent compare) and scratch-register pressure.
-- **Optimization options (all are next-session B-group work; numbers from generalist 08:13:11Z assessment):**
+- **Optimization options (all are subsequent B-group work; numbers from generalist 08:13:11Z assessment):**
   - **A. HIR-level deduplication of consecutive GuardType on same value.** Modifies HIR pass to recognize redundant guards within a single function. Estimate 2–4 hr. Risk: medium — subtle correctness risk if dedup misses a type-modification window.
   - **B. LIR-level scratch-register cache.** Track 'last value loaded into scratch' across LIR instructions; reuse without reload. Estimate 3–5 hr. Risk: high — interacts with register allocation; cross-block tracking is non-trivial.
   - **C. Restructure SEND_GEN HIR to use a different fast-path that skips the type guard for known-stable generator types.** HIR structural change. Estimate 4–8 hr. Risk: high — risk of breaking generator semantics; needs comprehensive falsifier coverage.
@@ -228,14 +228,14 @@ D. **Default-off `jit_perfmap`** — changes user-visible default; affects produ
   - **Action:** Run `bench_gen_quick.py` (untracked at repo root) and any other generator-heavy benches that exist (currently identified: `bench_gen_quick.py` only; future SEND_GEN-exercising benches added by any agent must be added to this list) at HEAD `60701da2` and at baseline `c4e1900c` using the standard ABBA harness invocation pattern.
   - **Threshold:** Per-benchmark delta > 5% on any additional bench → broaden perf-recovery scope; the carve-out's "narrow scope" assertion is contradicted (falsifier #4 of gate_k carve-out fires); options A/B/C above must be re-scoped to address the broader bench class, OR Invocation 1 must be marked RESCINDED and the alternate rollback path (REVERT 794d8270) invoked per gate_k_correctness_tradeoff_carveout.md `## Alternate rollback path`.
   - **Threshold:** Per-benchmark delta ≤ 5% on all additional benches → carve-out narrow-scope assertion HOLDS empirically; proceed to optimization options A/B/C as originally scoped.
-  - **Owner:** generalist or testkeeper (whoever opens next session that touches B5).
+  - **Owner:** generalist or testkeeper (whoever picks up B5 next).
   - **Why this is encoded here, not chat-only:** per recursive-policy-collapse pattern (feedback_recursive_policy_collapse_pattern.md), deferral mechanisms must ship in the same push that creates the obligation. Commit 32 created the falsifier-#4 obligation; this entry is the artifact-side encoding of the verification step that satisfies it. Without this entry, the deferral is chat-only and the carve-out's Scope clarification is unenforceable.
 - **Falsifier on each option:**
   - If A is attempted and the dedup misses a type-modification window → ABA bug returns; falsifier matrix catches it; revert
   - If B is attempted and register allocation interaction breaks compilation → falsified at build time; revert
   - If C is attempted and generator semantics break → falsifier coverage flags it; revert; evaluate D (deferred per scope-limitation framing)
 - **Fix-success:** yield_from per-bench Δ < 5% vs `c4e1900c` baseline AND geomean unchanged or improved AND ABA-safety matrix preserved AND no regression on other benchmarks.
-- **Disposition this push:** trade-off accepted via gate_k_correctness_tradeoff_carveout.md Invocation 1; commit 4e0f26ab. Optimization deferred to next session.
+- **Disposition this push:** trade-off accepted via gate_k_correctness_tradeoff_carveout.md Invocation 1; commit 4e0f26ab. Optimization deferred until B5 work lands.
 - **Owner:** theologian (architectural decision A/B/C), generalist (impl after decision), testkeeper (verify ABBA delta + falsifier matrix)
 - **Cross-references:**
   - testkeeper 07:33:54Z (gate (k) verdict surfaced regression)
@@ -300,7 +300,7 @@ For each of the 5 stdlib failures:
 2. **B3 test-side fix:** patching `test_cpython_overrides.test__opcode` acceptable, or must JIT preserve the removed opcodes?
 3. **Group C close-as-upstream:** for tests that fail under upstream same-env, is "close as not-cinderx" acceptable disposition, or must we patch even environment-caused failures?
 4. **D1 priority:** flake-only-under-parallel — block or xfail-and-defer?
-5. **Plan execution timing:** start during current session (after bundle pushes), or wait for next session?
+5. **Plan execution timing:** start immediately after bundle pushes, or queue behind other priorities?
 
 ---
 

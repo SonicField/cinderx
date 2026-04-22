@@ -17,7 +17,7 @@ Mechanism is now traced and confirmed (theologian 08:11:11Z + generalist 08:13:1
 
 Commit `794d8270` switched GuardType codegen from a 1-instruction pointer compare to a 2-instruction load-then-compare on `tp_version_tag`. The change closes the ABA bug class (type pointer reuse: type T freed, new type T' allocated at same address; pre-fix guard wrongly passed; post-fix detects mismatch via version tag).
 
-Per-emission cost: 1 extra dependent memory load (~3 cycles on L1 hit). Per `bench_yield_from_chain` run: ~6M GuardType emissions through SEND_GEN → ~6 ms direct cost. Observed regression: +21 ms / +5.35 %. Direct cost explains ~30 % of the observed delta; the remaining ~70 % is estimated to come from pipeline stalls (dependent load + dependent compare) and scratch-register pressure — **estimated, NOT instrumented**. Per-cycle breakdown deferred to next-session optimization workstream B5; if the breakdown lands and shows the 70 % estimate is wrong by more than an order of magnitude, the carve-out's mechanism explanation is incomplete and falsifier #4 below fires.
+Per-emission cost: 1 extra dependent memory load (~3 cycles on L1 hit). Per `bench_yield_from_chain` run: ~6M GuardType emissions through SEND_GEN → ~6 ms direct cost. Observed regression: +21 ms / +5.35 %. Direct cost explains ~30 % of the observed delta; the remaining ~70 % is estimated to come from pipeline stalls (dependent load + dependent compare) and scratch-register pressure — **estimated, NOT instrumented**. Per-cycle breakdown deferred to the subsequent perf-recovery workstream tracked at B5; if the breakdown lands and shows the 70 % estimate is wrong by more than an order of magnitude, the carve-out's mechanism explanation is incomplete and falsifier #4 below fires.
 
 The trade-off:
 
@@ -48,7 +48,7 @@ Per generalist 08:13:11Z analysis, three reasons SEND_GEN GuardTypes evade exist
 2. **Differing types per-send** — yield_from delegates across multiple generator types in the chain; the GuardType target differs across iterations of the OUTER loop, so LICM cannot treat them as redundant.
 3. **Hoisted-but-still-2-instruction guard** — even when LICM does hoist a GuardType to a loop pre-header, the per-emission cost is still 2 instructions vs 1; hoisting reduces FREQUENCY of emission but not COST per emission. The 2-instruction cost is structural to the new x86/ARM codegen pattern.
 
-## Realistic optimization options for next session
+## Realistic optimization options (subsequent perf-recovery work)
 
 Per generalist 08:13:11Z assessment (with theologian 08:13:35Z retraction-to-2-8hr stamp):
 
@@ -72,7 +72,7 @@ Alexie's rule is binding. This carve-out CLARIFIES — does not override — the
 **CLASS 2 — allowed under per-occurrence documentation (this carve-out):**
 - Regression is from a specific commit whose purpose is correctness (security fix, crash fix, ABA prevention)
 - Mechanism is traced with cycle-level explanation matching observed magnitude (within 1 order of magnitude)
-- Optimization is identified, estimated, and routed to triage_plan as a B-group entry for next-session work
+- Optimization is identified, estimated, and routed to triage_plan as a B-group entry for subsequent perf-recovery work
 - Affected benchmark scope is narrow (one or two benchmarks), not geomean (geomean threshold not violated)
 
 ## Per-occurrence documentation requirement
@@ -84,14 +84,14 @@ Every Class-2 invocation MUST land an entry in this file listing (a) the source 
 | Field | Value |
 | --- | --- |
 | Source commit | `794d8270` GuardType: compare version tag instead of pointer (ABA safety) |
-| Correctness rationale | Closes the ABA pointer-reuse bug class observed empirically in earlier session (testkeeper 23:11:50Z compound-revert matrix; type pointer reuse via del + gc.collect + new class) |
+| Correctness rationale | Closes the ABA pointer-reuse bug class observed empirically in earlier work (testkeeper 23:11:50Z compound-revert matrix; type pointer reuse via del + gc.collect + new class) |
 | Empirical regression | `bench_yield_from_chain`: +4.23 % (389.63 ms → 406.10 ms; per generalist abba_compare.py 09:51:40Z against fresh same-session baseline `/tmp/abba_fresh_c4e1900c_v2.txt`). Initial cached-baseline reading was +5.35 % (385.47 ms → 406.10 ms; per generalist abba_compare.py 07:33:54Z); fresh-baseline reading narrows the magnitude by ~1.1 percentage points (cross-day noise floor). See "Amendment 1" below. |
 | Mechanism | 1 extra dependent memory load per GuardType emission (`mov scratch, [reg+ob_type]; cmp [scratch+tp_version_tag], imm` vs prior single `cmp [reg+ob_type], imm`); per benchmark = 6M emissions × ~3 cycles = ~6 ms direct (~30 % of observed); remainder from pipeline + register pressure |
 | Geomean impact | -2.44 % geomean (within 5 % threshold; geomean PASSES) |
 | Other-benchmark impact | All within ±5 % per-benchmark threshold; only yield_from exceeds |
 | Optimization options | A/B/C per table above; 2–8 hr range; tracked at triage_plan B5 |
 | Triage routing | triage_plan_failing_tests.md B5 (separate commit) |
-| Disposition | Trade-off accepted for this push; optimization deferred to next session per supervisor 08:13:41Z autonomous decision. **Amended per Amendment 1**: gate (k) PASSES natively at fresh-baseline magnitude (+4.23 % < 5 % per-bench threshold); CLASS-2 BLOCK-override mechanism NOT fired this push. Carve-out framework retained for documentation + future SEND_GEN-class invocations + B5 next-session optimization tracking. |
+| Disposition | Trade-off accepted for this push; optimization deferred until B5 work lands per supervisor 08:13:41Z autonomous decision. **Amended per Amendment 1**: gate (k) PASSES natively at fresh-baseline magnitude (+4.23 % < 5 % per-bench threshold); CLASS-2 BLOCK-override mechanism NOT fired this push. Carve-out framework retained for documentation + future SEND_GEN-class invocations + B5 perf-recovery tracking. |
 
 ### Amendment 1 — fresh-baseline magnitude narrowing (testkeeper 09:50:05Z + generalist 09:51:40Z)
 
@@ -121,7 +121,7 @@ The mechanism trace (794d8270 GuardType extra dependent load × 6 M emissions pe
 **Disposition post-amendment:**
 
 - Bundle ships at gate (k) PASS natively. CLASS-2 BLOCK-override is not invoked. The carve-out's documentation value (mechanism + alternate rollback path + B5 routing + scope clarification) is retained as forward-looking policy infrastructure for future SEND_GEN-class trade-offs.
-- B5 entry in `triage_plan_failing_tests.md` remains valid as next-session optimization workstream — the +4.23 % regression is real and worth recovering, but is no longer perf-debt-with-policy-disclosure (it's perf-debt-within-threshold-tracked-for-recovery).
+- B5 entry in `triage_plan_failing_tests.md` remains valid as the perf-recovery workstream — the +4.23 % regression is real and worth recovering, but is no longer perf-debt-with-policy-disclosure (it's perf-debt-within-threshold-tracked-for-recovery).
 - Invocation 1 is amended in place (this section) rather than rescinded. The carve-out as a structural class survived a real-world test of its own falsifier set.
 
 **Cross-references for Amendment 1:**
@@ -164,5 +164,5 @@ The trade-off this rollback path makes explicit: choosing between (a) ABA correc
 - theologian 08:13:35Z (walk-back of 30-min estimate; substance vs estimate separable)
 - supervisor 08:13:41Z (Option B adopted; bundle ships with carve-out + B5 routing)
 - gate_j_visibility_carveout.md (sibling carve-out artifact; same recursive-policy-collapse + clarification-not-override pattern)
-- triage_plan_failing_tests.md B5 (companion commit; optimization tracked for next session)
+- triage_plan_failing_tests.md B5 (companion commit; optimization tracked as the perf-recovery workstream)
 - compound_crash_falsifier_matrix_2026-04-21.md (empirical evidence ABA bug is real)
