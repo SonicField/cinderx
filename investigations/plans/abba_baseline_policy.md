@@ -78,11 +78,17 @@ When the canonical baseline changes for reasons other than ratchet — release c
 2. **On gate (k) PASS:** if any benchmark improved ≥2% vs baseline, supervisor commits a baseline.json update with those advances. Commit message lists each advance: `Advance baseline.json: fibonacci 2.44x → 2.49x (+2.1%); int_arith 1.58x → 1.62x (+2.5%)`. Other benchmarks unchanged.
 3. **Periodic re-anchor:** when triggered (release cut, hardware change, etc.), supervisor runs full ABBA on the new anchor commit, regenerates baseline.json with fresh values, appends to `reanchor_history`, commits.
 
-## Baseline-cannot-run carve-out
+## Crash-fix-bundle baseline carve-out
 
 **Default expectation:** the canonical baseline (the commit that anchors `benchmarks/baseline.json`) can complete a clean ABBA run. Gate (k) compares HEAD ABBA to that baseline ABBA per the operational rules above.
 
-**Carve-out:** when the canonical baseline CANNOT complete ABBA — for example because the bug being fixed in the current bundle crashes the benchmark runner — the bundle uses the **first crash-fix-clean commit** as effective baseline instead of the true parent. Pre-effective-baseline commits in the bundle are gated by **crash-fix evidence** (a falsifier-proven matrix at `investigations/probes/`) instead of ABBA.
+**Structural carve-out:** every crash-fix bundle has the property that its parent contains the bug the bundle fixes. If that bug crashes ABBA's benchmark runner, the parent ABBA is empirically impossible — not because of a one-time accident but because the bundle's own purpose forecloses true-parent comparison. This carve-out names that recurring class so we don't re-ratify it as a one-time exception each time. (Pythia 11 + theologian 06:18:18Z + supervisor 06:18:28Z reframing of the original 'one-time' framing.)
+
+**Carve-out invocation criteria** (all three must hold; per-occurrence documentation still required):
+
+1. **Empirical demonstration that parent ABBA crashes.** Cite the verbatim worker exit code + the failing benchmark name from a truncated parent ABBA log. Synthetic 'we expect it would crash' is not sufficient; the carve-out requires observed failure.
+2. **Effective baseline = first ABBA-clean commit in the bundle.** Not an arbitrary pick; specifically the earliest commit at which a full ABBA can complete.
+3. **Pre-effective-baseline commits gated by crash-fix evidence**, not ABBA. The evidence MUST be a falsifier-proven matrix at `investigations/probes/` showing the commits' fixes are necessary for ABBA-clean state (e.g., n=5 cell-matrix with revert/restore comparisons).
 
 **Per-occurrence documentation requirement:** every carve-out invocation MUST land an entry in this section listing (a) the failing baseline commit, (b) the failure evidence (cite the truncated ABBA log), (c) the chosen effective baseline + reason, (d) the crash-fix evidence covering the un-ABBA-able pre-effective-baseline commits, (e) cross-day/cross-environment noise notes if applicable.
 
@@ -94,9 +100,13 @@ When the canonical baseline changes for reasons other than ratchet — release c
 - **Crash-fix evidence for pre-c4e1900c commits (794d8270, 78cee3c7, c4e1900c, fbefef0a):** `investigations/probes/compound_crash_*` — n=5 4-cell matrix shows 5/5 EXIT=0 on fix tree, 5/5 EXIT=139 SIGSEGV on revert tree. These commits are correctness fixes, never had perf goals; ABBA was never the right gate. (See defensive-patch-tracker.md JOINT entry for 78cee3c7+c4e1900c.)
 - **Cross-day noise note:** the c4e1900c ABBA was captured at 2026-04-21 16:45 UTC; HEAD ABBA will be captured at 2026-04-22 some hours later (exact time when testkeeper completes the run). Cross-day comparison includes hardware/load noise that same-day comparison would not. The 5% per-benchmark threshold absorbs typical noise of this magnitude (per σ ≈ 2% analysis in `abba_fast_mode_proposal.md`); transparency about the cross-day window is the requirement, not a defeating problem.
 
-**Falsifier on the carve-out itself (theologian 05:59:28Z):** this is a ONE-TIME exception for the speculation-experiment bundle because its parent contains the exact bug the bundle fixes. If a FUTURE bundle ALSO requires a non-canonical baseline because its parent crashes ABBA, this exception is no longer one-time and the carve-out has become a recurring pattern. At that point this document needs revision — the policy should explicitly handle 'baseline crashes' as a normal case rather than a deviation, OR investigate why bundles routinely target their own bugs' fixes (which suggests a deeper testing-discipline gap).
+**Falsifier on the carve-out itself (theologian 06:18:18Z, supervisor 06:18:28Z):** the carve-out is the structural class for crash-fix bundles, not a one-time exception. It SHOULD recur whenever a bundle fixes a benchmark-breaking crash. The falsifier shifts to the discipline of invocation, not the rarity of recurrence:
 
-After this push lands, the canonical baseline becomes the post-merge HEAD; the next bundle's parent will not have this constraint by construction.
+- **Invocation without all three criteria:** if a bundle invokes the carve-out without empirically demonstrating parent ABBA crashes (criterion 1), or without using the first-ABBA-clean commit as effective baseline (criterion 2), or without crash-fix-matrix evidence on the pre-effective-baseline commits (criterion 3), the carve-out is being misused. Misuse triggers policy revision (likely tightening the criteria) or rejection of the bundle.
+- **Carve-out used outside the crash-fix-bundle class:** if a non-crash-fix bundle invokes this section (e.g., to skip ABBA on the parent for unrelated reasons), the carve-out's scope has expanded inappropriately. Either the scope expansion is justified (rename + broaden the carve-out) or the bundle is using the wrong gate.
+- **Pre-effective-baseline commits without crash-fix-matrix evidence:** if a bundle uses the carve-out and the pre-baseline commits ship without a falsifier-proven matrix, criterion 3 is broken. The matrix is the substitute gate; without it, those commits ship un-gated. Reject.
+
+After this push lands, the canonical baseline becomes the post-merge HEAD; the next bundle's parent will not have this constraint UNLESS the next bundle is itself a crash-fix bundle whose fix targets a benchmark-breaking crash. In that case the carve-out invokes again per the criteria above.
 
 ## Open design choices — autonomous resolutions
 
