@@ -223,6 +223,13 @@ D. **Default-off `jit_perfmap`** — changes user-visible default; affects produ
   - Compare: yield_from delta vs `c4e1900c` should be < 5% (target: ≈ baseline, no regression)
   - Verify all other benchmarks remain within ±5% threshold (no new regressions introduced by optimization)
   - Falsifier-on-the-fix: compound_crash_falsifier_matrix re-run at n=5 must still show 5/5 EXIT=0 on fix tree (correctness preserved); 5/5 EXIT=139 on revert (ABA bug class still detected).
+- **Verification of carve-out-scope generalization (precedes optimization, encodes commit-32 Scope deferral):**
+  - The gate_k_correctness_tradeoff_carveout.md `## Scope of this carve-out` section bounds the "narrow scope" claim to yield-from-of-generator benches in the CURRENT ABBA suite. Falsifier #4 fires if SEND_GEN cost surfaces on benches outside the current suite — but that falsifier is passive (only fires if someone runs the additional benches). This sub-step encodes the active verification step.
+  - **Action:** Run `bench_gen_quick.py` (untracked at repo root) and any other generator-heavy benches that exist (currently identified: `bench_gen_quick.py` only; future SEND_GEN-exercising benches added by any agent must be added to this list) at HEAD `60701da2` and at baseline `c4e1900c` using the standard ABBA harness invocation pattern.
+  - **Threshold:** Per-benchmark delta > 5% on any additional bench → broaden perf-recovery scope; the carve-out's "narrow scope" assertion is contradicted (falsifier #4 of gate_k carve-out fires); options A/B/C above must be re-scoped to address the broader bench class, OR Invocation 1 must be marked RESCINDED and the alternate rollback path (REVERT 794d8270) invoked per gate_k_correctness_tradeoff_carveout.md `## Alternate rollback path`.
+  - **Threshold:** Per-benchmark delta ≤ 5% on all additional benches → carve-out narrow-scope assertion HOLDS empirically; proceed to optimization options A/B/C as originally scoped.
+  - **Owner:** generalist or testkeeper (whoever opens next session that touches B5).
+  - **Why this is encoded here, not chat-only:** per recursive-policy-collapse pattern (feedback_recursive_policy_collapse_pattern.md), deferral mechanisms must ship in the same push that creates the obligation. Commit 32 created the falsifier-#4 obligation; this entry is the artifact-side encoding of the verification step that satisfies it. Without this entry, the deferral is chat-only and the carve-out's Scope clarification is unenforceable.
 - **Falsifier on each option:**
   - If A is attempted and the dedup misses a type-modification window → ABA bug returns; falsifier matrix catches it; revert
   - If B is attempted and register allocation interaction breaks compilation → falsified at build time; revert
