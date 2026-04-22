@@ -147,6 +147,23 @@ Within each group: smaller blast-radius first.
 - **Owner:** generalist (impl, decision pending falsifier outcome), testkeeper (verify)
 - **OPEN QUESTION FOR ALEXIE:** is patching the test acceptable here, or does the test reflect a contract the JIT must satisfy?
 
+### B4. test.test_subprocess.test_pass_fds_redirected (surfaced by commit 16 cleanup)
+
+- **Symptom:** `test_pass_fds_redirected` fails 5/5 in isolation under cinderx-built python; PASSES under vanilla CPython 3.12.13 in same environment.
+- **How it surfaced:** commit 16 (9e816756) removed wildcard-class skip entries from `cinder_skip_test.txt` (38 stale entries from Phase 2 dual-failure triage). This wildcard had been masking an individual-method failure in `test.test_subprocess`. Cleanup did NOT introduce the bug — it surfaced a previously-hidden cinderx bug. (Testkeeper 07:48:01Z gate-(j) re-run report; dual-failure verified per alexie 05:32:57Z rule.)
+- **Hypothesis:** cinderx interaction with `pass_fds=` and stdout/stderr redirect; possibly a file-descriptor-inheritance issue in the cinderx subprocess shim or a JIT compilation interaction with `os.dup2` / fork-exec timing. Not yet root-caused.
+- **Verification mode:**
+  - Read the failing test; capture exact failure mode (assertion or exception)
+  - Reproduce in isolation: `python3 -m unittest test.test_subprocess.SubprocessTests.test_pass_fds_redirected -v` under cinderx and under vanilla CPython 3.12.13 in same env
+  - If failure differs from a non-cinderx-built python, capture stderr + return code for both
+- **Falsifier:**
+  - If passes under cinderx with `--no-jit` (or PYTHONJIT unset) → JIT codegen bug; hand to JIT triage with HIR dump of the test function
+  - If fails identically under cinderx-runtime-only (no JIT) → cinderx runtime bug; hand to runtime triage (subprocess shim or fd-inheritance interaction)
+  - If passes under cinderx with PYTHONJIT=1 but JIT-list filter excludes the test code → JIT compilation of the specific function is the trigger
+- **Fix-success:** 5/5 PASS in isolation under cinderx; full-suite re-run shows the bug-surface count returns to its pre-commit-16 level (i.e., this failure resolves without regressing anything else)
+- **Owner:** generalist (root-cause + fix), testkeeper (verify), theologian (review per A1-shape protocol)
+- **Cross-references:** testkeeper 07:48:01Z (surfaced via gate-(j) re-run); supervisor 07:49:11Z (routing decision: NOT scope_limitations.md, this is a real bug); theologian 07:49:05Z ('honest path: route to triage_plan, not re-hide').
+
 ---
 
 ## Group C: Environment / stale failures (5 items)
