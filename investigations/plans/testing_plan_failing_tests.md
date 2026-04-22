@@ -49,30 +49,92 @@ spec her plan elides.
 
 ### Group A — Process-killing failures
 
-#### A1. test_jit_preload.test_func_destroyed_during_preload
+#### A1. test_jit_preload.test_func_destroyed_during_preload — PARTIAL CLOSE (Bug A FIXED, Bug B → A2)
 
 **Existing test:** `cinderx/PythonLib/test_cinderx/test_jit_preload.py:test_func_destroyed_during_preload`
-asserts subprocess returncode 0; currently asserts fail (returncode=1).
+asserts subprocess returncode 0; still fails (returncode=1) post-Bug-A
+fix because Bug B (FOR_ITER list-iter int corruption) remains. Tracked
+under A2 below.
+
+**Bug A (FIXED in commit c64e7682):** JIT NULL-deref via missing
+CheckExc on InvokeIterNext output → CondBranchCheckType segfault.
+
+**Bug A regression test (NEW):**
+`cinderx/PythonLib/test_cinderx/test_for_iter_raises.py` — 2 sentinel
+methods exercising JIT-compiled FOR_ITER over a raising iterator and
+over a list-iter subclass. Asserts graceful exception propagation
+(no SIGSEGV).
+
+**Bug A falsifier-proof cycle (testkeeper, completed 2026-04-22):**
+- Pre-fix /tmp/A1_minimal_repro_no_L.py: 5/5 SIGSEGV exit 139
+  (logs in /tmp/core.3406433 + /tmp/A1_repro_v2_*.log)
+- Post-fix /tmp/A1_minimal_repro_no_L.py: 5/5 graceful OverflowError
+  exit 1 (log /tmp/A1_phase5_postfix_1776858663.log)
+- Sentinel test_for_iter_raises: 2/2 PASS post-fix; 5/5 runs all OK
+  (log /tmp/A1_phase5_sentinel_v2_1776858695.log)
+
+**Coverage gap that remains (not for A1 — A2 takes ownership):**
+The original test_jit_preload assertion still fails because Bug B is
+the next-layer bug. When Bug B is fixed, the original assertion will
+pass naturally (exit 0). NO new sibling-test for A1; the minimal repro
++ sentinel above are sufficient regression coverage for the NULL-deref
+class.
+
+#### A2. test_jit_preload.test_func_destroyed_during_preload — Bug B (FOR_ITER list-iter int corruption)
+
+**Existing test:** SAME `cinderx/PythonLib/test_cinderx/test_jit_preload.py:test_func_destroyed_during_preload`
+asserts subprocess returncode 0; surfaced post-Bug-A-fix as a graceful
+OverflowError ('Python int too large to convert to C ssize_t') in
+re._parser.SubPattern.getwidth at FOR_ITER over `self.data` (a list).
+
+**Discovery context:** Bug B was masked by Bug A's SIGSEGV pre-fix.
+Bug A fix converted SIGSEGV → graceful OverflowError, making Bug B
+the visible failure mode 5/5 deterministic.
+
+**Hypothesis (per generalist Phase 0 evidence):** FOR_ITER specialization
+for list iterators (CallStatic substitution to JITRT_InvokeIterNext or
+similar list-iter fast path) corrupts int representation during the
+unpack `for op, av in self.data:` such that downstream int operations
+overflow ssize_t bounds.
 
 **Fix-time test requirements:**
-- The existing test is the regression test. It already asserts the
-  invariant. No new test needed; the existing assertion becomes
-  passing.
-- If theologian's hypothesis is wrong and the bug is upstream
-  (CPython 3.12.13 OverflowError without cinderx), the test must
-  remain in tree as `@unittest.skip("upstream OverflowError, see
-  tracker entry for X")` — NOT a quiet skip. The skip annotation
-  makes the deferral visible in the gate-(j) skip count.
-- **Coverage gap to close:** add a sibling test
-  `test_func_destroyed_during_preload_minimal_repro` that exercises
-  the same code path with a smaller repro than the current test —
-  if the original test falls into upstream-skip, the minimal repro
-  may avoid the upstream trigger AND still catch the JIT-side bug.
+- The existing test_func_destroyed_during_preload is the regression
+  test. When Bug B is fixed, returncode goes 1 → 0; A2 closes; A1
+  closure becomes complete (test_jit_preload no longer in failing list).
+- **Coverage gap to close (when Bug B work picks up):** add a focused
+  sentinel test that exercises FOR_ITER over a list with int-typed
+  elements where downstream int operations are JIT-compiled. Should
+  pass under cinderx without crashing or returning incorrect ints.
+  Mirror shape of test_for_iter_raises.py but for the int-corruption
+  class.
+- **Adjacent surface to test:** generator iteration via FOR_ITER (not
+  list-iter); yield-from iteration via FOR_ITER. Verify whether the
+  int-corruption is list-iter-specific or affects all iter
+  specializations.
 
-**Falsifier-proof cycle (testkeeper):**
-- Before fix lands: rerun test on bug-present tree → confirm
-  returncode=1 still observed (5/5).
-- After fix lands: rerun on bug-fixed tree → returncode=0 (5/5).
+**Falsifier-proof cycle (testkeeper, when Bug B fix lands):**
+- Pre-fix repro: `PYTHONPATH=cinderx/PythonLib python3 -X jit-all -L
+  /tmp/A1_minimal_repro.py` returns 1 with OverflowError 5/5
+- Post-fix: same command returns 0 (or no OverflowError) 5/5
+- Vanilla differential preserved: vanilla CPython 3.12.13 already
+  passes (per /tmp/A1_phase5_*.log + earlier 10:25:36Z proof) — no
+  upstream contribution
+
+**Bug B Phase 0 status (per generalist 11:46:26Z):** complete.
+Vanilla passes; cinderx-JIT-bug confirmed; deterministic 5/5;
+minimal repro = `b'a*b'` regex compilation under -X jit-all -L (or
+equivalent JIT-compile pressure path) with cinderx.compiler import
+loading the parser.
+
+**Owner:** per protocol pattern — generalist (impl), testkeeper
+(verify), theologian (root-cause + falsifier review).
+
+**Cross-references:**
+- Original A1 investigation finding Bug B masked behind Bug A:
+  generalist 11:36:38Z + 11:46:26Z chat, triage_plan A1 Phase 5 log
+- A1 Bug A fix commit: c64e7682
+- This testing-plan A2 entry encodes the per-bug regression test
+  scope per the protocol pattern.
 
 ### Group B — Reproducible test assertion failures
 
