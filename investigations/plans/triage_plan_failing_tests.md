@@ -149,20 +149,60 @@ Within each group: smaller blast-radius first.
 
 ### B4. test.test_subprocess.test_pass_fds_redirected (surfaced by commit 16 cleanup)
 
-- **Symptom:** `test_pass_fds_redirected` fails 5/5 in isolation under cinderx-built python; PASSES under vanilla CPython 3.12.13 in same environment.
+- **Symptom:** `test_pass_fds_redirected` fails 5/5 in isolation under cinderx-built python; PASSES under vanilla CPython 3.12.13 in same environment. Subprocess child inherits an extra FD beyond {0,1,2}|pass_fds — the leaked FD points at `/tmp/perf-<pid>.map`.
 - **How it surfaced:** commit 16 (9e816756) removed wildcard-class skip entries from `cinder_skip_test.txt` (38 stale entries from Phase 2 dual-failure triage). This wildcard had been masking an individual-method failure in `test.test_subprocess`. Cleanup did NOT introduce the bug — it surfaced a previously-hidden cinderx bug. (Testkeeper 07:48:01Z gate-(j) re-run report; dual-failure verified per alexie 05:32:57Z rule.)
-- **Hypothesis:** cinderx interaction with `pass_fds=` and stdout/stderr redirect; possibly a file-descriptor-inheritance issue in the cinderx subprocess shim or a JIT compilation interaction with `os.dup2` / fork-exec timing. Not yet root-caused.
-- **Verification mode:**
-  - Read the failing test; capture exact failure mode (assertion or exception)
-  - Reproduce in isolation: `python3 -m unittest test.test_subprocess.SubprocessTests.test_pass_fds_redirected -v` under cinderx and under vanilla CPython 3.12.13 in same env
-  - If failure differs from a non-cinderx-built python, capture stderr + return code for both
-- **Falsifier:**
-  - If passes under cinderx with `--no-jit` (or PYTHONJIT unset) → JIT codegen bug; hand to JIT triage with HIR dump of the test function
-  - If fails identically under cinderx-runtime-only (no JIT) → cinderx runtime bug; hand to runtime triage (subprocess shim or fd-inheritance interaction)
-  - If passes under cinderx with PYTHONJIT=1 but JIT-list filter excludes the test code → JIT compilation of the specific function is the trigger
-- **Fix-success:** 5/5 PASS in isolation under cinderx; full-suite re-run shows the bug-surface count returns to its pre-commit-16 level (i.e., this failure resolves without regressing anything else)
-- **Owner:** generalist (root-cause + fix), testkeeper (verify), theologian (review per A1-shape protocol)
-- **Cross-references:** testkeeper 07:48:01Z (surfaced via gate-(j) re-run); supervisor 07:49:11Z (routing decision: NOT scope_limitations.md, this is a real bug); theologian 07:49:05Z ('honest path: route to triage_plan, not re-hide').
+
+**HYPOTHESIS (refined per generalist 08:03:54Z empirical investigation):**
+
+The leak source is the cinderx `after_fork_child` callback, NOT a cinderx-direct file open. Specifically:
+
+1. cinderx/Jit/pyjit.cpp:2617 `after_fork_child` registers via `os.register_at_fork`.
+2. After `fork()` in the child, BEFORE `exec()`, `perf::afterForkChild()` runs (cinderx/Jit/perf_jitdump.cpp:531):
+   - Calls `PyUnstable_PerfMapState_Fini()` to close the parent's perf-map FD inherited by fork
+   - Calls `copyParentPidMap()` / `copyJitdumpFile()` which use `PyUnstable_WritePerfMapEntry` (CPython upstream API)
+3. `PyUnstable_WritePerfMapEntry` opens the child's new perf-map FD WITHOUT CLOEXEC (upstream CPython behavior; cinderx cannot influence the open call directly).
+4. The new FD persists through `exec()` because it lacks CLOEXEC; the test child sees it.
+
+Empirical confirmation (generalist 08:03:54Z): post-CLOEXEC-fix (commit 861762a0), all cinderx-direct opens (including jit_perfmap when enabled, jit_gdb_support, mmap_file, perf_jitdump's own opens, symbolizer, pyjit log) verified `FD_CLOEXEC=True` via `fcntl(F_GETFD)`. Despite this, test_pass_fds_redirected still fails 5/5 with the same shape, confirming the leak source is the post-fork CPython API call, not a cinderx-direct open.
+
+**Three architectural fix options for next session (theologian 08:05:03Z):**
+
+A. **Get CLOEXEC on the CPython-opened FD** — requires upstream CPython API support OR a way for cinderx to discover the FD post-open and `fcntl(fd, F_SETFD, FD_CLOEXEC)`. May be blocked on upstream changes.
+
+B. **Skip after_fork_child perf-map copy when subprocess context is detectable** — risk: breaks fork-without-exec multiprocessing where child genuinely needs parent's perf entries. Cannot reliably distinguish at fork time whether `exec()` will follow.
+
+C. **Skip after_fork_child perf-map work UNCONDITIONALLY** — accepts no-perf-map-in-children for all forks. Loses perf observability for `multiprocessing` children. Largest blast radius but cleanest fix.
+
+D. **Default-off `jit_perfmap`** — changes user-visible default; affects production users who rely on perf integration.
+
+**Verification mode (when fix is attempted):**
+- Reproduce in isolation: `PYTHONJIT=1 PYTHONPATH=cinderx/PythonLib python3 -m unittest test.test_subprocess.POSIXProcessTestCase.test_pass_fds_redirected -v`
+- FD inspection: `fcntl(F_GETFD)` on each FD in cinderx-built python before and after `cinderjit.force_compile`; all should show `FD_CLOEXEC=True` for cinderx-opened FDs (already passes per commit 861762a0)
+- Post-fix: re-run subprocess test 5/5 and confirm child FDs match `{0,1,2}|pass_fds` exactly
+
+**Falsifier on each option:**
+- If A is attempted and CPython upstream rejects the change → fall back to B/C
+- If B is attempted and `multiprocessing` fork-without-exec children lose perf entries → reverse, evaluate C
+- If C is attempted and perf observability loss is unacceptable per user feedback → reverse, evaluate D
+- If D is attempted and production users complain about behavior change → reverse, escalate to alexie
+
+**Fix-success:** 5/5 PASS on `test.test_subprocess.POSIXProcessTestCase.test_pass_fds_redirected` in isolation under cinderx; full-suite re-run shows failure count returns to pre-commit-16 level (currently 9 with this test skipped via commit 4a80ee2d; should remain 9 after fix with skip removed).
+
+**Disposition this push:**
+- Parent-side cinderx-direct opens fixed via O_CLOEXEC in commit 861762a0 (defensive depth value; closes leak class even though doesn't fix this specific test)
+- Test skipped via cinder_skip_test.txt entry in commit 4a80ee2d pending B4 deeper-fix
+- Skip is TEMPORARY pending next-session B4 work; NOT a scope-limitation declaration
+
+**Owner:** theologian (architectural decision A/B/C/D), generalist (impl after decision), testkeeper (verify)
+
+**Cross-references:**
+- testkeeper 07:48:01Z (surfaced via gate-(j) re-run)
+- generalist 08:03:54Z (empirical root cause: PyUnstable_WritePerfMapEntry post-fork)
+- supervisor 07:49:11Z + 08:04:51Z (routing: triage_plan B-group, NOT scope_limitations)
+- theologian 07:49:05Z + 08:05:03Z (honest path; 3 architectural options)
+- gatekeeper 08:04:37Z (Option B refined: ship CLOEXEC + skip + carve-out)
+- commit 861762a0 (CLOEXEC parent-side fix)
+- commit 4a80ee2d (skip annotation pending B4)
 
 ---
 
