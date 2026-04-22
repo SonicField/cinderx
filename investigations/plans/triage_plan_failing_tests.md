@@ -66,7 +66,8 @@ Within each group: smaller blast-radius first.
   - (c) **HIR-pass elision:** type-narrowing / refine-type / copy-prop pass eliminates overflow-check that builder originally emitted
   - (d) **Inlined-call speculation:** getwidth recursively inlined under wrong type assumption (e.g., element-type narrowed below actual range)
 - **Falsifier on the bug class:** if minimal repro triggers OverflowError under VANILLA CPython 3.12.13 (same env, no cinderx) → bug is upstream, close-as-upstream OUT of plan. (Pre-checked: vanilla passes; falsifier does NOT fire.)
-- **Fix-success:** 5/5 PASS on original test_jit_preload (subprocess returncode 0); 5/5 PASS on minimal repro `re.compile(rb'a*b')` under -X jit-all -L; sentinel test added; criterion (j) holds at fix commit; failure count drops to 8.
+- **Bug-class naming convention (added 2026-04-22 per librarian 14:33:42Z + theologian reconflation pattern N=3+):** A1 entry covers Bug B (FOR_ITER list-iter int corruption causing OverflowError); A2 entry (separate Group A item) covers Bug A (NULL-deref SIGSEGV in InvokeIterNext path). When citing repros or test variants in chat or commit messages, refer EXPLICITLY by Bug class (Bug-B-repro / Bug-A-repro), NOT by ambiguous flag distinction (-L / no-L). Reason: same agent reconflated A1↔Bug-A 3+ times in same day despite explicit self-corrections. Future-agent inheritance benefits from unambiguous naming.
+- **Fix-success:** 5/5 PASS on original test_jit_preload (subprocess returncode 0); 5/5 PASS on Bug-B-repro `re.compile(rb'a*b')` under -X jit-all -L; sentinel test added; criterion (j) holds at fix commit; failure count drops to 8.
 - **Owner:** generalist (impl), testkeeper (verify), theologian (root-cause + falsifier review)
 - **Cross-references:**
   - testkeeper 14:10:40Z framing correction (test always Bug B; Bug A was separate diagnostic-only)
