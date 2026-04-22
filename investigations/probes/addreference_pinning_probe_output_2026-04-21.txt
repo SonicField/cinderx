@@ -1,0 +1,15 @@
+python: 3.12.13+meta (3.12:3bb231a, Mar 03 2026, 12:38:32) [Clang 19.1.2 (ssh://git.vip.facebook.com/data/gitrepos/osmeta/external/llvm-pro
+cinderjit module: built-in (no __file__)
+is_enabled: True
+A address (pre-warmup): 0x9908d0
+A refcount (pre-warmup): 6
+f is JIT-compiled: True
+A refcount (post-compile, holding a, A): 6
+A address (pre-del): 0x9908d0
+A weakref alive (pre-del): True
+A sys.getrefcount (pre-del, includes +1 for arg): 6
+A weakref alive (post-del+gc): False
+---DECISION---
+VERDICT: addReference does NOT pin — Option A is required
+(weakref dead → no strong ref remained from CodeRuntime::references_)
+EXIT=0

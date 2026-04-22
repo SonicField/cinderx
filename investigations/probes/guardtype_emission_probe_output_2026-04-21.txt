@@ -1,0 +1,11 @@
+f1 is_jit_compiled: True
+=== HIR opcode counts for f1 ===
+{'Branch': 1, 'CondBranch': 1, 'Incref': 1, 'LoadArg': 1, 'LoadFrame': 1, 'LoadEvalBreaker': 1, 'Return': 1, 'RunPeriodicTasks': 1, 'UpdatePrevInstr': 1}
+f1(D()) returned: <__main__.D object at 0x7f63fe3dbb30>
+type(result) is D: True
+f2 is_jit_compiled: True
+=== HIR opcode counts for f2 ===
+{'Branch': 1, 'CondBranch': 1, 'LoadArg': 1, 'LoadAttrCached': 1, 'LoadFrame': 1, 'LoadEvalBreaker': 1, 'Return': 1, 'RunPeriodicTasks': 1, 'UpdatePrevInstr': 1}
+=== Calling f2(NoValue()) — annotation says HasValue ===
+f2(NoValue()) raised AttributeError: 'NoValue' object has no attribute 'value'
+EXIT=0

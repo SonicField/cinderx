@@ -1,0 +1,8 @@
+disable_emit_type_annotation_guards: <built-in function disable_emit_type_annotation_guards>
+f HIR opcodes (default config): {'Branch': 1, 'CondBranch': 1, 'Incref': 1, 'LoadArg': 1, 'LoadFrame': 1, 'LoadEvalBreaker': 1, 'Return': 1, 'RunPeriodicTasks': 1, 'UpdatePrevInstr': 1}
+GuardType emitted in default config: False
+f(D()) returned: <__main__.D object at 0x7f99a24d71a0>, type is D: True
+g HIR opcodes (no annotation, polymorphic warmup): {'Branch': 1, 'CondBranch': 1, 'LoadArg': 1, 'LoadAttrCached': 1, 'LoadFrame': 1, 'LoadEvalBreaker': 1, 'Return': 1, 'RunPeriodicTasks': 1, 'UpdatePrevInstr': 1}
+GuardType in g: False
+g(Empty()) raised AttributeError: 'Empty' object has no attribute 'value'
+EXIT=0
