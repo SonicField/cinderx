@@ -169,17 +169,7 @@ Within each group: smaller blast-radius first.
   - (2) **PrimitiveUnbox runtime-deopt-on-overflow** — instead of raising OverflowError from PrimitiveUnbox<CInt64> when value doesn't fit, deopt to interpreter (re-execute BINARY_OP). LIR codegen change for kPrimitiveUnbox; per feedback_hir_not_lir.md this is wrong-level but pragmatic.
   - (3) **Defer unbox decision until after Phi resolution** — move simplifyLongBinaryOp specialization to a later pass that runs after Phi-elimination; specialize per-block where types are concrete.
   - (4) **FrameState semantics change** — extend GuardOverflow's deopt path to also cover unbox-failure case via preflight check. Requires understanding deopt path fully.
-- A1 retry workstream sequencing: dedicated cycle, 2-4hr candidate; pick (2) or (3) for narrowest scope. Don't commit until empirical pre/post on Bug-B-repro confirms 5/5 PASS (per pythia 22 + work-cycle Bug-A misdirection lesson).
-
-#### Bug-class file-naming convention (canonical)
-
-Per librarian 14:33:42Z (recursive-policy-collapse close) + theologian reconflation pattern N=3+ in same day:
-
-When citing repros / test variants in chat, commits, or future investigation:
-- **Bug-B repro** = `/tmp/A1_minimal_repro.py` invoked WITH `-L` flag = OverflowError 'Python int too large to convert to C ssize_t' = the actual A1 failing-test mode = TARGET of A1 retry work
-- **Bug-A repro** = `/tmp/A1_minimal_repro_no_L.py` invoked WITHOUT `-L` flag = SIGSEGV exit 139 = adjacent diagnostic-only bug = TARGET of A2 retry work (separate cycle)
-
-Refer EXPLICITLY by Bug class (Bug-B-repro / Bug-A-repro). Do NOT cite -L vs no-L in isolation; reconflation cost is high (theologian self-corrected the same A1↔Bug-A confusion at 11:52Z, 14:11Z, 14:28Z). File naming may be revised in a future cleanup commit (e.g., `/tmp/A1_BugB_repro.py` / `/tmp/A2_BugA_repro.py`); until then, use the explicit-bug-class language.
+- A1 retry workstream sequencing: dedicated cycle, 2-4hr candidate; pick (2) or (3) for narrowest scope. Don't commit until empirical pre/post on Bug-B-repro confirms 5/5 PASS (per pythia 22 + work-cycle Bug-A misdirection lesson). Per Bug-class naming convention (already inline in A1 entry per 56f7603a): cite repros by explicit Bug-B / Bug-A class, not by -L / no-L distinction.
 
 ---
 
