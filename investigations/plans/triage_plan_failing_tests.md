@@ -204,6 +204,41 @@ D. **Default-off `jit_perfmap`** — changes user-visible default; affects produ
 - commit 861762a0 (CLOEXEC parent-side fix)
 - commit 4a80ee2d (skip annotation pending B4)
 
+### B5. yield_from perf regression from 794d8270 ABA-safety GuardType codegen
+
+- **Symptom:** `bench_yield_from_chain` ABBA shows +5.35% regression on the speculation-experiment bundle (HEAD `60701da2`) vs effective baseline `c4e1900c` (per generalist abba_compare.py 07:33:54Z output). Per-benchmark threshold (5%) violated; geomean PASSES (-2.44%).
+- **How it surfaced:** gate (k) verification on this push (testkeeper HEAD ABBA + abba_compare).
+- **Why this is in triage_plan, not "fix in this push":** mechanism is real (theologian 08:11:11Z root-cause analysis confirmed by generalist 08:13:11Z LICM check); existing GuardType LICM doesn't catch SEND_GEN GuardTypes (call-context, differing types per send, structural per-emission cost). Realistic optimization range 2–8 hr, no 30-min path exists (theologian retracted initial estimate at 08:13:35Z). Trade-off accepted for this push per supervisor 08:13:41Z; documented in `investigations/policies/gate_k_correctness_tradeoff_carveout.md` Invocation 1.
+- **Hypothesis (already root-caused, this is the fix-not-the-investigation entry):**
+  - 794d8270 changed GuardType from 1-instruction `cmp [reg+ob_type], imm` to 2-instruction `mov scratch, [reg+ob_type]; cmp [scratch+tp_version_tag], imm`.
+  - Per `bench_yield_from_chain` run: ~6M GuardType emissions × ~3 cycles per L1-hit dependent load = ~6 ms direct cost. Observed +21 ms / +5.35 %. Direct cost explains ~30%; remainder from pipeline stalls (dependent load + dependent compare) and scratch-register pressure.
+- **Optimization options (all are next-session B-group work; numbers from generalist 08:13:11Z assessment):**
+  - **A. HIR-level deduplication of consecutive GuardType on same value.** Modifies HIR pass to recognize redundant guards within a single function. Estimate 2–4 hr. Risk: medium — subtle correctness risk if dedup misses a type-modification window.
+  - **B. LIR-level scratch-register cache.** Track 'last value loaded into scratch' across LIR instructions; reuse without reload. Estimate 3–5 hr. Risk: high — interacts with register allocation; cross-block tracking is non-trivial.
+  - **C. Restructure SEND_GEN HIR to use a different fast-path that skips the type guard for known-stable generator types.** HIR structural change. Estimate 4–8 hr. Risk: high — risk of breaking generator semantics; needs comprehensive falsifier coverage.
+- **Verification mode (when fix is attempted):**
+  - Reproduce baseline: re-run ABBA at `c4e1900c` baseline, capture per-benchmark numbers
+  - Apply optimization
+  - Re-run ABBA at HEAD post-optimization
+  - Compare: yield_from delta vs `c4e1900c` should be < 5% (target: ≈ baseline, no regression)
+  - Verify all other benchmarks remain within ±5% threshold (no new regressions introduced by optimization)
+  - Falsifier-on-the-fix: compound_crash_falsifier_matrix re-run at n=5 must still show 5/5 EXIT=0 on fix tree (correctness preserved); 5/5 EXIT=139 on revert (ABA bug class still detected).
+- **Falsifier on each option:**
+  - If A is attempted and the dedup misses a type-modification window → ABA bug returns; falsifier matrix catches it; revert
+  - If B is attempted and register allocation interaction breaks compilation → falsified at build time; revert
+  - If C is attempted and generator semantics break → falsifier coverage flags it; revert; evaluate D (deferred per scope-limitation framing)
+- **Fix-success:** yield_from per-bench Δ < 5% vs `c4e1900c` baseline AND geomean unchanged or improved AND ABA-safety matrix preserved AND no regression on other benchmarks.
+- **Disposition this push:** trade-off accepted via gate_k_correctness_tradeoff_carveout.md Invocation 1; commit 4e0f26ab. Optimization deferred to next session.
+- **Owner:** theologian (architectural decision A/B/C), generalist (impl after decision), testkeeper (verify ABBA delta + falsifier matrix)
+- **Cross-references:**
+  - testkeeper 07:33:54Z (gate (k) verdict surfaced regression)
+  - theologian 08:11:11Z (root-cause: 794d8270 + 6M GuardType emissions)
+  - generalist 08:13:11Z (LICM check; 2-8 hr realistic estimate)
+  - theologian 08:13:35Z (retraction of 30-min estimate)
+  - supervisor 08:13:41Z (Option B adopted; ship + B5 routing)
+  - commit 4e0f26ab (gate_k_correctness_tradeoff_carveout.md companion artifact)
+  - commit 794d8270 (the source of the trade-off)
+
 ---
 
 ## Group C: Environment / stale failures (5 items)
