@@ -113,6 +113,30 @@ investing in no-GIL compatibility.
 
 ---
 
+## Accretion budget (meta-policy)
+
+**Budget: 5 entries.** When this file accumulates a 6th scope-limited entry, the next-add MUST be preceded by a mandatory policy review: do the existing entries still warrant deferral, or has scope drifted such that "deliberate non-support" has become the team's silent first-resort for any inconvenient bug?
+
+**Why a budget:** per-instance carve-outs are individually defensible (this entry is documented; that one has a falsifier; the next has an escape hatch). In aggregate, monotonic accretion turns the carve-out file into a quiet workaround ledger that future maintainers inherit without re-questioning. The budget forces a periodic stop-and-reconsider before each new entry, instead of letting accumulation be the rule.
+
+**Review trigger:** at the moment of proposing the 6th (or every 5th thereafter) entry. The proposer cannot land the new entry until the policy review verdict ships as a separate artifact-side commit on this file.
+
+**Review verdict commit shape (artifact-side, not chat-only):**
+- One commit on `investigations/scope_limitations.md` adding a section titled `## Accretion budget review N (YYYY-MM-DD)`.
+- Section content: (i) entry count at trigger time, (ii) per-entry one-line health check (does the falsifier still apply? has the trigger fired?), (iii) verdict — keep budget at 5, raise to N, lower to N, or replace with a different mechanism, (iv) evidence cited (specific entry counts + dates + falsifier-fired-or-not data).
+- Without the review-verdict commit landing first, the proposed 6th entry MUST be rejected at gate (l) staging review.
+
+**Falsifier on the budget itself:**
+- **Budget never triggered after 1+ years of new entries:** budget is set too high; lower it.
+- **Budget triggered but review verdict consistently "keep at 5, no scope drift":** review is theatre or budget is correct; spot-check by sampling 2 random entries and confirming the falsifier hasn't quietly fired (i.e., scope was actually right when set).
+- **Budget triggered and review verdict consistently "scope drifted, narrow N entries back in-scope":** budget is doing its job AND scope is genuinely drifting; root-cause investigation needed (why is the team reaching for scope-limitation as a first response?).
+
+**Current state (2026-04-22):** 3/5 entries. 2 more entries can land without triggering review.
+
+**Cross-reference:** auto-memory pointer at `feedback_carve_out_accretion_budget.md` (agent-side reminder; this artifact is the canonical source for human maintainers).
+
+---
+
 ## Adding a new scope-limited feature
 
 To add a new entry:
