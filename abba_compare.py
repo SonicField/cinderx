@@ -156,6 +156,41 @@ def _stddev(xs: list[float]) -> float:
     return (sum((x - mean) ** 2 for x in xs) / (n - 1)) ** 0.5
 
 
+def _median(xs: list[float]) -> float:
+    """Median of a list. Empty input returns 0."""
+    n = len(xs)
+    if n == 0:
+        return 0.0
+    s = sorted(xs)
+    if n % 2 == 1:
+        return s[n // 2]
+    return (s[n // 2 - 1] + s[n // 2]) / 2
+
+
+def _mad_outliers(xs: list[float], threshold: float = 3.0) -> tuple[list[float], list[float]]:
+    """Median Absolute Deviation outlier filter.
+
+    Returns (kept, excluded). A point x is excluded when
+    |x - median| > threshold * MAD * 1.4826 (consistency factor for
+    Gaussian-like distributions). Threshold default 3 = ~3σ.
+
+    Falls back to keeping all points when MAD == 0 (degenerate case
+    when more than half the points are identical) since the rule has no
+    informative scale at that point.
+    """
+    if len(xs) < 3:
+        return list(xs), []
+    med = _median(xs)
+    deviations = [abs(x - med) for x in xs]
+    mad = _median(deviations)
+    if mad == 0:
+        return list(xs), []
+    cutoff = threshold * mad * 1.4826
+    kept = [x for x in xs if abs(x - med) <= cutoff]
+    excluded = [x for x in xs if abs(x - med) > cutoff]
+    return kept, excluded
+
+
 def report_noise_envelope(label: str, result: AbbaResult) -> None:
     """Print session-aggregate noise envelope from per-run totals.
 
@@ -163,6 +198,12 @@ def report_noise_envelope(label: str, result: AbbaResult) -> None:
     JIT_ON and JIT_OFF run-total distributions. Bounds the cross-session
     measurement noise floor without per-benchmark per-rep data (which
     the current ABBA log format doesn't expose).
+
+    Reports both raw σ/CV and MAD-filtered σ/CV. Excluded outliers are
+    listed inline with their values; if exclusion materially changes the
+    CV (raw > 5% but filtered < 5%), the raw version is what gates
+    decisions but the filtered version is shown for transparency. No
+    silent dropping — outlier handling is explicit.
     """
     print(f"  Noise envelope ({label}):")
     for cond, runs in (("JIT_ON ", result.jit_on_runs_ms),
@@ -178,6 +219,24 @@ def report_noise_envelope(label: str, result: AbbaResult) -> None:
             f"    {cond}: n={n} mean={mean:.1f}ms σ={sd:.1f}ms "
             f"CV={cv_pct:.2f}%  range=[{min(runs):.1f}, {max(runs):.1f}]ms"
         )
+        kept, excluded = _mad_outliers(runs)
+        if excluded:
+            kept_n = len(kept)
+            kept_mean = sum(kept) / kept_n if kept_n else 0.0
+            kept_sd = _stddev(kept)
+            kept_cv = (kept_sd / kept_mean * 100.0) if kept_mean > 0 else 0.0
+            excl_str = ", ".join(f"{x:.1f}" for x in excluded)
+            print(
+                f"      MAD-filtered (3σ-equivalent): n={kept_n} "
+                f"mean={kept_mean:.1f}ms σ={kept_sd:.1f}ms CV={kept_cv:.2f}%  "
+                f"excluded: [{excl_str}]"
+            )
+            if cv_pct >= 5.0 and kept_cv < 5.0:
+                print(
+                    f"      NOTE: raw CV={cv_pct:.2f}% is at or above the 5% "
+                    f"per-benchmark threshold floor; MAD-filtered CV={kept_cv:.2f}% is below. "
+                    f"The {len(excluded)} excluded outlier(s) drive the raw envelope."
+                )
 
 
 def compare(
