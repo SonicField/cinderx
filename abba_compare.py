@@ -56,6 +56,10 @@ class AbbaResult:
     total_vanilla_ms: float
     total_cinderx_ms: float
     total_speedup: float
+    # Per-run total ms, captured from "Run N/M: JIT_ON|JIT_OFF (rep K) ... Xms total" lines.
+    # Used to bound session-aggregate noise envelope (cross-day vs within-day).
+    jit_on_runs_ms: list[float]
+    jit_off_runs_ms: list[float]
 
 
 # Per-benchmark row in the ABBA output looks like:
@@ -70,6 +74,10 @@ _GEOMEAN_RE = re.compile(
 _TOTAL_RE = re.compile(
     r"^\s+TOTAL\s+([\d.]+)ms\s+([\d.]+)ms\s+([\d.]+)x"
 )
+# Per-run line: "  Run 14/20: JIT_OFF (rep 4) ... 20046.3ms total"
+_RUN_RE = re.compile(
+    r"^\s+Run\s+\d+/\d+:\s+(JIT_(?:ON|OFF))\s+\(rep\s+\d+\)\s+\.\.\.\s+([\d.]+)ms"
+)
 
 
 def parse_abba(path: str) -> AbbaResult:
@@ -80,6 +88,8 @@ def parse_abba(path: str) -> AbbaResult:
     total_vanilla = None
     total_cinderx = None
     total_speedup = None
+    jit_on_runs: list[float] = []
+    jit_off_runs: list[float] = []
 
     try:
         with open(path) as f:
@@ -105,6 +115,15 @@ def parse_abba(path: str) -> AbbaResult:
                     total_vanilla = float(m.group(1))
                     total_cinderx = float(m.group(2))
                     total_speedup = float(m.group(3))
+                    continue
+                m = _RUN_RE.match(line)
+                if m:
+                    cond = m.group(1)
+                    ms = float(m.group(2))
+                    if cond == "JIT_ON":
+                        jit_on_runs.append(ms)
+                    else:
+                        jit_off_runs.append(ms)
     except OSError as exc:
         print(f"ERROR: cannot read {path}: {exc}", file=sys.stderr)
         sys.exit(2)
@@ -123,7 +142,42 @@ def parse_abba(path: str) -> AbbaResult:
         total_vanilla_ms=total_vanilla,
         total_cinderx_ms=total_cinderx,
         total_speedup=total_speedup,
+        jit_on_runs_ms=jit_on_runs,
+        jit_off_runs_ms=jit_off_runs,
     )
+
+
+def _stddev(xs: list[float]) -> float:
+    """Sample std deviation. Returns 0 for fewer than 2 samples."""
+    n = len(xs)
+    if n < 2:
+        return 0.0
+    mean = sum(xs) / n
+    return (sum((x - mean) ** 2 for x in xs) / (n - 1)) ** 0.5
+
+
+def report_noise_envelope(label: str, result: AbbaResult) -> None:
+    """Print session-aggregate noise envelope from per-run totals.
+
+    Computes σ and CV (coefficient of variation = σ / mean) for the
+    JIT_ON and JIT_OFF run-total distributions. Bounds the cross-session
+    measurement noise floor without per-benchmark per-rep data (which
+    the current ABBA log format doesn't expose).
+    """
+    print(f"  Noise envelope ({label}):")
+    for cond, runs in (("JIT_ON ", result.jit_on_runs_ms),
+                       ("JIT_OFF", result.jit_off_runs_ms)):
+        if not runs:
+            print(f"    {cond}: no per-run data parsed")
+            continue
+        n = len(runs)
+        mean = sum(runs) / n
+        sd = _stddev(runs)
+        cv_pct = (sd / mean * 100.0) if mean > 0 else 0.0
+        print(
+            f"    {cond}: n={n} mean={mean:.1f}ms σ={sd:.1f}ms "
+            f"CV={cv_pct:.2f}%  range=[{min(runs):.1f}, {max(runs):.1f}]ms"
+        )
 
 
 def compare(
@@ -248,6 +302,15 @@ def main() -> int:
     print(f"Thresholds: per-benchmark ±{per_bench:.1f}%, geomean ±{geomean:.1f}%")
     print(f"HEAD:     {args.head_log}")
     print(f"BASELINE: {args.baseline_log}")
+    print()
+
+    # Session-aggregate noise envelope (bounds cross-session noise floor;
+    # per supervisor 06:54:38Z + pythia 12 #1 about cross-day vs within-day
+    # noise on the carve-out baseline). Per-benchmark σ is not available
+    # from the current ABBA log format which only captures per-run TOTAL.
+    print("Session-aggregate noise envelope (per-run totals):")
+    report_noise_envelope("HEAD    ", head)
+    report_noise_envelope("BASELINE", baseline)
     print()
 
     ok, violations = compare(head, baseline, per_bench, geomean, args.verbose)
