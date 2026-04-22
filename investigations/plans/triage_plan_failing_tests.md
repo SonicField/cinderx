@@ -53,15 +53,29 @@ Within each group: smaller blast-radius first.
 
 ### A1. test_jit_preload.test_func_destroyed_during_preload
 
-- **Symptom (per testkeeper):** subprocess returncode 1; OverflowError in CPython `re._compiler` triggered via JIT-preload path
-- **Hypothesis:** JIT-preload mechanism passes invalid argument or environment to `re._compiler` when a function is destroyed mid-preload
+- **Symptom (per testkeeper Phase 0 + 14:10Z framing correction):** subprocess returncode 1; OverflowError 'Python int too large to convert to C ssize_t' in `re._parser.SubPattern.getwidth` at `for op, av in self.data:` (FOR_ITER over self.data, where self.data is a list of tuples). Test uses `-L` (lazy imports) flag; failure is deterministic 5/5 under the test's exact subprocess invocation.
+- **Hypothesis (corrected per testkeeper 14:10Z + theologian 14:10:35Z):** JIT FOR_ITER specialization for list iterators corrupts int representation during unpack `for X, Y in items:` where Y is an int participating in downstream ssize_t conversion. Surfaces as OverflowError in `re._parser.SubPattern.getwidth` because that function unpacks tuple elements containing potentially-large ints.
+- **Note on prior hypotheses (now falsified per work-cycle 13:40Z gate (k) BLOCK):** earlier hypothesis "JIT-preload mechanism passes invalid argument" was based on initial test name; investigation revealed no preload-mechanism involvement. Subsequent hypothesis "NULL deref via missing CheckExc on InvokeIterNext" (commits c64e7682 + 621b44ad + 2355bd0c, reverted by b50319ef) was a SEPARATE bug (Bug A: SIGSEGV in no-L diagnostic variant), NOT this test's failure mode. The test (with `-L`) always failed via the FOR_ITER int corruption path; Bug A only surfaced via the no-L diagnostic repro. Both A1 (Bug B) and Bug A (separate) are real bugs; only A1 matters for the failing-test count.
 - **Verification mode:**
-  - Reduce to minimal repro (smallest module that triggers)
-  - ASan run on the repro to rule out memory corruption masquerading as OverflowError
-  - Confirm OverflowError fires inside `re._compiler` not from JIT proper (stack trace inspection)
-- **Falsifier:** if minimal repro triggers OverflowError under VANILLA CPython 3.12.13 (same env, no cinderx), bug is upstream — close-as-upstream with tracker entry; OUT of this plan
-- **Fix-success:** 5/5 runs return 0; **ASan clean on repro** (so memory-corruption masquerade does not slip through); sentinel test added; criterion (j) holds at fix commit
+  - HIR-final-dump-FIRST diagnostic (per memory feedback_lir_dump_first_for_null_deref_sigsegv.md analog for graceful-exception class): dump JIT-compiled `re._parser.SubPattern.getwidth` with `-X jit-dump-final-hir` (printer.cpp:265 kGuardOverflow case fix per commit 46c26256 unblocks this for any function with GuardOverflow op)
+  - Trace int representation through the FOR_ITER + UNPACK_SEQUENCE chain in final HIR
+  - Identify the corruption point: codegen-level vs runtime-helper vs HIR-pass-elision
+- **Falsifier branches (Phase 2 mechanism candidates):**
+  - (a) **LIR codegen bug:** JIT-emitted FOR_ITER + UNPACK_SEQUENCE code mishandles int representation (e.g., wrong-width int op, sign-extension bug, unboxed-int overflow not detected at boundary)
+  - (b) **JITRT runtime bug:** JITRT helper for list-iter unpack (likely in cinderx/Jit/jit_rt.cpp) returns corrupted int
+  - (c) **HIR-pass elision:** type-narrowing / refine-type / copy-prop pass eliminates overflow-check that builder originally emitted
+  - (d) **Inlined-call speculation:** getwidth recursively inlined under wrong type assumption (e.g., element-type narrowed below actual range)
+- **Falsifier on the bug class:** if minimal repro triggers OverflowError under VANILLA CPython 3.12.13 (same env, no cinderx) → bug is upstream, close-as-upstream OUT of plan. (Pre-checked: vanilla passes; falsifier does NOT fire.)
+- **Fix-success:** 5/5 PASS on original test_jit_preload (subprocess returncode 0); 5/5 PASS on minimal repro `re.compile(rb'a*b')` under -X jit-all -L; sentinel test added; criterion (j) holds at fix commit; failure count drops to 8.
 - **Owner:** generalist (impl), testkeeper (verify), theologian (root-cause + falsifier review)
+- **Cross-references:**
+  - testkeeper 14:10:40Z framing correction (test always Bug B; Bug A was separate diagnostic-only)
+  - theologian 14:10:35Z self-correction on prior A1→A2 reclassification framing
+  - theologian 13:00:18Z A2-now-A1 falsifier scaffolding (HIR-final-dump-FIRST)
+  - theologian 12:42:18Z + 13:08:31Z A1 sentinel test draft (3-test design)
+  - generalist 11:46:26Z Bug B initial identification post-Bug-A-fix
+  - work-cycle 10:18Z–13:40Z full investigation log
+- **Adjacent bug (separate workstream, not part of A1):** Bug A = no-L SIGSEGV in InvokeIterNext path; tracked for retry via Option G (3-way branch in CondBranchIterNotDone) per theologian 13:48:32Z; NOT priority for failure-count reduction (doesn't affect test failure mode).
 
 #### A1 Execution Protocol (5 phases)
 
@@ -105,6 +119,16 @@ Within each group: smaller blast-radius first.
 **Phase exit conditions:**
 - A1 closes when Phase 4 + Phase 5 complete with no unresolved falsifier-fires
 - B1 begins per Group A→B ordering
+
+#### A1 Phase 5 plan adaptation log (2026-04-22 work-cycle)
+
+- 2026-04-22 ~10:18Z: A1 Phase 0 reproduction completed (testkeeper). Failure mode = OverflowError under -L (deterministic 5/5).
+- 2026-04-22 11:33Z–13:40Z: 4-hour investigation into hypothesized "missing CheckExc on InvokeIterNext" path (Bug A). Fix attempt #5 = c64e7682 + 621b44ad + 2355bd0c shipped to sonicfield.
+- 2026-04-22 13:40Z: gate (k) ABBA at fix-tree HEAD shows -9.24% geomean, 12 regressions (gen_nested +85%, gen_simple +57%, etc.). c64e7682 imposed unacceptable perf cost via CheckExc-as-deopt-point on every for-loop iteration (architectural hypothesis, not empirically verified).
+- 2026-04-22 13:50Z: revert via b50319ef (revert c64e7682 + 621b44ad + 2355bd0c) + 46c26256 (re-apply orphaned priority rule + B6 printer fix). Pushed to sonicfield 14:11:39Z.
+- 2026-04-22 14:10Z: testkeeper empirical correction surfaced — A1 (the test, with -L) was always failing via FOR_ITER list-iter int corruption (Bug B); Bug A (no-L SIGSEGV) was a SEPARATE diagnostic-only bug. The 4-hour Bug-A investigation didn't address A1. Hypothesis re-pointed to Bug B per testkeeper 14:10:40Z + theologian 14:10:35Z self-correction.
+- 2026-04-22 14:13Z: this commit — A1 hypothesis updated to Bug B; A1 retry scaffolding (HIR-final-dump-FIRST + 4 falsifier branches) attached; Bug A noted as adjacent separate workstream not affecting A1.
+- A1 retry workstream begins from this entry's Phase 0 (already done) + Phase 1 verification (HIR-final-dump diagnostic).
 
 ---
 
