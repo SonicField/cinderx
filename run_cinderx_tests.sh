@@ -86,6 +86,7 @@ JIT_TESTS=(
     test_jit_speculative_inlining
     test_jit_support_instrumentation
     test_jit_type_annotations
+    test_jitconfig_layout_sentinel
     test_binary_subscr_correctness
     test_binary_subscr_deopt
     test_diamond_self_identity
