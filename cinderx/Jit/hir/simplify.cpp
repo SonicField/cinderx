@@ -2299,17 +2299,11 @@ Register* simplifyInstr(Env& env, const Instr* instr) {
           target = reinterpret_cast<void*>(JITRT_InvokeIterNext);
         }
         if (target != nullptr) {
-          // JITRT_InvokeIterNext / JITRT_RangeIterNext can return one of:
-          // sentinel (iterator exhausted), NULL (error), or iterator value
-          // (per the InvokeIterNext class doc in hir.h). Use TOptObject so
-          // downstream CheckExc isn't DCE'd as redundant — the caller's
-          // CondBranchIterNotDone only distinguishes sentinel-vs-non-sentinel,
-          // not NULL, so a CheckExc must guard the NULL path.
           auto call = env.emitRawInstr<CallStatic>(
               1,
               env.func.env.AllocateRegister(),
               target,
-              TOptObject);
+              TObject);
           call->SetOperand(0, iterator);
           return call->output();
         }

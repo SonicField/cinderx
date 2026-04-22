@@ -201,6 +201,7 @@ Type outputType(
     case Opcode::kGetIter:
     case Opcode::kImportFrom:
     case Opcode::kImportName:
+    case Opcode::kInvokeIterNext:
     case Opcode::kLoadAttr:
     case Opcode::kLoadAttrCached:
     case Opcode::kLoadAttrSpecial:
@@ -244,11 +245,6 @@ Type outputType(
     case Opcode::kStealCellItem:
     case Opcode::kSwapCellItem:
     case Opcode::kWaitHandleLoadWaiter:
-    // InvokeIterNext returns sentinel | NULL-on-error | iter value (per
-    // InvokeIterNext doc in hir.h). The NULL-on-error case must keep
-    // downstream CheckExc from being DCE'd, so type-inference reports
-    // TOptObject not TObject.
-    case Opcode::kInvokeIterNext:
       return TOptObject;
 
     case Opcode::kGetSecondOutput: {
