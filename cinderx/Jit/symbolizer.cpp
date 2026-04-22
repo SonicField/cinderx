@@ -58,7 +58,7 @@ int findSymbolIn(struct dl_phdr_info* info, size_t, void* data) {
         info->dlpi_name);
     return 0;
   }
-  int fd = ::open(info->dlpi_name, O_RDONLY);
+  int fd = ::open(info->dlpi_name, O_RDONLY | O_CLOEXEC);
   if (fd < 0) {
     JIT_LOG("Failed opening {}: {}", info->dlpi_name, ::strerror(errno));
     return 0;

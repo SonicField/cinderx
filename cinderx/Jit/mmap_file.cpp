@@ -32,7 +32,7 @@ void MmapFile::open(const char* filename) {
         "Trying to mmap {} on top of an existing file object", filename)};
   }
 
-  int fd = ::open(filename, O_RDONLY);
+  int fd = ::open(filename, O_RDONLY | O_CLOEXEC);
   if (fd == -1) {
     throw std::runtime_error{
         fmt::format("Could not open {}: {}", filename, strerrorSafe(errno))};

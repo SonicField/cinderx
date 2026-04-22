@@ -169,7 +169,7 @@ uint64_t getTimestamp() {
 
 FileInfo openFileInfo(std::string filename_format) {
   auto filename = fmt::format(fmt::runtime(filename_format), getpid());
-  auto file = std::fopen(filename.c_str(), "w+");
+  auto file = std::fopen(filename.c_str(), "w+e");
   if (file == nullptr) {
     JIT_LOG("Couldn't open {} for writing ({})", filename, string_error(errno));
     return {};
@@ -282,13 +282,13 @@ std::tuple<const void*, unsigned int, const char*> parseJitEntry(
 // Copy the contents of from_name to to_name. Returns a std::FILE* at the end
 // of to_name on success, or nullptr on failure.
 std::FILE* copyFile(const std::string& from_name, const std::string& to_name) {
-  auto from = std::fopen(from_name.c_str(), "r");
+  auto from = std::fopen(from_name.c_str(), "re");
   if (from == nullptr) {
     JIT_LOG(
         "Couldn't open {} for reading ({})", from_name, string_error(errno));
     return nullptr;
   }
-  auto to = std::fopen(to_name.c_str(), "w+");
+  auto to = std::fopen(to_name.c_str(), "w+e");
   if (to == nullptr) {
     std::fclose(from);
     JIT_LOG("Couldn't open {} for writing ({})", to_name, string_error(errno));
@@ -317,7 +317,7 @@ std::FILE* copyFile(const std::string& from_name, const std::string& to_name) {
 // Copy the contents of the parent perf map file to the child perf map file.
 // Returns 1 on success and 0 on failure.
 int copyJitFile(const std::string& parent_filename) {
-  auto parent_file = std::fopen(parent_filename.c_str(), "r");
+  auto parent_file = std::fopen(parent_filename.c_str(), "re");
   if (parent_file == nullptr) {
     JIT_LOG(
         "Couldn't open {} for reading ({})",
@@ -348,7 +348,7 @@ int copyJitFile(const std::string& parent_filename) {
 // will also include trampoline entries. We only want to copy the JIT entries.
 // Returns 1 on success, and 0 on failure.
 int copyJitEntries(const std::string& parent_filename) {
-  auto parent_file = std::fopen(parent_filename.c_str(), "r");
+  auto parent_file = std::fopen(parent_filename.c_str(), "re");
   if (parent_file == nullptr) {
     JIT_LOG(
         "Couldn't open {} for reading ({})",
@@ -443,7 +443,7 @@ void copyFileInfo(FileInfo& info) {
             string_error(errno));
       } else {
         // Poke the file's atime to keep tmpwatch at bay.
-        std::FILE* file = std::fopen(parent_filename.c_str(), "r");
+        std::FILE* file = std::fopen(parent_filename.c_str(), "re");
         if (file != nullptr) {
           std::fclose(file);
         }

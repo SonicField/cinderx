@@ -235,7 +235,7 @@ void setJitLogFile(const std::string& log_filename) {
     pid_filename.replace(
         marker_pos, std::strlen(kPidMarker), fmt::format("{}", getpid()));
   }
-  FILE* file = fopen(pid_filename.c_str(), "w");
+  FILE* file = fopen(pid_filename.c_str(), "we");
   if (file == nullptr) {
     JIT_LOG(
         "Couldn't open log file {} ({}), logging to stderr",
