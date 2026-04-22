@@ -17,6 +17,7 @@
 - **Roles:** generalist = implementation; gatekeeper = gating; testkeeper = runtime verification + regression tests; theologian = root-cause analysis review + falsifier validity per step
 - **Falsifier discipline:** every step's hypothesis MUST be explicitly falsifiable. If hypothesis is falsified, plan adapts (re-classify, re-prioritize) — silent drop is not allowed
 - **Source-attribution discipline:** every claim about a test's behavior must be cited (chat-record, file Read, or same-turn tool call)
+- **A-class partial-close priority rule** (added 2026-04-22 per supervisor 12:16:04Z + pythia 19 #2 floor-not-ceiling concern; originally landed in 2355bd0c, re-applied here after revert b50319ef of the failed A1 fix bundle): when an A-class triage item PARTIAL-CLOSES by spawning a B-class entry (e.g., A1→A2), the spawned entry takes PRIORITY over not-yet-started A-class items in the next-priority queue. Specifically, A-class spawned siblings must be fully closed before continuing other A-class work. Prevents the failure-count-9-as-floor pattern where A-class partial-closes accumulate B-class siblings without ever reducing the failing count.
 
 ## Step 0: Baseline establishment
 
