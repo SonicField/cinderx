@@ -91,6 +91,95 @@ mode under -L was always the FOR_ITER OverflowError.)
 - After fix lands: rerun on bug-fixed tree → returncode=0 (5/5).
 - Falsifier on the hypothesis: if pre-fix repro shows OverflowError stack diverges from re._parser FOR_ITER chain, hypothesis is incomplete; investigate other corruption sources.
 
+#### A2. Latent Bug A: SIGSEGV in InvokeIterNext NULL-on-iter-exception path (no-L diagnostic, NOT in failing-test list)
+
+Companion to triage_plan A2 entry (added 3eea2b43 per pythia 22 #1 +
+supervisor 14:19:29Z). Bug A is a real production-shape SIGSEGV bug
+class not currently exercised by any cinderx test suite; failure count
+math UNCHANGED whether A2 is fixed or not (no test in failing list).
+Tracked here as proactive-fix workstream with sentinel design for the
+A2 retry-cycle.
+
+**Existing test:** NONE. Bug A surfaces only via diagnostic
+`/tmp/A1_minimal_repro_no_L.py` (no `-L` flag) under `-X jit-all`.
+test_jit_preload (the closest test) uses `-L` which surfaces Bug B,
+masking Bug A. Adding a test that EXERCISES Bug A is part of the
+sentinel-coverage requirement below.
+
+**Fix-time test requirements:**
+- **NEW sentinel REQUIRED** when A2 retry lands (no pre-existing test
+  to assert against). Place in
+  `cinderx/PythonLib/test_cinderx/test_for_iter_raises.py` (this was
+  the file shape used in the reverted c64e7682; preserves naming
+  continuity for the A2 retry).
+- Sentinel scope (3 tests, mirrors theologian's 12:42:18Z draft
+  reframed for Bug A NULL-deref class):
+  - **test 1 (isolates FOR_ITER + raising-iter NULL path):** custom
+    iterator class whose `__next__` raises after N iterations; JIT-
+    compile a list-comprehension consumer; assert the original
+    exception (e.g., `RuntimeError`) propagates without SIGSEGV.
+  - **test 2 (list-iter subclass with raising __iter__):** subclass
+    `list` (or define a list-shaped iterable) whose `__iter__` returns
+    an iterator that raises mid-iteration; assert exception propagates
+    without SIGSEGV.
+  - **test 3 (FOR_ITER over generator that raises):** generator
+    function that raises; FOR_ITER consumer; assert RuntimeError
+    propagates without SIGSEGV.
+- All sentinel tests use `@skip_unless_jit` + `cinderx.jit.force_compile`
+  per A1 sentinel pattern.
+- Per pythia 20 #3c (testkeeper 13:06:12Z assignment): sentinel
+  improvement specifically requires test 2 to actually exercise the
+  raising path, not just sanity-check list iteration. The pre-revert
+  test_for_iter_raises.py had a coverage gap there; A2 retry must
+  close it.
+- Per alexie 11:37:49Z 'no more skips': sentinel must FAIL pre-fix
+  AND PASS post-fix (no skip-as-coverage). Verified via subprocess
+  exit-code assertion + assertRaises matcher.
+
+**Falsifier-proof cycle (testkeeper, when A2 retry lands):**
+- Pre-fix: rerun `/tmp/A1_minimal_repro_no_L.py` 5/5 SIGSEGV exit 139
+  (proven at current HEAD; verified post-revert at 14:18Z); rerun
+  proposed sentinel 3/3 SIGSEGV pre-fix (each test exercises a
+  distinct NULL-deref-via-iter-exception path).
+- Post-fix: 5/5 PASS on minimal repro (Bug A converted to graceful
+  Python exception, not SIGSEGV); 3/3 PASS on sentinel (each test's
+  `assertRaises` catches the propagated exception cleanly).
+- Falsifier on the proposed Option G fix (per theologian 13:48:32Z):
+  if 3-way `CondBranchIterNotDone` change still segfaults on test 1
+  (raising iter), HIR change is incomplete; investigate JITRT helper
+  layer per A2's falsifier branch (b).
+
+**Coverage-gap audit (per pythia 20 #3c sentinel-improvement
+assignment, deferred to A2 retry per supervisor 13:05:46Z):**
+- The reverted c64e7682 sentinel `test_iter_raises_via_list_iter_with_subclass`
+  was sanity-only (BadList(list) + plain consumer). Did NOT actually
+  raise from the list-iter `__next__`. A2 retry MUST upgrade that test
+  to exercise the raising path.
+
+**Coordination with A2 mechanism investigation:**
+- A2 retry's Option G (3-way CondBranchIterNotDone) is theologian's
+  candidate per 13:48:32Z. It's an HIR architectural change. Sentinel
+  asserts BEHAVIOR (no SIGSEGV, exception propagates); theologian's
+  Phase 4 falsifier review asserts mechanism (Option G actually closes
+  the NULL-deref class).
+- Per A-class-partial-close priority rule (commit 46c26256 + theologian
+  3eea2b43 generalization): A1 (Bug B in failing list) takes priority
+  over A2 (Bug A latent, not in failing list). A2 retry waits.
+
+**Owner:** generalist (impl), testkeeper (verify + sentinel),
+theologian (root-cause + falsifier review). Same role allocation as
+A1.
+
+**Cross-references:**
+- triage_plan_failing_tests.md A2 entry (commit 3eea2b43; theologian)
+- testkeeper 13:06:12Z (pythia 20 #3c sentinel-improvement assignment)
+- theologian 12:42:18Z (3-test sentinel scope draft)
+- theologian 13:48:32Z (Option G HIR fix candidate for retry)
+- supervisor 14:19:29Z (cleanup commit scope including testing_plan
+  A2 mirror)
+- /tmp/A1_minimal_repro_no_L.py (Bug A repro)
+- /tmp/A1_phase5_postfix_*.log (post-fix-now-reverted empirical data)
+
 ### Group B — Reproducible test assertion failures
 
 #### B1. test_jit_support_instrumentation cluster (8F + 8E)
