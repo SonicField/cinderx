@@ -1,0 +1,14 @@
+ERRATA (2026-04-23 13:18Z per pythia 43 + medic 13:04:15Z + testkeeper 13:02:36Z empirical):
+
+The next-narrowing pointer cited in this commit message ('downstream cost in inlined body absorbs gain' → 'Step 2 spec D-1776932905' covering simplifyGuardType + cold-outlining + refcount-elision + pipeline-order) is EMPIRICALLY WRONG.
+
+Testkeeper post-(D) HIR analysis (chat 13:02:36Z) showed:
+- num_inlined_functions = 0 (NOT inlined)
+- failure_stats = NeedsPreload for distance_to + translate
+- 0 BeginInlinedFunction markers in bench_method_calls HIR
+
+Real mechanism for the gate (k) miss is PRELOADER ORDERING: preloadFuncAndDeps reads IC BEFORE HIRBuilder runs (D)'s pre-pop. (D)'s +12pp gain comes from cheaper monomorphic dispatch via DeoptPatchpoint guard (LoadConst MortalFunc), NOT from inlined bodies (which don't exist).
+
+Step 2 spec elements (downstream-of-inlining optimizations) DO NOT APPLY because bodies aren't inlined. The actual next-narrowing target is D' (preloader pre-pop, mirroring (D)'s logic but at preloadFuncAndDeps time before IC-walk loop).
+
+This errata lives as a git note (NOT amending the commit) per recursive-policy-collapse rule + immutable-history discipline. Future bisect/blame readers: read this note.
