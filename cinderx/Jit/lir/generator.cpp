@@ -2944,11 +2944,20 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
             Instruction::kCondBranch, type_ok, type_ok_block, slow_path);
 
         // State check: gen->gi_frame_state == FRAME_SUSPENDED
+        //
+        // PyFrameState is a signed enum where FRAME_SUSPENDED = -1, so the
+        // 8-bit gi_frame_state field reads as 0xFF and Imm{static_cast
+        // <uint64_t>(FRAME_SUSPENDED)} is 0xFFFFFFFFFFFFFFFF. Sign-extend
+        // the load all the way to 64-bit so both operands of the Equal share
+        // width — comparing a 32-bit OutVReg against a uint64_t Imm yields
+        // a wrong-result on aarch64 (cmp w<n>, x<scratch> silently emits a
+        // mixed-width comparison) per HIR-bridge fix at this site. x86_64
+        // imm-fits-in-cmp encoding masked the bug.
         bbb.switchBlock(type_ok_block);
         constexpr int32_t kFrameStateOffset =
             offsetof(PyGenObject, gi_frame_state);
         auto* frame_state = bbb.appendInstr(
-            Instruction::kMovSX, OutVReg{OperandBase::k32bit},
+            Instruction::kMovSX, OutVReg{},
             Ind{iter_reg, kFrameStateOffset, OperandBase::k8bit});
         auto* is_suspended = bbb.appendInstr(
             Instruction::kEqual, OutVReg{OperandBase::k8bit},
@@ -3709,12 +3718,15 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
         bbb.appendBranch(
             Instruction::kCondBranch, type_ok, type_ok_block, slow_path);
 
-        // State check: FRAME_SUSPENDED
+        // State check: FRAME_SUSPENDED. See iter-path twin at the
+        // kInvokeIterNext case for the width-mismatch reasoning — both
+        // operands of the Equal must share width (sign-extend the 8-bit
+        // load all the way to 64-bit so it matches the uint64_t Imm).
         bbb.switchBlock(type_ok_block);
         constexpr int32_t kFrameStateOffset =
             offsetof(PyGenObject, gi_frame_state);
         auto* frame_state = bbb.appendInstr(
-            Instruction::kMovSX, OutVReg{OperandBase::k32bit},
+            Instruction::kMovSX, OutVReg{},
             Ind{gen_reg, kFrameStateOffset, OperandBase::k8bit});
         auto* is_suspended = bbb.appendInstr(
             Instruction::kEqual, OutVReg{OperandBase::k8bit},
