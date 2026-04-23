@@ -270,11 +270,19 @@ MemoryEffects memoryEffects(const Instr& inst) {
     case Opcode::kLoadArrayItem:
       return borrowFrom(inst, AArrayItem | AListItem);
     case Opcode::kStoreArrayItem:
-      // Steal a ref to operand 2 (the value being stored). Operand 3 keeps
-      // the container alive across the store (refcount-pass' keepalive
-      // Incref/Decref balance). The runtime helper JITRT_SetObj_InArray does
-      // Py_XSETREF — it Py_XDECREFs the slot's previous value AFTER the
-      // store, matching CPython's PyList_SetItem semantics.
+      // Steal a ref to operand 2 (the value being stored). Operand 3 (named
+      // `previous` on the instr) is kept on the operand list as a borrowed
+      // keepalive — refcount-pass' Incref/Decref balance prevents premature
+      // free between the LoadArrayItem and StoreArrayItem.
+      //
+      // The bitmask deliberately excludes operand 3: an earlier Lane B
+      // iteration tried `(1 << 2) | (1 << 3)` to mark `previous` as stolen
+      // and got the leak from +990k tracked-objects only down to +198k.
+      // Empirically the refcount-pass treats stolen operands as
+      // ownership-transferred-no-auto-Decref; the C-level helper would
+      // still need to do the decref. The actual decref of the slot's old
+      // value is done at runtime by JITRT_SetObj_InArray (Py_XSETREF
+      // semantics), matching CPython's PyList_SetItem.
       return {
           false, AEmpty, {inst.NumOperands(), 1 << 2}, AArrayItem | AListItem};
     case Opcode::kStorePrimitiveArrayItem:
