@@ -2269,6 +2269,28 @@ void translateMovExtOp(
       default:
         JIT_ABORT("Unsupported input size for {}: {}", opname, input_size);
     }
+  } else if (input->isInd()) {
+    // Mirrors translateMove kInd handling above: resolve the indirect
+    // address through ptrIndirect, then dispatch the size-specific load+ext
+    // helper. Required for HIR opcodes that lower MovZX/MovSX directly from
+    // a memory-indirect input on aarch64 (x86_64 lacks this dispatch
+    // because its MovZX/MovSX-from-mem encoding accepts an indirect operand
+    // in a single instruction).
+    auto ptr = ptrIndirect(
+        as, arch::reg_scratch_0, arch::reg_scratch_1, input->getMemoryIndirect());
+    switch (input_size) {
+      case 8:
+        emit_load8(as, output, ptr);
+        break;
+      case 16:
+        emit_load16(as, output, ptr);
+        break;
+      case 32:
+        as->ldr(a64::w(output.id()), ptr);
+        break;
+      default:
+        JIT_ABORT("Unsupported input size for {}: {}", opname, input_size);
+    }
   } else {
     JIT_ABORT("Unsupported operand type for {}: {}", opname, input->type());
   }
@@ -2309,6 +2331,10 @@ void translateMovSXD(Environ* env, const Instruction* instr) {
     auto loc = input->getStackSlot().loc;
     auto ptr = arch::ptr_resolve(
         as, arch::fp, loc, arch::reg_scratch_0, arch::AccessSize::k32);
+    as->ldrsw(output, ptr);
+  } else if (input->isInd()) {
+    auto ptr = ptrIndirect(
+        as, arch::reg_scratch_0, arch::reg_scratch_1, input->getMemoryIndirect());
     as->ldrsw(output, ptr);
   } else {
     JIT_ABORT("Unsupported operand type for MovSXD: {}", input->type());
@@ -2783,16 +2809,19 @@ END_RULES
 BEGIN_RULES(Instruction::kMovZX)
   GEN("Rr", CALL_C(translateMovZX))
   GEN("Rm", CALL_C(translateMovZX))
+  GEN("Ri", CALL_C(translateMovZX))
 END_RULES
 
 BEGIN_RULES(Instruction::kMovSX)
   GEN("Rr", CALL_C(translateMovSX))
   GEN("Rm", CALL_C(translateMovSX))
+  GEN("Ri", CALL_C(translateMovSX))
 END_RULES
 
 BEGIN_RULES(Instruction::kMovSXD)
   GEN("Rr", CALL_C(translateMovSXD))
   GEN("Rm", CALL_C(translateMovSXD))
+  GEN("Ri", CALL_C(translateMovSXD))
 END_RULES
 
 BEGIN_RULES(Instruction::kUnreachable)
