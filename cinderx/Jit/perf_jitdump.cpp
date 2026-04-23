@@ -543,6 +543,15 @@ void afterForkChild() {
   // Make sure the parent processes map is closed before copying into it,
   // otherwise init is a nop.
   PyUnstable_PerfMapState_Fini();
+  // Re-initialize PerfMapState in the child so subsequent
+  // PyUnstable_WritePerfMapEntry calls bind to the child's new
+  // /tmp/perf-CHILDPID.map file. Without this, post-fork-compiled
+  // functions are not persisted to the child's perf-map (B2:
+  // test_jit_perf_map.test_forked_pid_map). copyParentPidMap below
+  // lazily opens the child's FD via the API as a side-effect, but
+  // PerfMapState's internal pointer won't track that FD for future
+  // writes unless _Init is explicitly re-called.
+  PyUnstable_PerfMapState_Init();
   copyParentPidMap();
   copyJitdumpFile();
 }
