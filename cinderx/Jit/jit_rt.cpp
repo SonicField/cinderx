@@ -1591,7 +1591,13 @@ void JITRT_SetU64_InArray(char* arr, uint64_t val, int64_t idx) {
 }
 
 void JITRT_SetObj_InArray(char* arr, uint64_t val, int64_t idx) {
-  ((PyObject**)arr)[idx] = (PyObject*)val;
+  // Py_XSETREF semantics: replace the slot, then decref what was there.
+  // CPython's PyList_SetItem performs the same decref; without this, JIT
+  // stores to list slots leak the overwritten value's reference.
+  PyObject** slot = &((PyObject**)arr)[idx];
+  PyObject* old = *slot;
+  *slot = (PyObject*)val;
+  Py_XDECREF(old);
 }
 
 template <typename T>

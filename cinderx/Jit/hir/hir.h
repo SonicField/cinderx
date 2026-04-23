@@ -3046,20 +3046,21 @@ class INSTR_CLASS(
   }
 };
 
-// Store an element to an array at a known index, with no bounds checking.
-class INSTR_CLASS(StoreArrayItem, (TCPtr, TCInt, TTop, TObject), Operands<4>) {
+// Store a PyObject element into a list-shaped container at a known index, with
+// no bounds checking. Steals the new value (operand 2) and the previous value
+// (operand 3); the refcount-insertion pass emits a Decref of the previous
+// value AFTER the store, matching CPython's Py_XSETREF semantics. Emission
+// sites MUST load the previous slot value (e.g. via LoadArrayItem) and pass it
+// as `previous` so the array's reference is properly released.
+class INSTR_CLASS(StoreArrayItem, (TCPtr, TCInt, TObject, TObject), Operands<4>) {
  public:
   StoreArrayItem(
       Register* ob_item,
       Register* idx,
       Register* value,
-      // This operand is never actually used, but it's an input for this because
-      // we need to keep a reference to the container alive. The refcount
-      // insertion pass handles this for us if the container is an input for
-      // this instruction.
-      Register* container_unused,
+      Register* previous,
       Type type)
-      : InstrT(ob_item, idx, value, container_unused), type_(type) {}
+      : InstrT(ob_item, idx, value, previous), type_(type) {}
 
   Register* ob_item() const {
     return GetOperand(0);
@@ -3071,6 +3072,51 @@ class INSTR_CLASS(StoreArrayItem, (TCPtr, TCInt, TTop, TObject), Operands<4>) {
 
   Register* value() const {
     return GetOperand(2);
+  }
+
+  Register* previous() const {
+    return GetOperand(3);
+  }
+
+  Type type() const {
+    return type_;
+  }
+
+ private:
+  Type type_;
+};
+
+// Store a primitive (unboxed integer) element into an array slot at a known
+// index, with no bounds checking. Operand 3 is the container (e.g. the
+// PyStaticArrayObject) which is held live via the refcount-insertion pass'
+// keepalive Incref/Decref balance, NOT decref'd as a stolen reference.
+class INSTR_CLASS(
+    StorePrimitiveArrayItem,
+    (TCPtr, TCInt, TPrimitive, TObject),
+    Operands<4>) {
+ public:
+  StorePrimitiveArrayItem(
+      Register* ob_item,
+      Register* idx,
+      Register* value,
+      Register* container,
+      Type type)
+      : InstrT(ob_item, idx, value, container), type_(type) {}
+
+  Register* ob_item() const {
+    return GetOperand(0);
+  }
+
+  Register* idx() const {
+    return GetOperand(1);
+  }
+
+  Register* value() const {
+    return GetOperand(2);
+  }
+
+  Register* container() const {
+    return GetOperand(3);
   }
 
   Type type() const {

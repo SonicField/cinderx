@@ -270,9 +270,18 @@ MemoryEffects memoryEffects(const Instr& inst) {
     case Opcode::kLoadArrayItem:
       return borrowFrom(inst, AArrayItem | AListItem);
     case Opcode::kStoreArrayItem:
-      // we steal a ref to our third operand, the value being stored
+      // Steal a ref to operand 2 (the value being stored). Operand 3 keeps
+      // the container alive across the store (refcount-pass' keepalive
+      // Incref/Decref balance). The runtime helper JITRT_SetObj_InArray does
+      // Py_XSETREF — it Py_XDECREFs the slot's previous value AFTER the
+      // store, matching CPython's PyList_SetItem semantics.
       return {
           false, AEmpty, {inst.NumOperands(), 1 << 2}, AArrayItem | AListItem};
+    case Opcode::kStorePrimitiveArrayItem:
+      // Operand 2 is an unboxed primitive (no refcount). Operand 3 is the
+      // container, kept alive via the refcount-pass' keepalive Incref/Decref
+      // balance.
+      return {false, AEmpty, {}, AArrayItem | AListItem};
     case Opcode::kLoadSplitDictItem:
       return borrowFrom(inst, ADictItem);
     case Opcode::kLoadTypeAttrCacheEntryType:
@@ -444,6 +453,7 @@ bool hasArbitraryExecution(const Instr& inst) {
     case Opcode::kStealCellItem:
     case Opcode::kSwapCellItem:
     case Opcode::kStoreArrayItem:
+    case Opcode::kStorePrimitiveArrayItem:
     case Opcode::kStoreField:
     case Opcode::kTpAlloc:
     case Opcode::kUnicodeCompare:

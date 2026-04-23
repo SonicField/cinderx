@@ -154,6 +154,7 @@ namespace jit::hir {
   V(StealCellItem)                     \
   V(SwapCellItem)                      \
   V(StoreArrayItem)                    \
+  V(StorePrimitiveArrayItem)           \
   V(StoreAttr)                         \
   V(StoreAttrCached)                   \
   V(StoreField)                        \

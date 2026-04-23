@@ -534,6 +534,7 @@ Type outputType(
     case Opcode::kSetFunctionAttr:
     case Opcode::kSnapshot:
     case Opcode::kStoreArrayItem:
+    case Opcode::kStorePrimitiveArrayItem:
     case Opcode::kStoreAttr:
     case Opcode::kStoreAttrCached:
     case Opcode::kStoreField:

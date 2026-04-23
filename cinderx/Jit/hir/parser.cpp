@@ -1047,6 +1047,7 @@ HIRParser::parseInstr(std::string_view opcode, Register* dst, int bb_index) {
     case Opcode::kStealCellItem:
     case Opcode::kSwapCellItem:
     case Opcode::kStoreArrayItem:
+    case Opcode::kStorePrimitiveArrayItem:
     case Opcode::kStoreField:
     case Opcode::kTpAlloc:
     case Opcode::kUnpackExToTuple:

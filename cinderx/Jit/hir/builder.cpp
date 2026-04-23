@@ -4034,12 +4034,17 @@ void HIRBuilder::emitSequenceSet(
   } else {
     JIT_ABORT("Unsupported oparg for SEQUENCE_SET: {}", oparg);
   }
-  tc.emit<StoreArrayItem>(
-      ob_item,
-      adjusted_idx,
-      value,
-      sequence,
-      element_type_from_seq_type(oparg));
+  auto element_type = element_type_from_seq_type(oparg);
+  if (element_type <= TPrimitive) {
+    tc.emit<StorePrimitiveArrayItem>(
+        ob_item, adjusted_idx, value, sequence, element_type);
+  } else {
+    Register* previous = temps_.AllocateStack();
+    tc.emit<LoadArrayItem>(
+        previous, ob_item, adjusted_idx, sequence, /*offset=*/0, element_type);
+    tc.emit<StoreArrayItem>(
+        ob_item, adjusted_idx, value, previous, element_type);
+  }
 }
 
 void HIRBuilder::emitLoadGlobal(

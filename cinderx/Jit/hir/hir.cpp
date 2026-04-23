@@ -510,6 +510,7 @@ bool Instr::isReplayable() const {
     case Opcode::kStoreField:
     case Opcode::kSnapshot:
     case Opcode::kStoreArrayItem:
+    case Opcode::kStorePrimitiveArrayItem:
     case Opcode::kStoreAttr:
     case Opcode::kStoreAttrCached:
     case Opcode::kStoreSubscr:
@@ -800,6 +801,7 @@ bool isPassthrough(const Instr& instr) {
     case Opcode::kStealCellItem:
     case Opcode::kSwapCellItem:
     case Opcode::kStoreArrayItem:
+    case Opcode::kStorePrimitiveArrayItem:
     case Opcode::kStoreAttr:
     case Opcode::kStoreAttrCached:
     case Opcode::kStoreSubscr:

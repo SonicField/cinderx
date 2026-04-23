@@ -2558,6 +2558,15 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
       }
       case Opcode::kStoreArrayItem: {
         auto instr = static_cast<const StoreArrayItem*>(&i);
+        bbb.appendInvokeInstruction(
+            JITRT_SetObj_InArray,
+            instr->ob_item(),
+            instr->value(),
+            instr->idx());
+        break;
+      }
+      case Opcode::kStorePrimitiveArrayItem: {
+        auto instr = static_cast<const StorePrimitiveArrayItem*>(&i);
         auto type = instr->type();
         decltype(JITRT_SetI8_InArray)* func = nullptr;
 
@@ -2577,10 +2586,8 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
           func = JITRT_SetI64_InArray;
         } else if (type <= TCUInt64) {
           func = JITRT_SetU64_InArray;
-        } else if (type <= TObject) {
-          func = JITRT_SetObj_InArray;
         } else {
-          JIT_ABORT("Unknown array type {}", type.toString());
+          JIT_ABORT("Unknown primitive array type {}", type.toString());
         }
 
         bbb.appendInvokeInstruction(
