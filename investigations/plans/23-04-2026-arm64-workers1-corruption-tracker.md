@@ -32,3 +32,16 @@
 - theologian 22:35:31Z idempotency principle (LOAD_GLOBAL pattern uses idempotent PyDict_GetItem; ResolveContainer is non-idempotent)
 - supervisor 22:45:14Z defer endorsement
 - 01a373f2 defensive-depth commit (honest "DOES NOT close test" framing)
+
+## Baseline-recollect risk: Option B in baseline-ABBA HEAD
+
+**Status:** OPEN follow-up (pythia 51 #2, 2026-04-23T23:12:08Z). Filed per supervisor 23:12:51Z synthesizer-pattern commitment + recursive-policy-collapse rule.
+
+**Risk:** Baseline ABBA at HEAD 01a373f2 (in flight 22:49Z, ETA ~24:04-24:19Z) absorbs Option B's `resolve_target_descr` PyImport_GetModule warm-up overhead into the regression-floor. Option B is empirically defensive-depth — DOES NOT close test_jit_preload; addresses module-load lazy-import side-effect class only. Future optimization deltas measured against this baseline include never-validated defensive runtime cost.
+
+**Mitigation rule:** if Option B is later reverted (e.g., proper class/method-resolution fix replaces it, or Option B proves load-bearing for an unrelated path → kept), baseline MUST be recollected BEFORE next ABBA cycle that consumes the baseline as regression-floor. Cite this entry in the revert/replacement commit message; gatekeeper BLOCK any post-revert ABBA that uses pre-revert baseline.
+
+**Cross-references:**
+- pythia 51 (2026-04-23T23:12:08Z) #2 second-order risk
+- supervisor 23:12:51Z synthesizer-pattern response (mitigation commitment)
+- librarian 23:27:59Z recursive-policy-collapse fire (chat-only deferral collapse → artifact required)
