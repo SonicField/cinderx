@@ -1263,10 +1263,18 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
 
           // Fast path: inline compact value extraction
           bbb.switchBlock(fast_path);
-          Instruction* digit = bbb.appendInstr(
+          Instruction* digit_32 = bbb.appendInstr(
               Instruction::kMove,
               OutVReg{OperandBase::k32bit},
               Ind{value, kDigitOff});
+          // Widen digit to 64-bit before the multiply. PyLong's digit field
+          // is a uint32_t (always non-negative), so zero-extension preserves
+          // value. ARM64 mul requires all operands to share width; without
+          // this kZext the resulting `mul x, x, w` is rejected as
+          // InvalidInstruction (asmjit) on aarch64. x86_64 imul masks the
+          // bug via flexible operand encoding.
+          Instruction* digit = bbb.appendInstr(
+              Instruction::kZext, OutVReg{}, digit_32);
           Instruction* sign_bits = bbb.appendInstr(
               Instruction::kAnd, OutVReg{}, tag, Imm{3});
           Instruction* one_val = bbb.appendInstr(

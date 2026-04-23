@@ -2321,6 +2321,26 @@ void translateUnreachable(Environ* env, const Instruction* instr) {
   as->udf(0);
 }
 
+// Pick the scratch register width matching `output`. ARM64 arithmetic
+// (add/sub/mul/and/orr/eor) requires all operands to be the same width:
+// `mul x0, x3, w1` is rejected as an InvalidInstruction. When loading an
+// immediate or stack value into a scratch before passing it to one of these
+// ops, the scratch must match the width that getGp(output) produces.
+inline arch::Gp pickScratchForOutput(const OperandBase* output) {
+  switch (output->dataType()) {
+    case OperandBase::k8bit:
+    case OperandBase::k16bit:
+    case OperandBase::k32bit:
+      return arch::w_scratch_0;
+    case OperandBase::kObject:
+    case OperandBase::k64bit:
+      return arch::reg_scratch_0;
+    case OperandBase::kDouble:
+      JIT_ABORT("scratch register requested for double-typed output");
+  }
+  Py_UNREACHABLE();
+}
+
 template <typename EmitFn>
 void translateAddSubOp(
     Environ* env,
@@ -2350,8 +2370,9 @@ void translateAddSubOp(
   } else if (opnd1->isStack()) {
     auto loc = opnd1->getStackSlot().loc;
     auto ptr = arch::ptr_resolve(as, arch::fp, loc, arch::reg_scratch_0);
-    as->ldr(arch::reg_scratch_0, ptr);
-    emit(as, output_reg, opnd0_reg, arch::reg_scratch_0);
+    auto scratch = pickScratchForOutput(output);
+    as->ldr(scratch, ptr);
+    emit(as, output_reg, opnd0_reg, scratch);
   } else {
     JIT_ABORT("Unsupported operand type for {}: {}", opname, opnd1->type());
   }
@@ -2399,8 +2420,9 @@ void translateLogicalOp(
   } else if (opnd1->isStack()) {
     auto loc = opnd1->getStackSlot().loc;
     auto ptr = arch::ptr_resolve(as, arch::fp, loc, arch::reg_scratch_0);
-    as->ldr(arch::reg_scratch_0, ptr);
-    emit(as, output_reg, opnd0_reg, arch::reg_scratch_0);
+    auto scratch = pickScratchForOutput(output);
+    as->ldr(scratch, ptr);
+    emit(as, output_reg, opnd0_reg, scratch);
   } else {
     JIT_ABORT("Unsupported operand type for {}: {}", opname, opnd1->type());
   }
@@ -2439,15 +2461,17 @@ void translateMul(Environ* env, const Instruction* instr) {
   auto opnd0_reg = AT::getGp(opnd0);
 
   if (opnd1->isImm()) {
-    as->mov(arch::reg_scratch_0, opnd1->getConstant());
-    as->mul(output_reg, opnd0_reg, arch::reg_scratch_0);
+    auto scratch = pickScratchForOutput(output);
+    as->mov(scratch, opnd1->getConstant());
+    as->mul(output_reg, opnd0_reg, scratch);
   } else if (opnd1->isReg()) {
     as->mul(output_reg, opnd0_reg, AT::getGp(opnd1));
   } else if (opnd1->isStack()) {
     auto loc = opnd1->getStackSlot().loc;
     auto ptr = arch::ptr_resolve(as, arch::fp, loc, arch::reg_scratch_0);
-    as->ldr(arch::reg_scratch_0, ptr);
-    as->mul(output_reg, opnd0_reg, arch::reg_scratch_0);
+    auto scratch = pickScratchForOutput(output);
+    as->ldr(scratch, ptr);
+    as->mul(output_reg, opnd0_reg, scratch);
   } else {
     JIT_ABORT("Unsupported operand type for Mul: {}", opnd1->type());
   }
@@ -2477,8 +2501,9 @@ void translateDivOp(
   } else if (opnd1->isStack()) {
     auto loc = opnd1->getStackSlot().loc;
     auto ptr = arch::ptr_resolve(as, arch::fp, loc, arch::reg_scratch_0);
-    as->ldr(arch::reg_scratch_0, ptr);
-    emit(as, output_reg, opnd0_reg, arch::reg_scratch_0);
+    auto scratch = pickScratchForOutput(output);
+    as->ldr(scratch, ptr);
+    emit(as, output_reg, opnd0_reg, scratch);
   } else {
     JIT_ABORT("Unsupported operand type for {}: {}", opname, opnd1->type());
   }
