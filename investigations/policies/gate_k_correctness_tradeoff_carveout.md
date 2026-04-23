@@ -155,6 +155,32 @@ Reverting commits 23-26 (skip + carve-out artifact + B4 entry) WITHOUT also reve
 
 The trade-off this rollback path makes explicit: choosing between (a) ABA correctness with documented narrow-scope perf cost, OR (b) ABA risk-acceptance with full perf restoration. The carve-out as authored is option (a). The rollback path is the structured exit to option (b) if (a) becomes unsustainable.
 
+### Amendment 2 — Invocation 1 RESCINDED per B5 hypothesis falsification (2026-04-23T04:10:33Z)
+
+**Trigger:** B5 counterfactual ABBA per spec-discipline-tightening empirical pre-confirmation gate (testkeeper 04:10:33Z; result `benchmarks/2026-04-23_211012_369089a1_b5_revert_794d8270_x86_64_abba.txt`). Tests whether 794d8270 is the source of the documented yield_from regression.
+
+**Verdict:** B5 hypothesis FALSIFIED. Reverting 794d8270 in /tmp/cinderx-b5 worktree (AUTO mode, reps=5):
+- GEOMEAN unchanged (1.20x with 794d8270 vs 1.20x without; within noise band)
+- yield_from cinderx-vs-vanilla speedup ratio: 1.11x → 1.03x when reverting (ratio got WORSE not better)
+- Per-bench cinderx -7.71ms but vanilla -37.92ms (vanilla shifted >5x more) → environmental noise dominates per-bench measurement
+- Revert produces no overall improvement; 794d8270 is HELPING the cinderx-vs-vanilla ratio not hurting it
+
+**Disposition:** Invocation 1 RESCINDED-by-evidence-of-no-regression. The 794d8270 → +5.35%/+4.23% yield_from regression attribution from 2026-04-22 was an artifact of cross-time/environmental noise dominating the cinderx-vs-vanilla ratio measurement. The mechanism trace (extra dependent load × 6M emissions) is corroborated as a direct cost but its observable impact is below the noise floor when measured comparably (auto-vs-auto, fresh-fresh).
+
+**B5 entry status:** CLOSED-NO-ACTIONABLE-REGRESSION per testkeeper 04:10:33Z + theologian 04:11:14Z + supervisor 04:11:37Z. B5 entry retained in triage_plan_failing_tests.md with HYPOTHESIS-FALSIFIED status bullet (per recursive-policy-collapse rule preserve lineage; see B5 entry STATUS line).
+
+**Carve-out class survival:** Invocation 1 rescinded; the carve-out as a structural class is retained as forward-looking policy infrastructure for future SEND_GEN-class trade-offs. RESCINDED here = "this specific invocation's empirical basis was falsified" not "the carve-out mechanism is itself defective."
+
+**Spec-discipline-tightening principle empirically validated:** B4 v2 cycle (3-corrections) + this B5 cycle (falsification-caught-pre-impl) = 2 wins for 'spec-with-perf-attribution must pass empirical pre-confirmation gate before endorse-for-impl' principle (D-1776907849 #2).
+
+**Cross-references for Amendment 2:**
+
+- testkeeper 04:10:33Z (B5 counterfactual ABBA verdict)
+- theologian 04:11:14Z (close-as-falsified endorsement + carve-out rescind framing)
+- supervisor 04:11:37Z (close + Amendment 2 endorsement)
+- benchmarks/2026-04-23_211012_369089a1_b5_revert_794d8270_x86_64_abba.txt (B5 result)
+- B5 entry STATUS bullet in triage_plan_failing_tests.md
+
 ## Cross-references
 
 - alexie 05:19:12Z (originating gate (k) binding rule)
