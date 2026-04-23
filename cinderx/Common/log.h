@@ -91,7 +91,17 @@ std::string repr(BorrowedRef<> obj);
     std::abort();                    \
   }
 
-#ifdef Py_DEBUG
+// JIT_DCHECK fires under EITHER:
+//   Py_DEBUG: full pydebug-CPython build (rare for cinderx; CPython rarely
+//             rebuilt with --with-pydebug since it requires matching CPython).
+//   JIT_DEBUG_BUILD: cinderx-only debug build (build.sh --pydebug). Allows
+//             enabling JIT_DCHECK assertions WITHOUT requiring a pydebug
+//             CPython, since cinderx targets Meta-Python at runtime which
+//             ships release-mode by default. Per ARM64 workbook §3.2 STRICT
+//             gate; per testkeeper 2026-04-23 19:34Z empirical (vanilla +
+//             Meta CPython lack _Py_RefTotal symbol that Py_DEBUG cinderx
+//             requires).
+#if defined(Py_DEBUG) || defined(JIT_DEBUG_BUILD)
 #define JIT_DABORT(...) JIT_ABORT(__VA_ARGS__)
 #define JIT_DCHECK(COND, ...) JIT_CHECK((COND), __VA_ARGS__)
 #define JIT_DCHECK_ONCE(COND, ...) JIT_CHECK_ONCE((COND), __VA_ARGS__)
