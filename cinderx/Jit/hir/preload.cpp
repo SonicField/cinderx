@@ -127,6 +127,33 @@ std::unique_ptr<InvokeTarget> Preloader::resolve_target_descr(
     BorrowedRef<> descr,
     int opcode) {
   auto target = std::make_unique<InvokeTarget>();
+  // Warm-up: import the module referenced by descr[0] so any lazy-import
+  // side effects fire BEFORE _PyClassLoader_ResolveFunction stores
+  // pointers we'll later cache. Mirrors the LOAD_GLOBAL warm-up at
+  // preload.cpp:340-348 (PyDict_GetItem is idempotent; single fetch
+  // triggers any sys.modules-shaped lazy-import). PyImport_GetModule is
+  // similarly idempotent — it returns the cached module without
+  // re-executing initialization, so a double-fetch (warm-up + real) is
+  // safe. Without warm-up, lazy imports fired during ResolveFunction can
+  // mutate the module/class state and leave the cached `container` /
+  // `callable` pointers dangling, surfacing as heap-corruption later
+  // (test_jit_preload workers=1+lazy+jit-all per testkeeper 21:25Z).
+  //
+  // An earlier iteration tried _PyClassLoader_ResolveContainer for
+  // broader coverage (class/method path) but that helper is NOT
+  // idempotent — double-walking regressed config C from PASS to SIGABRT
+  // (testkeeper 22:34Z). Stick to the idempotent module-only scope here;
+  // class/method-resolution lazy-imports remain a separate workstream.
+  if (PyTuple_Check(descr) && PyTuple_GET_SIZE(descr) >= 1) {
+    PyObject* module_name = PyTuple_GET_ITEM(descr.get(), 0);
+    if (PyUnicode_Check(module_name)) {
+      PyObject* warmup = PyImport_GetModule(module_name);
+      Py_XDECREF(warmup);
+      if (PyErr_Occurred()) {
+        PyErr_Clear();
+      }
+    }
+  }
   PyObject* container;
   auto callable =
       Ref<>::steal(_PyClassLoader_ResolveFunction(descr, &container));
