@@ -74,6 +74,12 @@ constexpr auto reg_scratch_0 = asmjit::a64::x13;
 constexpr auto reg_scratch_1 = asmjit::a64::x14;
 constexpr auto reg_scratch_br = asmjit::a64::x16;
 
+// 32-bit aliases of the scratch registers for sub-word loads (e.g. comparing
+// a uint32_t tp_version_tag in GuardType). w-registers share storage with
+// the corresponding x-register; using w avoids a no-op zero-extend.
+constexpr auto w_scratch_0 = asmjit::a64::w13;
+constexpr auto w_scratch_1 = asmjit::a64::w14;
+
 constexpr auto reg_scratch_0_loc = X13;
 
 constexpr auto reg_general_return_loc = X0;

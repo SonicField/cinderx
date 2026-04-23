@@ -79,6 +79,28 @@ class AutoTranslator {
     Py_UNREACHABLE();
   }
 
+  // Like getGp but always selects the 64-bit form on aarch64 regardless of
+  // the operand's data type. Used when emitting `mov` from a 64-bit
+  // immediate or from xzr — both sides of the mov must agree on width, and
+  // aarch64's `mov w<n>, xzr` is invalid (xzr is x-only). On x86_64 this
+  // collapses to getGp (no widen needed).
+  static arch::Gp getGpWiden(lir::DataType data_type, unsigned int reg) {
+#if defined(CINDER_X86_64)
+    return getGp(data_type, reg);
+#elif defined(CINDER_AARCH64)
+    JIT_CHECK(reg != raw(RegId::SP), "SP is not a general-purpose register");
+    (void)data_type;
+    return asmjit::a64::x(reg);
+#else
+    CINDER_UNSUPPORTED
+#endif
+    Py_UNREACHABLE();
+  }
+
+  static arch::Gp getGpWiden(const lir::OperandBase* op) {
+    return getGpWiden(op->dataType(), op->getPhyRegister().loc);
+  }
+
   static arch::Gp getGpOutput(const lir::OperandBase* op, unsigned int reg) {
 #if defined(CINDER_X86_64)
     return getGp(op->dataType(), reg);

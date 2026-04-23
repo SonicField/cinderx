@@ -29,6 +29,15 @@ BUILD_TYPE="${BUILD_TYPE:-RelWithDebInfo}"
 CC="${CC:-clang}"
 CXX="${CXX:-clang++}"
 
+# On aarch64, LTO is unstable (per phoenix workbook §0.5). Default OFF on
+# aarch64 unless caller explicitly opts in via ENABLE_LTO=ON.
+ARCH="$(uname -m)"
+if [ "$ARCH" = "aarch64" ]; then
+    ENABLE_LTO="${ENABLE_LTO:-OFF}"
+else
+    ENABLE_LTO="${ENABLE_LTO:-ON}"
+fi
+
 # --- Parse arguments ---
 CLEAN=""
 for arg in "$@"; do
@@ -98,7 +107,7 @@ cmake \
     -DENABLE_SYMBOLIZER:BOOL=ON \
     -DENABLE_USDT:BOOL=ON \
     -DENABLE_XXCLASSLOADER:BOOL=ON \
-    -DENABLE_LTO:BOOL=ON \
+    -DENABLE_LTO:BOOL="$ENABLE_LTO" \
     -B "$BUILD_DIR" .
 
 # --- Copy usdt header (required by build) ---
