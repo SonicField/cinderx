@@ -103,6 +103,7 @@ JIT_TESTS=(
     test_adversarial_valuechain
     test_double_binary_op
     test_jit_exception_edge_cases
+    test_safe_type_gc_optout
 )
 
 RUNTIME_TESTS=(
