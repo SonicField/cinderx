@@ -491,12 +491,23 @@ void registerFunction(
 
   initFiles();
 
-  for (auto& section_and_size : code_sections) {
-    void* code = section_and_size.first;
-    std::size_t size = section_and_size.second;
-    auto jit_entry = fmt::format("{}:{}", prefix, name);
-    PyUnstable_WritePerfMapEntry(
-        static_cast<const void*>(code), size, jit_entry.c_str());
+  // Gate PyUnstable_WritePerfMapEntry on jit_perfmap to match the
+  // existing openPidMap gate at line 180 (B4: restores intent that
+  // perf-map entries are written iff the user passed -X jit-perfmap).
+  // Without this gate, CinderX writes deopt_trampoline entries via
+  // CPython's API at compiler-context init time, which opens
+  // /tmp/perf-<pid>.map as side-effect even when the user didn't ask
+  // for perfmap. That extra FD breaks
+  // test_subprocess.test_pass_fds_redirected which counts open FDs in
+  // subprocess children.
+  if (jit_perfmap) {
+    for (auto& section_and_size : code_sections) {
+      void* code = section_and_size.first;
+      std::size_t size = section_and_size.second;
+      auto jit_entry = fmt::format("{}:{}", prefix, name);
+      PyUnstable_WritePerfMapEntry(
+          static_cast<const void*>(code), size, jit_entry.c_str());
+    }
   }
 
   if (auto file = g_jitdump_file.file) {
