@@ -3827,10 +3827,11 @@ std::vector<BorrowedRef<PyFunctionObject>> preloadFuncAndDeps(
       }
     }
 
-    // Preload IC-resolved method targets for speculative inlining.
-    // At Tier 2 recompilation, ICs are warm and contain resolved method
-    // functions that the inliner may want to speculatively inline.
-    // At Tier 1, ICs are cold so this loop finds nothing (correct).
+    // Preload IC-resolved method targets for speculative inlining. At Tier 1
+    // we pre-populate the JIT IC from CPython's adaptive LOAD_ATTR_METHOD_NO_DICT
+    // cache (auto-compile path: interpreter warmup specializes the bytecode
+    // before the first JIT compile). At Tier 2 recompilation the IC is also
+    // warm from runtime invocations.
     {
       BorrowedRef<PyCodeObject> f_code{f->func_code};
       jit::BytecodeInstructionBlock bc_block{f_code};
@@ -3846,6 +3847,15 @@ std::vector<BorrowedRef<PyFunctionObject>> preloadFuncAndDeps(
           int bc_off = bc_instr.opcodeOffset().value();
           auto* ic = jitCtx()->allocateLoadMethodCache(
               f_code, bc_off);
+#if PY_VERSION_HEX >= 0x030C0000
+          if (getConfig().attr_caches && getConfig().specialized_opcodes &&
+              bc_instr.specializedOpcode() == LOAD_ATTR_METHOD_NO_DICT) {
+            int instr_idx = bc_instr.opcodeIndex().value();
+            int name_idx = loadAttrIndex(bc_instr.oparg());
+            prePopulateLoadMethodCacheFromAdaptive(
+                ic, f_code, instr_idx, name_idx);
+          }
+#endif
           for (const auto& entry : ic->entries()) {
             if (entry.value != nullptr && PyFunction_Check(entry.value)) {
               BorrowedRef<PyFunctionObject> ic_func{entry.value};

@@ -304,9 +304,10 @@ class LoadMethodCache {
   // Public accessor for IC entries (speculative inlining)
   const std::array<Entry, 4>& entries() const { return entries_; }
 
-  // Pre-populate an IC entry from compile-time information. Used by the HIR
-  // builder to seed entries from CPython's adaptive LOAD_ATTR_METHOD cache so
-  // the inliner's monomorphic check sees a warm IC on first compile.
+  // Pre-populate an IC entry from compile-time information. Used by the
+  // preloader (and historically the HIR builder) to seed entries from
+  // CPython's adaptive LOAD_ATTR_METHOD cache so the inliner sees a warm IC
+  // on first compile.
   void prePopulate(
       BorrowedRef<PyTypeObject> type,
       BorrowedRef<> value,
@@ -320,6 +321,23 @@ class LoadMethodCache {
   std::array<Entry, 4> entries_;
   std::unique_ptr<CacheStats> cache_stats_;
 };
+
+// Walk the type hierarchy starting from PyBaseObject_Type to find a type
+// whose tp_version_tag matches `version`. Used at JIT compile time to
+// recover the PyTypeObject* from CPython's inline cache (which only stores
+// the version tag, not the type pointer). Returns nullptr if version is 0
+// or not found within the hierarchy depth bound.
+PyTypeObject* findTypeByVersionTag(uint32_t version);
+
+// Pre-populate `ic` from CPython's adaptive LOAD_ATTR_METHOD_NO_DICT cache
+// at the given (code, instr_idx, name_idx) site. No-op for unspecialized
+// LOAD_ATTRs, sites where the version tag has been invalidated, or
+// non-method descriptors. Callable from preloader and HIR builder.
+void prePopulateLoadMethodCacheFromAdaptive(
+    LoadMethodCache* ic,
+    BorrowedRef<PyCodeObject> code,
+    int instr_idx,
+    int name_idx);
 
 // A cache for LoadMethodCached instructions where we expect the receiver to be
 // a type object.

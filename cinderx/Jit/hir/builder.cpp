@@ -3168,53 +3168,6 @@ void HIRBuilder::emitJumpIf(
 
 namespace {
 
-// Walk the type hierarchy starting from 'base' to find a type whose
-// tp_version_tag matches 'version'. Used at JIT compile time to recover
-// the PyTypeObject* from CPython's inline cache (which only stores the
-// version tag, not the type pointer).
-//
-// Cost: O(number_of_types) but runs once per LOAD_ATTR_SLOT at JIT compile
-// time, not at runtime.
-PyTypeObject* findTypeByVersionTagImpl(
-    PyTypeObject* base,
-    uint32_t version,
-    int depth) {
-  if (depth > 50) {
-    return nullptr;
-  }
-  if (base->tp_version_tag == version) {
-    return base;
-  }
-  PyObject* subclasses =
-      PyObject_CallMethod((PyObject*)base, "__subclasses__", nullptr);
-  if (subclasses == nullptr || !PyList_Check(subclasses)) {
-    Py_XDECREF(subclasses);
-    return nullptr;
-  }
-  Py_ssize_t n = PyList_GET_SIZE(subclasses);
-  for (Py_ssize_t i = 0; i < n; i++) {
-    PyObject* sub = PyList_GET_ITEM(subclasses, i);
-    if (!PyType_Check(sub)) {
-      continue;
-    }
-    PyTypeObject* found =
-        findTypeByVersionTagImpl((PyTypeObject*)sub, version, depth + 1);
-    if (found != nullptr) {
-      Py_DECREF(subclasses);
-      return found;
-    }
-  }
-  Py_DECREF(subclasses);
-  return nullptr;
-}
-
-PyTypeObject* findTypeByVersionTag(uint32_t version) {
-  if (version == 0) {
-    return nullptr;
-  }
-  return findTypeByVersionTagImpl(&PyBaseObject_Type, version, 0);
-}
-
 } // namespace
 
 void HIRBuilder::emitDeleteAttr(
@@ -3231,41 +3184,11 @@ void HIRBuilder::emitLoadAttr(
   int name_idx = loadAttrIndex(oparg);
 
   // In 3.12 LOAD_METHOD has been merged into LOAD_ATTR, and the oparg tells you
-  // which one it should be.
+  // which one it should be. The JIT LoadMethodCache is pre-populated by the
+  // preloader (pyjit.cpp preloadFuncAndDeps) so the inliner's monomorphic
+  // check sees a warm IC on first compile.
   if constexpr (PY_VERSION_HEX >= 0x030C0000) {
     if (oparg & 1) {
-      // Pre-populate the JIT LoadMethodCache from CPython's adaptive
-      // LOAD_ATTR_METHOD_* cache so the inliner's monomorphic check sees a
-      // warm IC on first compile (auto-compile path: interpreter warmup
-      // populates the adaptive cache before JIT fires).
-      if (getConfig().attr_caches && getConfig().specialized_opcodes) {
-        int specop = bc_instr.specializedOpcode();
-        if (specop == LOAD_ATTR_METHOD_NO_DICT) {
-          _Py_CODEUNIT* code_units = codeUnit(code_);
-          int instr_idx = bc_instr.opcodeIndex().value();
-          const _PyAttrCache* cache = reinterpret_cast<const _PyAttrCache*>(
-              &code_units[instr_idx + 1]);
-          uint32_t type_version = cache->version[0] |
-              (static_cast<uint32_t>(cache->version[1]) << 16);
-          if (type_version != 0) {
-            PyTypeObject* type = findTypeByVersionTag(type_version);
-            if (type != nullptr) {
-              BorrowedRef<> attr_name{
-                  PyTuple_GET_ITEM(code_->co_names, name_idx)};
-              PyObject* descr = _PyType_Lookup(type, attr_name);
-              if (descr != nullptr &&
-                  (PyFunction_Check(descr) ||
-                   Py_TYPE(descr) == &PyMethodDescr_Type ||
-                   PyType_HasFeature(
-                       Py_TYPE(descr), Py_TPFLAGS_METHOD_DESCRIPTOR))) {
-                auto* ic = jit::getContext()->allocateLoadMethodCache(
-                    code_, bc_instr.baseOffset().value());
-                ic->prePopulate(type, descr, attr_name);
-              }
-            }
-          }
-        }
-      }
       emitLoadMethod(tc, name_idx);
       return;
     }

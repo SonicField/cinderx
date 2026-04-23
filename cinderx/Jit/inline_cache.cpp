@@ -4,6 +4,7 @@
 
 #include "internal/pycore_object.h"
 
+#include "cinderx/Common/code.h"
 #include "cinderx/Common/dict.h"
 #include "cinderx/Common/func.h"
 #include "cinderx/Common/log.h"
@@ -1348,6 +1349,87 @@ void LoadMethodCache::prePopulate(
     BorrowedRef<> value,
     BorrowedRef<> name) {
   fill(type, value, name);
+}
+
+namespace {
+
+PyTypeObject* findTypeByVersionTagImpl(
+    PyTypeObject* base,
+    uint32_t version,
+    int depth) {
+  if (depth > 50) {
+    return nullptr;
+  }
+  if (base->tp_version_tag == version) {
+    return base;
+  }
+  PyObject* subclasses =
+      PyObject_CallMethod((PyObject*)base, "__subclasses__", nullptr);
+  if (subclasses == nullptr || !PyList_Check(subclasses)) {
+    Py_XDECREF(subclasses);
+    return nullptr;
+  }
+  Py_ssize_t n = PyList_GET_SIZE(subclasses);
+  for (Py_ssize_t i = 0; i < n; i++) {
+    PyObject* sub = PyList_GET_ITEM(subclasses, i);
+    if (!PyType_Check(sub)) {
+      continue;
+    }
+    PyTypeObject* found =
+        findTypeByVersionTagImpl((PyTypeObject*)sub, version, depth + 1);
+    if (found != nullptr) {
+      Py_DECREF(subclasses);
+      return found;
+    }
+  }
+  Py_DECREF(subclasses);
+  return nullptr;
+}
+
+} // namespace
+
+PyTypeObject* findTypeByVersionTag(uint32_t version) {
+  if (version == 0) {
+    return nullptr;
+  }
+  return findTypeByVersionTagImpl(&PyBaseObject_Type, version, 0);
+}
+
+void prePopulateLoadMethodCacheFromAdaptive(
+    LoadMethodCache* ic,
+    BorrowedRef<PyCodeObject> code,
+    int instr_idx,
+    int name_idx) {
+#if PY_VERSION_HEX >= 0x030C0000
+  _Py_CODEUNIT* code_units = codeUnit(code);
+  const _PyAttrCache* cache = reinterpret_cast<const _PyAttrCache*>(
+      &code_units[instr_idx + 1]);
+  uint32_t type_version =
+      cache->version[0] | (static_cast<uint32_t>(cache->version[1]) << 16);
+  if (type_version == 0) {
+    return;
+  }
+  PyTypeObject* type = findTypeByVersionTag(type_version);
+  if (type == nullptr) {
+    return;
+  }
+  BorrowedRef<> attr_name{PyTuple_GET_ITEM(code->co_names, name_idx)};
+  PyObject* descr = _PyType_Lookup(type, attr_name);
+  if (descr == nullptr) {
+    return;
+  }
+  if (!(PyFunction_Check(descr) ||
+        Py_TYPE(descr) == &PyMethodDescr_Type ||
+        PyType_HasFeature(Py_TYPE(descr), Py_TPFLAGS_METHOD_DESCRIPTOR))) {
+    return;
+  }
+  ic->prePopulate(type, descr, attr_name);
+#else
+  (void)ic;
+  (void)code;
+  (void)instr_idx;
+  (void)name_idx;
+#endif
 }
 
 void LoadMethodCache::fill(
