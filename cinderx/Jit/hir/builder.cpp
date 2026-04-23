@@ -20,6 +20,7 @@
 #include "cinderx/Interpreter/cinder_opcode.h"
 #include "cinderx/Jit/containers.h"
 #include "cinderx/Jit/context.h"
+#include "cinderx/Jit/inline_cache.h"
 #include "cinderx/Jit/iterator_types.h"
 #include "cinderx/Jit/hir/annotation_index.h"
 #include "cinderx/Jit/hir/ssa.h"
@@ -3233,6 +3234,38 @@ void HIRBuilder::emitLoadAttr(
   // which one it should be.
   if constexpr (PY_VERSION_HEX >= 0x030C0000) {
     if (oparg & 1) {
+      // Pre-populate the JIT LoadMethodCache from CPython's adaptive
+      // LOAD_ATTR_METHOD_* cache so the inliner's monomorphic check sees a
+      // warm IC on first compile (auto-compile path: interpreter warmup
+      // populates the adaptive cache before JIT fires).
+      if (getConfig().attr_caches && getConfig().specialized_opcodes) {
+        int specop = bc_instr.specializedOpcode();
+        if (specop == LOAD_ATTR_METHOD_NO_DICT) {
+          _Py_CODEUNIT* code_units = codeUnit(code_);
+          int instr_idx = bc_instr.opcodeIndex().value();
+          const _PyAttrCache* cache = reinterpret_cast<const _PyAttrCache*>(
+              &code_units[instr_idx + 1]);
+          uint32_t type_version = cache->version[0] |
+              (static_cast<uint32_t>(cache->version[1]) << 16);
+          if (type_version != 0) {
+            PyTypeObject* type = findTypeByVersionTag(type_version);
+            if (type != nullptr) {
+              BorrowedRef<> attr_name{
+                  PyTuple_GET_ITEM(code_->co_names, name_idx)};
+              PyObject* descr = _PyType_Lookup(type, attr_name);
+              if (descr != nullptr &&
+                  (PyFunction_Check(descr) ||
+                   Py_TYPE(descr) == &PyMethodDescr_Type ||
+                   PyType_HasFeature(
+                       Py_TYPE(descr), Py_TPFLAGS_METHOD_DESCRIPTOR))) {
+                auto* ic = jit::getContext()->allocateLoadMethodCache(
+                    code_, bc_instr.baseOffset().value());
+                ic->prePopulate(type, descr, attr_name);
+              }
+            }
+          }
+        }
+      }
       emitLoadMethod(tc, name_idx);
       return;
     }

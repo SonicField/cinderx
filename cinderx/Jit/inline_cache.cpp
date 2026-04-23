@@ -1343,6 +1343,13 @@ LoadMethodResult __attribute__((noinline)) LoadMethodCache::lookupSlowPath(
   return {nullptr, nullptr};
 }
 
+void LoadMethodCache::prePopulate(
+    BorrowedRef<PyTypeObject> type,
+    BorrowedRef<> value,
+    BorrowedRef<> name) {
+  fill(type, value, name);
+}
+
 void LoadMethodCache::fill(
     BorrowedRef<PyTypeObject> type,
     BorrowedRef<> value,

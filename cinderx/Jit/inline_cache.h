@@ -304,6 +304,14 @@ class LoadMethodCache {
   // Public accessor for IC entries (speculative inlining)
   const std::array<Entry, 4>& entries() const { return entries_; }
 
+  // Pre-populate an IC entry from compile-time information. Used by the HIR
+  // builder to seed entries from CPython's adaptive LOAD_ATTR_METHOD cache so
+  // the inliner's monomorphic check sees a warm IC on first compile.
+  void prePopulate(
+      BorrowedRef<PyTypeObject> type,
+      BorrowedRef<> value,
+      BorrowedRef<> name);
+
  private:
   LoadMethodResult lookupSlowPath(BorrowedRef<> obj, BorrowedRef<> name);
   void
