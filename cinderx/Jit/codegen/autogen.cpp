@@ -416,6 +416,29 @@ void TranslateDeoptPatchpoint(Environ* env, const Instruction* instr) {
       patcher, patchpoint_label, deopt_label);
 }
 
+#if defined(CINDER_AARCH64)
+// Pick the scratch register width matching `output`. ARM64 arithmetic and
+// comparison (add/sub/mul/and/orr/eor/cmp) requires all operands to be the
+// same width: `mul x0, x3, w1` is rejected as an InvalidInstruction;
+// `cmp w0, x_scratch` produces wrong results silently. When loading an
+// immediate or stack value into a scratch before passing it to one of these
+// ops, the scratch must match the width that getGp(output) produces.
+inline arch::Gp pickScratchForOutput(const OperandBase* output) {
+  switch (output->dataType()) {
+    case OperandBase::k8bit:
+    case OperandBase::k16bit:
+    case OperandBase::k32bit:
+      return arch::w_scratch_0;
+    case OperandBase::kObject:
+    case OperandBase::k64bit:
+      return arch::reg_scratch_0;
+    case OperandBase::kDouble:
+      JIT_ABORT("scratch register requested for double-typed output");
+  }
+  Py_UNREACHABLE();
+}
+#endif
+
 void TranslateCompare(Environ* env, const Instruction* instr) {
 #if defined(CINDER_X86_64)
   auto as = env->as;
@@ -485,11 +508,15 @@ void TranslateCompare(Environ* env, const Instruction* instr) {
     as->cmp(AutoTranslator::getGp(inp0), scratch);
   } else if (inp1->isImm()) {
     auto constant = inp1->getConstantOrAddress();
-    auto scratch = arch::reg_scratch_0;
 
     if (arm::Utils::isAddSubImm(constant)) {
       as->cmp(AutoTranslator::getGp(inp0), constant);
     } else {
+      // Match scratch width to inp0 — `cmp w_inp0, x_scratch` is wrong-width.
+      // Critical for negative immediates (e.g. FRAME_SUSPENDED = -1) where
+      // static_cast<uint64_t> sign-extends to 0xFFFFFFFFFFFFFFFF and the
+      // comparison must still treat both sides at inp0's width.
+      auto scratch = pickScratchForOutput(inp0);
       as->mov(scratch, constant);
       as->cmp(AutoTranslator::getGp(inp0), scratch);
     }
@@ -2348,25 +2375,6 @@ void translateUnreachable(Environ* env, const Instruction* instr) {
 }
 
 // Pick the scratch register width matching `output`. ARM64 arithmetic
-// (add/sub/mul/and/orr/eor) requires all operands to be the same width:
-// `mul x0, x3, w1` is rejected as an InvalidInstruction. When loading an
-// immediate or stack value into a scratch before passing it to one of these
-// ops, the scratch must match the width that getGp(output) produces.
-inline arch::Gp pickScratchForOutput(const OperandBase* output) {
-  switch (output->dataType()) {
-    case OperandBase::k8bit:
-    case OperandBase::k16bit:
-    case OperandBase::k32bit:
-      return arch::w_scratch_0;
-    case OperandBase::kObject:
-    case OperandBase::k64bit:
-      return arch::reg_scratch_0;
-    case OperandBase::kDouble:
-      JIT_ABORT("scratch register requested for double-typed output");
-  }
-  Py_UNREACHABLE();
-}
-
 template <typename EmitFn>
 void translateAddSubOp(
     Environ* env,
@@ -2633,8 +2641,9 @@ void translateCmp(Environ* env, const Instruction* instr) {
     if (arm::Utils::isAddSubImm(constant)) {
       as->cmp(AT::getGp(inp0), constant);
     } else {
-      as->mov(arch::reg_scratch_0, constant);
-      as->cmp(AT::getGp(inp0), arch::reg_scratch_0);
+      auto scratch = pickScratchForOutput(inp0);
+      as->mov(scratch, constant);
+      as->cmp(AT::getGp(inp0), scratch);
     }
   } else {
     JIT_ABORT(
