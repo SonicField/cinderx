@@ -1,6 +1,8 @@
 # ARM64 test_jit_preload deferred mechanisms — tracker
 
-**Status:** DEFERRED (two related mechanisms; defensive-depth Option B shipped 01a373f2; ASan/Valgrind tooling all blocked on devgpu004 ARM64)
+**Status:** DEFERRED (2 confirmed mechanisms; additional sub-mechanisms possible if configs A vs B prove distinct under future heap-instrumentation. Defensive-depth Option B shipped 01a373f2; ASan/Valgrind tooling all blocked on devgpu004 ARM64.)
+
+**Mechanism-count framing note (pythia 51 #3 reconciliation, 2026-04-23T23:29:36Z):** supervisor's earlier "≥3 distinct" framing (D-1776984045) was conservative-upper-bound; tracker confirms 2 mechanisms empirically. Configs A (4 workers + lazy + jit-all) and B (1 worker + lazy + jit-all) both produce OverflowError but may turn out to be distinct sub-mechanisms once heap-instrumentation works on ARM64.
 
 ## Mechanism 1: workers=1 + no-lazy corruption
 
