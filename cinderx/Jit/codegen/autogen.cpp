@@ -351,12 +351,24 @@ void TranslateGuard(Environ* env, const Instruction* instr) {
         as->ldr(
             arch::reg_scratch_0,
             arch::ptr_offset(reg, offsetof(PyObject, ob_type)));
+        // Use w_scratch_1 (w14) for the version_tag value; arch::cmp_immediate
+        // below clobbers w_scratch_0 (w13) on the non-12-bit-immediate path,
+        // so loading version_tag into w_scratch_0 would silently turn the
+        // Guard into a no-op (cmp w13,w13 == always-equal).
         as->ldr(
-            arch::w_scratch_0,
+            arch::w_scratch_1,
             arch::ptr_offset(
                 arch::reg_scratch_0, offsetof(PyTypeObject, tp_version_tag)));
-        auto target = instr->getInput(3)->getConstant();
-        as->cmp(arch::w_scratch_0, target);
+        auto target_opnd = instr->getInput(3);
+        if (target_opnd->isImm() || target_opnd->isMem()) {
+          arch::cmp_immediate(
+              as, arch::w_scratch_1, target_opnd->getConstantOrAddress());
+        } else {
+          // input(3) was materialized into a register by an upstream LIR pass;
+          // version_tag is uint32_t so use the w-form of the target register.
+          auto target_reg = AutoTranslator::getGp(target_opnd);
+          as->cmp(arch::w_scratch_1, asmjit::a64::w(target_reg.id()));
+        }
         as->b_ne(deopt_label);
         break;
       }
