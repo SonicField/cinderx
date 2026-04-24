@@ -5168,6 +5168,16 @@ EmitOp_DispImm:
 
 EmitOp_BranchReloc:
   {
+    // Same overflow class as emitCondBranchRelax: emits 8 bytes (two NOPs at
+    // L5193-5194 below) but the standard _emit fast path only guarantees 4
+    // (kRequiresSpecialHandling at L811 fires only when <4 remain). A 4-7
+    // byte buffer remainder lets the second NOP overflow into adjacent Zone
+    // memory (RelocEntry just allocated below, or any LabelLink in the same
+    // Zone block).
+    err = writer.ensureSpace(this, 8);
+    if (err)
+      goto Failed;
+
     RelocType relocType = instId == Inst::kIdBl
       ? RelocType::kA64AddressEntry
       : RelocType::kA64JumpAddressEntry;
