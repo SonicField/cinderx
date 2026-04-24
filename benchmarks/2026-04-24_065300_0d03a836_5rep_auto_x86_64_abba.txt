@@ -1,0 +1,91 @@
+Preflight checks:
+  [OK] Version match: 3.12
+  [OK] CinderX loaded in JIT python
+  [OK] LTO detected (build flags)
+  [OK] No PGO detected
+  [INFO] JIT compiler: String dump of section '.comment':
+  [     1]  GCC: (GNU) 11.x 20260401 (Facebook) 11.2.1+
+  [    2d]  Linker: LLD 19.1.
+  [INFO] Vanilla compiler: String dump of section '.comment':
+  [     1]  GCC: (GNU) 11.x 20260401 (Facebook) 11.2.1+
+  [    2d]  Linker: LLD 19.1.
+  [INFO] _cinderx.so compiler: String dump of section '.comment':
+  [     0]  GCC: (GNU) 15.2.1 20260123 (Red Hat 15.2.1-7)
+  [    2e]  clang version 2
+  All preflight checks passed.
+
+========================================================================
+CinderX JIT vs Vanilla Python — Subprocess ABBA
+========================================================================
+Platform:     x86_64
+Reps:         5 (= 20 runs, 10 per condition)
+Compile mode: auto
+
+JIT ON:  /data/users/alexturner/venv/bin/python3
+JIT OFF: /usr/local/fbcode/platform010/bin/python3.12 -I
+
+  Run 1/20: JIT_ON (rep 1) ... 11909.8ms total
+  Run 2/20: JIT_OFF (rep 1) ... 15158.1ms total
+  Run 3/20: JIT_OFF (rep 1) ... 15166.9ms total
+  Run 4/20: JIT_ON (rep 1) ... 12039.5ms total
+  Run 5/20: JIT_ON (rep 2) ... 11927.4ms total
+  Run 6/20: JIT_OFF (rep 2) ... 15136.0ms total
+  Run 7/20: JIT_OFF (rep 2) ... 14899.4ms total
+  Run 8/20: JIT_ON (rep 2) ... 11805.4ms total
+  Run 9/20: JIT_ON (rep 3) ... 11841.7ms total
+  Run 10/20: JIT_OFF (rep 3) ... 15069.8ms total
+  Run 11/20: JIT_OFF (rep 3) ... 14903.7ms total
+  Run 12/20: JIT_ON (rep 3) ... 12029.8ms total
+  Run 13/20: JIT_ON (rep 4) ... 11860.0ms total
+  Run 14/20: JIT_OFF (rep 4) ... 14936.8ms total
+  Run 15/20: JIT_OFF (rep 4) ... 14950.8ms total
+  Run 16/20: JIT_ON (rep 4) ... 11867.0ms total
+  Run 17/20: JIT_ON (rep 5) ... 11926.1ms total
+  Run 18/20: JIT_OFF (rep 5) ... 15017.5ms total
+  Run 19/20: JIT_OFF (rep 5) ... 14887.9ms total
+  Run 20/20: JIT_ON (rep 5) ... 12395.9ms total
+
+===========================================================================
+CinderX JIT Performance Comparison
+===========================================================================
+JIT ON runs:  10
+JIT OFF runs: 10
+
+Benchmark                 Vanilla    CinderX   Speedup      Δ%
+-----------------------------------------------------------------
+  chaos_game             486.39ms   495.36ms     0.98x   -1.8%   
+  coroutine_chain        408.93ms   325.65ms     1.26x   20.4% **
+  deep_class_super       526.74ms   564.51ms     0.93x   -7.2% !!
+  dict_ops               579.91ms   563.28ms     1.03x    2.9%   
+  exceptions             495.91ms   345.85ms     1.43x   30.3% **
+  fannkuch               650.55ms   575.97ms     1.13x   11.5% **
+  fibonacci             1138.39ms   428.72ms     2.66x   62.3% **
+  float_arith            561.70ms   507.16ms     1.11x    9.7% **
+  func_calls             350.82ms   304.17ms     1.15x   13.3% **
+  gen_nested             290.63ms   247.97ms     1.17x   14.7% **
+  gen_simple             376.06ms   315.44ms     1.19x   16.1% **
+  import_callee          500.91ms   399.58ms     1.25x   20.2% **
+  int_arith              495.69ms   321.64ms     1.54x   35.1% **
+  json_roundtrip         504.64ms   508.70ms     0.99x   -0.8%   
+  list_comp              473.74ms   532.59ms     0.89x  -12.4% !!
+  method_calls           604.36ms   348.21ms     1.74x   42.4% **
+  nbody                  684.35ms   431.25ms     1.59x   37.0% **
+  nn_module              416.55ms   438.78ms     0.95x   -5.3% !!
+  nqueens                795.42ms   497.66ms     1.60x   37.4% **
+  positional_dispatch    546.33ms   449.54ms     1.22x   17.7% **
+  pytorch_cm             229.27ms   186.56ms     1.23x   18.6% **
+  richards_full          274.56ms   165.66ms     1.66x   39.7% **
+  richards_slots         493.28ms   378.03ms     1.30x   23.4% **
+  spectral_norm          475.36ms   384.85ms     1.24x   19.0% **
+  store_subscr           547.06ms   519.16ms     1.05x    5.1% **
+  string_ops             507.39ms   506.42ms     1.00x    0.2%   
+  try_except_callee      543.70ms   363.80ms     1.49x   33.1% **
+  unpack_seq             674.56ms   477.35ms     1.41x   29.2% **
+  yield_from             379.52ms   376.43ms     1.01x    0.8%   
+-----------------------------------------------------------------
+  GEOMEAN                                        1.25x   24.5%
+  TOTAL                15012.68ms 11960.27ms     1.26x   20.3%
+===========================================================================
+
+** = JIT >5% faster   !! = JIT >5% slower
+
