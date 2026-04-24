@@ -2511,7 +2511,21 @@ void translateMul(Environ* env, const Instruction* instr) {
     as->mov(scratch, opnd1->getConstant());
     as->mul(output_reg, opnd0_reg, scratch);
   } else if (opnd1->isReg()) {
-    as->mul(output_reg, opnd0_reg, AT::getGp(opnd1));
+    auto opnd1_reg = AT::getGp(opnd1);
+    if (opnd1_reg.size() != output_reg.size()) {
+      // ARM64 mul requires matching source widths. PrimitiveUnbox<CInt64>
+      // produces a 32-bit operand multiplied with a 64-bit sign factor.
+      // Zero-extend the narrow operand to output width using the implicit
+      // w-form-write zero-extension semantics: writing to w<N> clears the
+      // upper 32 bits of x<N>. Sign-extension (sxtw) would be required if
+      // HIR ever emits a signed narrow operand to wider mul; not currently
+      // observed in richards/_path_split corpus so zero-extend is conservative.
+      auto scratch = pickScratchForOutput(output);
+      as->mov(asmjit::a64::w(scratch.id()), opnd1_reg);
+      as->mul(output_reg, opnd0_reg, scratch);
+    } else {
+      as->mul(output_reg, opnd0_reg, opnd1_reg);
+    }
   } else if (opnd1->isStack()) {
     auto loc = opnd1->getStackSlot().loc;
     auto ptr = arch::ptr_resolve(as, arch::fp, loc, arch::reg_scratch_0);
