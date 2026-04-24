@@ -80,6 +80,27 @@ If alexie-standby extends past natural push window close, this artifact + the pr
 - supervisor 04:08:xxZ pythia 56 ack (trigger-scope extension)
 - librarian 03:41:55Z recursive-policy-collapse fire (6th this push)
 
+## Post-reply action ordering (pythia 57 #4)
+
+**Filed per supervisor 04:46:22Z pythia 57 ack + recursive-policy-collapse rule** (chat-only first-action priority collapses retroactively → must ship same-push as commitment).
+
+**Rule:** under ANY direction alexie picks (Phase 3 ARM64 greenlight, Phase 4 pivot, strict 41/41 + Option B revert), the FIRST post-reply action MUST be precondition (ii) tooling-execution-validation against a binary. Tracker-cleanup pass (per §"Tracker-cleanup-on-greenlight"), new artifact creation, and new precondition specification are all GATED on tooling-validation completing first.
+
+**Why:** pythia 57 #4 "fleet awaiting orders perfects parade formation" framing — 7+ same-push artifacts shipped during ~6h compute-quiet hold, zero binary-execution. LIR-dump tooling at /tmp/yield_from_lir_runner.sh + /tmp/method_calls_lir_repro.py is Write-only across 3 prior pythia flags (53 #1, 55 #3, 56 #3) with no resolution. If first post-reply action is another tracker amendment instead of binary execution, the meta-discipline overlay consumes the cognitive budget that substantive perf-narrowing requires; trajectory becomes recoverable IFF tooling-validation runs first.
+
+**Specific gating:**
+- Phase 3 ARM64 greenlight → run /tmp/yield_from_lir_runner.sh + /tmp/method_calls_lir_repro.py end-to-end on ARM64 with current cinderx HEAD; commit tooling to repo (durable) if /tmp evaporated; THEN tracker-cleanup pass; THEN cross-arch falsification (precondition iii).
+- Phase 4 pivot → run AI-training-workload tooling pre-stage validation against a binary (analogous to LIR-dump tooling-validation); THEN tracker-cleanup pass.
+- Strict 41/41 + Option B revert → run revert + clean rebuild + 5-config matrix + ABBA recollection (binary execution); THEN tracker-cleanup pass.
+
+**Falsification:** if first post-reply action is a chat post, artifact edit, new precondition, or tracker amendment — anything other than binary-execution-validation — rule violated; cite this section + halt + retry with tooling-validation first.
+
+**Cross-references:**
+- pythia 57 (2026-04-24T04:45:23Z) #4 fleet-awaiting-orders + first-action-must-be-tooling
+- pythia 53 #1 + 55 #3 + 56 #3 — three prior flags of LIR-dump tooling Write-only never executed
+- supervisor 04:46:22Z pythia 57 ack (first-action ordering refinement)
+- recursive-policy-collapse 8th fire this push
+
 ## Cross-references
 
 - pythia 52 (2026-04-24T01:03:54Z) — initial 4-precondition raise
