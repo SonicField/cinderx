@@ -53,13 +53,34 @@ If alexie-standby extends past natural push window close, this artifact + the pr
 - 23-04-2026-arm64-heap-check-toolchain-blocker.md: ARM64 toolchain root blocker + firing criterion + ownership
 - benchmarks/2026-04-23_224751_01a373f2_arm64_baseline_5rep_auto_aarch64_abba.txt: 1.17x baseline ABBA result
 
+## Tracker-cleanup-on-greenlight forward review-trigger (pythia 55 #4)
+
+**Filed per supervisor 03:31:09Z #4 commitment + librarian 03:41:55Z recursive-policy-collapse fire** (chat-only forward-trigger collapses retroactively → must ship same-push as commitment).
+
+**Trigger:** when alexie greenlights Phase 3 (precondition (i) above) AND Phase 3 work begins execution.
+
+**Action:** before any new tracker artifact is filed in the Phase 3 work cycle, do a tracker-cleanup pass:
+1. Read each existing tracker entry marked DEFERRED or INFERENTIAL across `investigations/plans/23-04-2026-*.md` + `investigations/plans/24-04-2026-*.md`.
+2. For each entry, classify: (a) **CLOSE** = underlying work executed, deferral resolved (e.g., M2 OverflowError fix landed → close M2 entry); (b) **RETIRE** = bug confirmed not-shipping or obsolete (e.g., Option B reverted per alexie strict-41/41 reading → retire baseline-recollect risk entry); (c) **KEEP** = still-active deferral with concrete bug/risk that hasn't been addressed.
+3. Update tracker file with classification per entry. Cite this section in commit msg.
+
+**Why:** pythia 55 #4 systemic concern — "the index outlasts the warehouse." 5 push-deferrals have been converted to artifacts same-push (recursive-policy-collapse 100% compliance), but tracker corpus has grown faster than the work it indexes. Without tracker-cleanup as forward review-trigger, the corpus accretes monotonically — at six months an inheritor reads DEFERRED markers as authoritative architecture rather than provisional placeholders.
+
+**Falsification:** if Phase 3 work cycle proceeds without tracker-cleanup pass after greenlight, rule violated; cite this section + retroactively run cleanup.
+
+**Cross-references:**
+- pythia 55 (2026-04-24T03:30:26Z) #4 six-month regret
+- supervisor 03:31:09Z synthesizer-pattern commitment
+- librarian 03:41:55Z recursive-policy-collapse fire (6th this push)
+
 ## Cross-references
 
 - pythia 52 (2026-04-24T01:03:54Z) — initial 4-precondition raise
 - pythia 53 (2026-04-24T01:39:59Z) — re-ordering + source-read addition
 - pythia 54 (2026-04-24T02:16:47Z) — chat-only-spec collapse + (ii)+(iii) dependency-inversion
+- pythia 55 (2026-04-24T03:30:26Z) — six-month regret + cascading-hallucination class
 - supervisor 23:30:42Z — alexie gate-interpretation + Phase 3 routing asks
 - testkeeper 23:28:56Z — ARM64 baseline ABBA verdict
 - theologian 00:00:28Z + 01:04:45Z + 01:40:31Z — Option D analysis + self-corrections
 - generalist 00:32:25Z + 01:05:57Z — LIR-dump tooling pre-stage (yield_from + method_calls)
-- librarian 23:27:59Z + 01:23:09Z — recursive-policy-collapse fires (heap-check + firing-criterion)
+- librarian 23:27:59Z + 01:23:09Z + 03:41:55Z — recursive-policy-collapse fires (heap-check + firing-criterion + tracker-cleanup-on-greenlight)
