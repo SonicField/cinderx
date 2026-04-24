@@ -720,9 +720,20 @@ static inline bool checkValidRegs(const Operand_& o0, const Operand_& o1, const 
 // For forward references, always emits 8 bytes (opcode + NOP placeholder)
 // and creates a label link for later resolution.
 static Error emitCondBranchRelax(
-    CodeHolder* code, Section* section, CodeWriter& writer, uint8_t* bufferData,
+    BaseAssembler* assembler, CodeHolder* code, Section* section,
+    CodeWriter& writer, uint8_t* bufferData,
     Opcode opcode, const Label& label, uint32_t immBitCount,
     uint32_t inversionMask, OffsetType offsetType) {
+
+  // Both branches below can emit 8 bytes (opcode+b for bound-relax,
+  // opcode+NOP for unbound-link). The standard _emit fast path only
+  // guarantees 4 bytes (kRequiresSpecialHandling at L811 fires only when <4
+  // remain), so a 4-7 byte buffer remainder lets these writes overflow into
+  // adjacent Zone memory (root cause of L2b LabelLink corruption crashes).
+  // ensureSpace may grow the buffer; refresh bufferData so codeOffset below
+  // remains correct.
+  ASMJIT_PROPAGATE(writer.ensureSpace(assembler, 8));
+  bufferData = assembler->bufferData();
 
   LabelEntry* labelEntry = code->labelEntry(label.id());
   if (ASMJIT_UNLIKELY(!labelEntry))
@@ -2232,7 +2243,7 @@ Error Assembler::_emit(InstId instId, const Operand_& o0, const Operand_& o1, co
           // For label operands, handle b.cond relaxation: emit 8 bytes so we
           // can relax to `b.inv_cond +8; b target` if 19-bit displacement doesn't fit.
           if (isign4 == ENC_OPS1(Label)) {
-            err = emitCondBranchRelax(_code, _section, writer, _bufferData,
+            err = emitCondBranchRelax(this, _code, _section, writer, _bufferData,
                 opcode, o0.as<Label>(), 19, 1u, OffsetType::kAArch64_CondBranch);
             if (err)
               goto Failed;
@@ -2269,7 +2280,7 @@ Error Assembler::_emit(InstId instId, const Operand_& o0, const Operand_& o1, co
         // For label operands, handle cbz/cbnz relaxation: emit 8 bytes so we
         // can relax to `inverted-branch +8; b target` if 19-bit displacement doesn't fit.
         if (isign4 == ENC_OPS2(Reg, Label)) {
-          err = emitCondBranchRelax(_code, _section, writer, _bufferData,
+          err = emitCondBranchRelax(this, _code, _section, writer, _bufferData,
               opcode, o1.as<Label>(), 19, 1u << 24, OffsetType::kAArch64_CompBranch);
           if (err)
             goto Failed;
@@ -2312,7 +2323,7 @@ Error Assembler::_emit(InstId instId, const Operand_& o0, const Operand_& o1, co
         // For label operands, handle tbz/tbnz relaxation: emit 8 bytes so we
         // can relax to `inverted-branch +8; b target` if 14-bit displacement doesn't fit.
         if (isign4 == ENC_OPS3(Reg, Imm, Label)) {
-          err = emitCondBranchRelax(_code, _section, writer, _bufferData,
+          err = emitCondBranchRelax(this, _code, _section, writer, _bufferData,
               opcode, o2.as<Label>(), 14, 1u << 24, OffsetType::kAArch64_TestBranch);
           if (err)
             goto Failed;
