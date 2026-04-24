@@ -57,20 +57,27 @@ If alexie-standby extends past natural push window close, this artifact + the pr
 
 **Filed per supervisor 03:31:09Z #4 commitment + librarian 03:41:55Z recursive-policy-collapse fire** (chat-only forward-trigger collapses retroactively → must ship same-push as commitment).
 
-**Trigger:** when alexie greenlights Phase 3 (precondition (i) above) AND Phase 3 work begins execution.
+**Trigger (refined per pythia 56 #4):** ANY alexie reply on the 23:13:05Z gate-interpretation question OR Phase 3 routing question, regardless of direction. Specifically:
+- Phase 3 ARM64 greenlight → cleanup pass before Phase 3 work begins (original scope).
+- Phase 4 pivot (AI training workloads per `project_cinderx_next_phases.md`) → cleanup pass before Phase 4 work begins; ARM64-scoped entries (heap-check toolchain, baseline-recollect, M1+M2, phase3-routing-preconditions) classify per (b) **RETIRE** if Phase 3 ARM64 work is shelved.
+- Strict 41/41 + Option B revert reading → cleanup pass before revert lands; baseline-recollect risk entry CLOSE (revert is the resolution); M1+M2 KEEP under same OverflowError defer.
 
-**Action:** before any new tracker artifact is filed in the Phase 3 work cycle, do a tracker-cleanup pass:
+**Why this refinement:** original trigger gated on Phase 3 greenlight only; under Phase 4 pivot the trigger never fires + 5-artifact constellation accretes indefinitely (pythia 56 #4 six-month regret). Extending trigger to ANY alexie reply on the open gate-questions ensures the constellation closes regardless of routing direction.
+
+**Action:** before any new tracker artifact is filed in the post-reply work cycle, do a tracker-cleanup pass:
 1. Read each existing tracker entry marked DEFERRED or INFERENTIAL across `investigations/plans/23-04-2026-*.md` + `investigations/plans/24-04-2026-*.md`.
 2. For each entry, classify: (a) **CLOSE** = underlying work executed, deferral resolved (e.g., M2 OverflowError fix landed → close M2 entry); (b) **RETIRE** = bug confirmed not-shipping or obsolete (e.g., Option B reverted per alexie strict-41/41 reading → retire baseline-recollect risk entry); (c) **KEEP** = still-active deferral with concrete bug/risk that hasn't been addressed.
 3. Update tracker file with classification per entry. Cite this section in commit msg.
 
 **Why:** pythia 55 #4 systemic concern — "the index outlasts the warehouse." 5 push-deferrals have been converted to artifacts same-push (recursive-policy-collapse 100% compliance), but tracker corpus has grown faster than the work it indexes. Without tracker-cleanup as forward review-trigger, the corpus accretes monotonically — at six months an inheritor reads DEFERRED markers as authoritative architecture rather than provisional placeholders.
 
-**Falsification:** if Phase 3 work cycle proceeds without tracker-cleanup pass after greenlight, rule violated; cite this section + retroactively run cleanup.
+**Falsification:** if any post-reply work cycle (Phase 3 ARM64, Phase 4 pivot, or revert-cleanup) proceeds without tracker-cleanup pass after alexie's reply on the 23:13:05Z gate-questions, rule violated; cite this section + retroactively run cleanup.
 
 **Cross-references:**
 - pythia 55 (2026-04-24T03:30:26Z) #4 six-month regret
+- pythia 56 (2026-04-24T04:07:46Z) #4 trigger-scope refinement (any reply, not just Phase 3 greenlight)
 - supervisor 03:31:09Z synthesizer-pattern commitment
+- supervisor 04:08:xxZ pythia 56 ack (trigger-scope extension)
 - librarian 03:41:55Z recursive-policy-collapse fire (6th this push)
 
 ## Cross-references
