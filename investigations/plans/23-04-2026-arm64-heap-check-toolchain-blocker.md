@@ -45,6 +45,29 @@ When this blocker re-fires (next ARM64 heap-corruption bug):
 - If this blocker fires 2+ times in 7 days substantive ARM64 work → escalate to alexie for Path A/B/C resourcing.
 - If Phase 3 ARM64 (per `project_cinderx_next_phases.md`) gets blocked on a SIGSEGV with no heap-check tool → block Phase 3 progress on resolving this artifact, not on routing around per-bug.
 
+## Firing criterion + ownership (pythia 52 #4 / librarian 01:23:09Z)
+
+**Filed per supervisor 01:04:24Z synthesizer-pattern commitment + recursive-policy-collapse rule** (chat-only firing-criterion deferral collapses retroactively; criterion IS the mechanism artifact, ships same-push as commitment).
+
+**Firing criterion:** This blocker re-fires when ANY of the following occur on ARM64 (devgpu004 or successor host):
+1. SIGSEGV in cinderx binary or JIT-compiled code (any test, benchmark, or interactive session).
+2. Heap-corruption-class symptom: double-free, use-after-free, malloc invalid pointer, abort with malloc/free trace.
+3. Memory-corruption-induced symptom: OverflowError / TypeError / AttributeError surfacing from positions where source code does not raise that class (corruption-induced wrong-object dispatch).
+4. ASan-first rule (`feedback_asan_first.md`) invoked but cannot be honored due to toolchain absence.
+
+**Ownership rule:** When this blocker fires:
+- Investigation owner = whoever owns the originating bug's investigation (typically generalist for SIGSEGV repro, testkeeper for symptom triage, theologian for fix-spec).
+- Resolution owner = same person attempts Path A → C → B → D order from §"Resolution paths".
+- Escalation owner = supervisor escalates to alexie if 2+ fires in 7 days (per Triggers above).
+- Tracker amendment owner = whoever fired the blocker amends this file with: (a) bug citation, (b) which Path was attempted, (c) outcome.
+
+**Pre-impl gate cite (commit-msg requirement):** any commit that defensively works around heap-corruption-class symptom on ARM64 without ASan/Valgrind root-cause MUST cite this file in commit msg + state "ARM64 heap-check toolchain blocker active per investigations/plans/23-04-2026-arm64-heap-check-toolchain-blocker.md".
+
+**Cross-references:**
+- pythia 52 (2026-04-24T01:03:54Z) #4 firing criterion + ownership gap
+- librarian 01:23:09Z recursive-policy-collapse fire (chat-only deferral collapse → criterion same-push)
+- supervisor 01:04:24Z synthesizer-pattern (commitment that this resolves)
+
 ## Cross-references
 
 - pythia 51 (2026-04-23T23:12:08Z) #4 + #d
