@@ -2206,10 +2206,15 @@ def cmd_jit(args):
     # Fast-mode filter: pass curated subset to worker subprocesses
     fast_filter = FAST_JIT_BENCHMARK_NAMES if args.fast else None
 
-    # Python commands (resolved in main() preflight — no fallbacks)
-    venv_python = os.environ.get("CINDERX_PYTHON") or os.path.join(
-        os.environ.get("CINDERX_VENV", ""), "bin/python3")
-    vanilla_python = os.environ["VANILLA_PYTHON"]
+    # Python commands. Default /usr/local/bin/python3 on both arches per
+    # alexie 2026-05-01 11:40Z; CINDERX_*/VANILLA_PYTHON env vars override.
+    venv_python = (
+        os.environ.get("CINDERX_PYTHON")
+        or (os.path.join(os.environ.get("CINDERX_VENV"), "bin/python3")
+            if os.environ.get("CINDERX_VENV") else None)
+        or "/usr/local/bin/python3"
+    )
+    vanilla_python = os.environ.get("VANILLA_PYTHON", "/usr/local/bin/python3")
 
     # Check availability
     venv_cmd = [venv_python]
@@ -2344,12 +2349,11 @@ def cmd_spec(args):
     print(f"Compile mode: {args.compile}")
     print()
 
-    venv_python = os.environ.get(
-        "CINDERX_PYTHON",
-        os.path.join(
-            os.environ.get("CINDERX_VENV", ""),
-            "bin/python3",
-        ),
+    venv_python = (
+        os.environ.get("CINDERX_PYTHON")
+        or (os.path.join(os.environ.get("CINDERX_VENV"), "bin/python3")
+            if os.environ.get("CINDERX_VENV") else None)
+        or "/usr/local/bin/python3"
     )
     python_cmd = [venv_python]
     print(f"Python: {venv_python}")
@@ -2475,15 +2479,15 @@ def cmd_target(args):
     print(f"Compile mode: {compile_mode}")
     print()
 
-    # Determine Python commands
-    venv_python = os.environ.get(
-        "CINDERX_PYTHON",
-        os.path.join(
-            os.environ.get("CINDERX_VENV", ""),
-            "bin/python3",
-        ),
+    # Determine Python commands. Default /usr/local/bin/python3 on both
+    # arches per alexie 2026-05-01 11:40Z.
+    venv_python = (
+        os.environ.get("CINDERX_PYTHON")
+        or (os.path.join(os.environ.get("CINDERX_VENV"), "bin/python3")
+            if os.environ.get("CINDERX_VENV") else None)
+        or "/usr/local/bin/python3"
     )
-    vanilla_python = os.environ["VANILLA_PYTHON"]
+    vanilla_python = os.environ.get("VANILLA_PYTHON", "/usr/local/bin/python3")
 
     venv_cmd = [venv_python]
     vanilla_cmd = [vanilla_python, "-I"]
@@ -2634,9 +2638,9 @@ Examples:
   benchmark_cinderx.py all               # Run everything
 
 Environment variables:
-  CINDERX_PYTHON   Path to CinderX venv Python (default: $CINDERX_VENV/bin/python3)
-  CINDERX_VENV     Path to CinderX venv directory
-  VANILLA_PYTHON   Path to vanilla Python (default: system python3.12)
+  CINDERX_PYTHON   Path to CinderX-enabled Python (default: /usr/local/bin/python3)
+  CINDERX_VENV     Optional venv whose bin/python3 overrides the default
+  VANILLA_PYTHON   Path to vanilla Python (default: /usr/local/bin/python3 with -I)
 """,
     )
 
@@ -2741,22 +2745,15 @@ Environment variables:
     # Auto-save benchmark output
     log_path = _setup_benchmark_log()
 
-    # Resolve python paths — no fallbacks, require explicit configuration
-    venv_python = os.environ.get("CINDERX_PYTHON") or (
-        os.path.join(os.environ.get("CINDERX_VENV", ""), "bin/python3")
-        if os.environ.get("CINDERX_VENV") else None
+    # Resolve python paths. Default /usr/local/bin/python3 on both arches
+    # per alexie 2026-05-01 11:40Z; CINDERX_*/VANILLA_PYTHON env vars override.
+    venv_python = (
+        os.environ.get("CINDERX_PYTHON")
+        or (os.path.join(os.environ.get("CINDERX_VENV"), "bin/python3")
+            if os.environ.get("CINDERX_VENV") else None)
+        or "/usr/local/bin/python3"
     )
-    vanilla_python = os.environ.get("VANILLA_PYTHON")
-    if not venv_python or not vanilla_python:
-        print("ERROR: Both python paths must be set explicitly. No fallbacks.")
-        if not venv_python:
-            print("  Missing: CINDERX_PYTHON or CINDERX_VENV")
-        if not vanilla_python:
-            print("  Missing: VANILLA_PYTHON")
-        print("\nUsage:")
-        print("  CINDERX_VENV=/path/to/venv VANILLA_PYTHON=/path/to/python3.12 \\")
-        print("    python3 benchmark_cinderx.py jit --reps=3")
-        sys.exit(1)
+    vanilla_python = os.environ.get("VANILLA_PYTHON", "/usr/local/bin/python3")
     print("Preflight checks:")
     _preflight_checks([venv_python], [vanilla_python, "-I"])
 
