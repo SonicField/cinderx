@@ -74,6 +74,12 @@ INNER_ITERS = 100
 WARMUP_ITERS = 5_000
 COMPILE_THRESHOLD = 999_999_999  # Prevent auto-compilation when not wanted
 
+# Per alexie 2026-05-01 11:47Z: /usr/local/bin/python3 is the only acceptable
+# Python for both the JIT side and the JIT-OFF baseline. The path resolves to
+# /usr/local/fbcode/bin/fbpython (Meta-patched 3.12.13+meta) on both the x86
+# (devgpu009) and ARM64 (devgpu004) hosts. No env-var overrides accepted.
+REQUIRED_PYTHON = "/usr/local/bin/python3"
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # CinderX helpers
@@ -2206,15 +2212,10 @@ def cmd_jit(args):
     # Fast-mode filter: pass curated subset to worker subprocesses
     fast_filter = FAST_JIT_BENCHMARK_NAMES if args.fast else None
 
-    # Python commands. Default /usr/local/bin/python3 on both arches per
-    # alexie 2026-05-01 11:40Z; CINDERX_*/VANILLA_PYTHON env vars override.
-    venv_python = (
-        os.environ.get("CINDERX_PYTHON")
-        or (os.path.join(os.environ.get("CINDERX_VENV"), "bin/python3")
-            if os.environ.get("CINDERX_VENV") else None)
-        or "/usr/local/bin/python3"
-    )
-    vanilla_python = os.environ.get("VANILLA_PYTHON", "/usr/local/bin/python3")
+    # Python commands. /usr/local/bin/python3 is the only acceptable Python
+    # per alexie 2026-05-01 11:47Z (same path on both x86 and ARM64 hosts).
+    venv_python = REQUIRED_PYTHON
+    vanilla_python = REQUIRED_PYTHON
 
     # Check availability
     venv_cmd = [venv_python]
@@ -2349,12 +2350,7 @@ def cmd_spec(args):
     print(f"Compile mode: {args.compile}")
     print()
 
-    venv_python = (
-        os.environ.get("CINDERX_PYTHON")
-        or (os.path.join(os.environ.get("CINDERX_VENV"), "bin/python3")
-            if os.environ.get("CINDERX_VENV") else None)
-        or "/usr/local/bin/python3"
-    )
+    venv_python = REQUIRED_PYTHON
     python_cmd = [venv_python]
     print(f"Python: {venv_python}")
     print()
@@ -2479,15 +2475,10 @@ def cmd_target(args):
     print(f"Compile mode: {compile_mode}")
     print()
 
-    # Determine Python commands. Default /usr/local/bin/python3 on both
-    # arches per alexie 2026-05-01 11:40Z.
-    venv_python = (
-        os.environ.get("CINDERX_PYTHON")
-        or (os.path.join(os.environ.get("CINDERX_VENV"), "bin/python3")
-            if os.environ.get("CINDERX_VENV") else None)
-        or "/usr/local/bin/python3"
-    )
-    vanilla_python = os.environ.get("VANILLA_PYTHON", "/usr/local/bin/python3")
+    # Determine Python commands. /usr/local/bin/python3 is the only
+    # acceptable Python per alexie 2026-05-01 11:47Z.
+    venv_python = REQUIRED_PYTHON
+    vanilla_python = REQUIRED_PYTHON
 
     venv_cmd = [venv_python]
     vanilla_cmd = [vanilla_python, "-I"]
@@ -2638,9 +2629,9 @@ Examples:
   benchmark_cinderx.py all               # Run everything
 
 Environment variables:
-  CINDERX_PYTHON   Path to CinderX-enabled Python (default: /usr/local/bin/python3)
-  CINDERX_VENV     Optional venv whose bin/python3 overrides the default
-  VANILLA_PYTHON   Path to vanilla Python (default: /usr/local/bin/python3 with -I)
+  (No environment variables accepted. /usr/local/bin/python3 is the only
+   acceptable Python on both x86 and ARM64 hosts per alexie 2026-05-01 11:47Z.
+   Setting CINDERX_PYTHON / CINDERX_VENV / VANILLA_PYTHON is a hard ERROR.)
 """,
     )
 
@@ -2745,15 +2736,21 @@ Environment variables:
     # Auto-save benchmark output
     log_path = _setup_benchmark_log()
 
-    # Resolve python paths. Default /usr/local/bin/python3 on both arches
-    # per alexie 2026-05-01 11:40Z; CINDERX_*/VANILLA_PYTHON env vars override.
-    venv_python = (
-        os.environ.get("CINDERX_PYTHON")
-        or (os.path.join(os.environ.get("CINDERX_VENV"), "bin/python3")
-            if os.environ.get("CINDERX_VENV") else None)
-        or "/usr/local/bin/python3"
-    )
-    vanilla_python = os.environ.get("VANILLA_PYTHON", "/usr/local/bin/python3")
+    # Hard-pin both Pythons to /usr/local/bin/python3 per alexie 2026-05-01
+    # 11:47Z — only acceptable Python; same path on both x86 and ARM64.
+    venv_python = REQUIRED_PYTHON
+    vanilla_python = REQUIRED_PYTHON
+    if not os.path.exists(REQUIRED_PYTHON):
+        print(f"ERROR: required Python {REQUIRED_PYTHON} not found.")
+        print("  This benchmark requires the Meta-patched Python at the")
+        print("  canonical path that exists on both the x86 and ARM64 hosts.")
+        print("  Install or symlink it before running.")
+        sys.exit(1)
+    for var in ("CINDERX_PYTHON", "CINDERX_VENV", "VANILLA_PYTHON"):
+        if os.environ.get(var):
+            print(f"ERROR: env var {var} is set but no overrides are accepted.")
+            print(f"  Only {REQUIRED_PYTHON} may be used; unset {var} and retry.")
+            sys.exit(1)
     print("Preflight checks:")
     _preflight_checks([venv_python], [vanilla_python, "-I"])
 
