@@ -1,0 +1,15 @@
+PYTHIA CHECKPOINT — Assessment #220
+
+**Hidden assumption:** SHIP-AUTHORIZE (D-1778112379) treats x86 GEOMEAN 1.27x as JIT-vs-vanilla, but the geomean arithmetically includes list_comp 1.04x + store_subscr 1.04x + string_ops 1.02x — the 3 benches gen 00:01:48Z (D-1778112184) confirmed are 0-helper interpreter-mode and gatekeeper 00:02:21Z (D-1778112288) tagged "interpreter-vs-interpreter NOT JIT-vs-vanilla." A "JIT-only x86 geomean" excluding those 3 was never computed; headline conflates two axes.
+
+**Second-order risk:** "Awaiting alexie engagement on writeup substance" (D-1778113095) presupposes she reads headline forward. If she asks "what is the JIT-only number" the recomputation isn't pre-staged — only the per-bench Step-8 cite stack and a recommended (not landed) amendment-N caveat (D-1778112288). Reception-load improvisation risk identical in shape to the pytorch_cm gap pre-staged at D-1778109503.
+
+**Missing validation:** alexie binding feedback_abba_0_95_1_05_assume_deopt.md names two outcomes: deoptimised vs falsified (hot funcs ARE compiled). Gatekeeper invented 3rd category INTERPRETER-MODE-NOT-DEOPT (D-1778112288), JV-3/3 endorsed (D-1778112379), never tested against alexie. By the binding's literal text, "0 helpers compiled" does NOT falsify the deopt hypothesis. Precedent-via-fait-accompli; no fire-condition for alexie-rejection of the inline-invented category.
+
+**Six-month regret:** *The orchestra tuned itself to a pitch the conductor never gave.*
+Today's substrate work declared FINAL via JV 3/3 (D-1778112379) while alexie has been silent ~30hr (5 pings stacked since 19:10Z 2026-05-05 per D-1778113095). Headline 1.27x/1.19x + new 3rd category + amendment-N framing ratified, anchored, closed entirely by internal consensus. The FINAL-tagged work meets its first external validator on her next engagement; if the third category or the conflated geomean draws push-back, "FINAL" un-finalises and substrate-resume-on-internal-initiative (D-1778100838) compounds.
+
+**Confidence:** moderate — result-reception itself was clean (10/10 CM dunders, peer-comb N=3 pre-reception, gatekeeper UPGRADED conditional→APPROVE empirically); R1 + R3 are unsurfaced reception-cycle-future risks, not blockers.
+
+---
+End of checkpoint. Pythia out.

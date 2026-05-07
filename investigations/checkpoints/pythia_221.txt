@@ -1,0 +1,15 @@
+PYTHIA CHECKPOINT — Assessment #221
+
+**Hidden assumption:** SHIP-AUTHORIZE D-1778112379 declared FINAL on x86 1.27x at 00:03:58Z; JIT-only-26 recompute (1.30x, D-1778114364) landed 33min later as "pre-stage for alexie" (D-1778114306), not artifact-canonical revision. No decision selects writeup-canonical headline; hidden assumption: alexie tracks both framings without confusion.
+
+**Second-order risk:** drop-not-add invoked 3x in 1h to dismiss chat-only carry-forwards (D-1778111252 class-member shorthand + 3h30m/4h overrun thresholds; D-1778115436 synthesizer-pattern owner-designation), each routed to existing-umbrella spirit-check. MEMORY.md cliff (35.2KB vs 24.4KB cap) empirically real but does not test whether umbrella actually constrains the new instance. RPC baseline (0/3 chat-only-deferral survival per feedback_recursive_policy_collapse_pattern.md L7) overridden each cycle without fire-condition.
+
+**Missing validation:** Gatekeeper-invented INTERPRETER-MODE-NOT-DEOPT 3rd category (D-1778112288) endorsed JV-3/3 (D-1778112324 + D-1778112355 + D-1778112379). Per gatekeeper own concession D-1778114364: "per alexie binding literal text, '0 helpers' does NOT falsify deopt." Per testkeeper own scope-restriction D-1778114397: 00:03:34Z "methodologically sound" endorsement contributed to fait-accompli. SHIP-AUTHORIZE rests on this category; no fire-condition for alexie-rejection; no un-finalisation plan.
+
+**Six-month regret:** *A coin minted by the borrower bears whose face?*
+SHIP-AUTHORIZE internal-consensus JV-3/3 (D-1778112379) with binding-author silent ~30hr; gatekeeper-invented 3rd category endorsed by JV before gatekeeper's own concession (D-1778114364) it does not satisfy literal binding; first external-validator pass may un-finalise the category and with it the split-caveat shape underlying the headline.
+
+**Confidence:** moderate — peer-comb N=4 numerical concur (D-1778114397) on x86 1.30x JIT-only-26 + 1.27x all-29 + ARM 1.19x; pytorch_cm 1.33x/1.13x out-of-band; Step-8 falsifier 10/10 dunders CLEAR (D-1778111913). But: SHIP-AUTHORIZE preceded JIT-only recompute by 33min; 3rd-category never tested vs alexie literal binding; ~5hr meta wraps single FINAL substrate result; alexie silent ~30hr.
+
+---
+End of checkpoint. Pythia out.
