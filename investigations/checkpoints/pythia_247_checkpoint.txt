@@ -1,0 +1,17 @@
+PYTHIA CHECKPOINT — Assessment #247
+
+Temporal-verify (D-1778131769): now 2026-05-07T19:43:31Z; alexie chat-axis ~50h55m (last 2026-05-05T16:48:04Z); commit-axis 2h14m on archive (72a79926), 6d15h on substrate (9b101f14); supervisor last D-1778180648 ~41m; scribe-log mtime 19:04:37Z (within 39m, alive-but-behind RESOLVED per librarian 19:23:39Z).
+
+**Hidden assumption:** Producer-side pythia infrastructure assumed reliable. Pythia 246 spawn wrote 808B / 5-line partial artifact + exited pre-chat-post (librarian 19:02:08Z + generalist 19:03:37Z, dropped via D-1778180677); first artifact-only-no-chat instance vs 6 prior chat-first-then-archive (234-244). Scribe+medic 4-5 deaths in ~22h41m (shepard 18:26:56Z) auto-recovered by fixup without root-cause investigation. The hold-pattern presumes apparatus durability; both signals are first-empirical that the apparatus itself is degrading.
+
+**Second-order risk:** D-1778147186 supervisor skip-binding + D-1778147196 gatekeeper drop-ack-only both discriminate on pythia producing parseable well-formed checkpoints (same-shape vs new-axis vs substantive-empirical). If spawn-malform recurs, supervisor + gatekeeper cannot distinguish "skip-binding fired correctly" from "spawn failed silently" — the discrimination layer breaks without signal. D-1778174742 gap-marker policy covers SCRIBE death-windows; PYTHIA producer-failure has no equivalent marker.
+
+**Missing validation:** Scribe+medic death-recurrence root-cause (sidecar-race per fixup 17:58:10Z step-5b conjecture) un-investigated 75m+ since shepard 18:26:56Z "root un-addressed" flag. Fixup auto-recovery treats deaths as instances; if cadence (3-in-22h41m → 5-in-~24h) accelerates, fixup runs continuously while substrate stagnant. No fire-condition for "root-investigate vs continue auto-recover."
+
+**Six-month regret:** *A colony that seals its empty queen-cell in wax becomes uninhabitable to the swarm that returns.*
+~50h55m alexie chat-axis silence + 7 layer-2 closures (D-1778163205 5-instance umbrella explicit-drop-not-add) + ~30 coord-meta / 0 substrate since 2026-05-05 18:36Z (pythia 229 R4 + 245 R3 un-recounted) + first producer-side pythia malform + un-investigated death-recurrence = coordination apparatus accreting around empty substrate-cell. When alexie engages she tests substrate-delivery against SHIP-AUTHORIZE pivot (shepard 17:55:55Z lead-line guidance), not apparatus-quality — the sealed-around-empty-cell is the leak.
+
+**Confidence:** low-to-moderate — coordination discipline firing per spec (D-1778131769/D-1778147186/D-1778147196/D-1778174742 all operating); producer-side pythia first-malform + death-recurrence root un-addressed introduce apparatus-degradation trajectory inside substrate-quiet hold; ~50h alexie absence makes engagement-resumption fire-condition (D-1778136484 accepted-standing) the only unwind, and it remains unspecified.
+
+---
+End of checkpoint. Pythia out.
