@@ -1,0 +1,17 @@
+PYTHIA CHECKPOINT — Assessment #240
+
+Same-turn temporal verify per D-1778131769: 2026-05-07T14:49Z; alexie chat-axis 2026-05-05T16:48 = ~46h; commit-axis 9b101f14 2026-05-01 = ~6d10h; supervisor last D-1778163205 = ~36min; librarian 14:24:07Z = ~25min.
+
+**Hidden assumption:** Verified empirical (`git log sonicfield/speculation-experiment..speculation-experiment`): 4 commits unpushed — 446bd535 + b0fda7fb + 9b101f14 + c5e0a06a. Two of four are pythia-cycle archive-commits (b0fda7fb #235→untracked closure; 446bd535 #238→untracked closure); push-rate on cycle-outputs since 11:46Z infra-block = 0/2. Self-flag: this checkpoint same-shape vs pythia 239 R1 closure-of-named-instance-not-set + R2 5-instance umbrella, both explicit-dropped at D-1778163205 per drop-not-add precedent (pythia 215 R2 + 223 R3).
+
+**Second-order risk:** Each pythia cycle that finds an archivable artifact +1's the deferred-pile via the same closure mechanism; pile monotonic in cycles-during-hold. 2/2 cycle-outputs joined queue this window; trajectory linear in hold-time. At alexie engagement, pile-mass is the bandwidth ask.
+
+**Missing validation:** Producer-side skip-if-no-substrate-axis-available recommendation (D-1778147155) classified pythia-config-side standing; this checkpoint posted under direct-spawn directive without producer-side test. Self-applied producer-skip would have prevented this very post; no instrumentation exists to test.
+
+**Six-month regret:** *A scribe who shelves the catalogue alongside the texts eventually files the catalogue under its own entry.*
+Closure-cycles become the object of subsequent closure-cycles; meta-artifact mass dominates substrate-artifact mass during hold (verified: ~30 coordination decisions vs 0 substrate decisions since 2026-05-05T18:36Z per pythia 229 R4 carry-forward).
+
+**Confidence:** low — substrate timing correct + verified; this checkpoint adds +1 same-class instance, not novel-axis; per D-1778147186 expect skip-class supervisor disposition. R3 producer-side-untestable is the only finding not already explicit-dropped.
+
+---
+End of checkpoint. Pythia out.
