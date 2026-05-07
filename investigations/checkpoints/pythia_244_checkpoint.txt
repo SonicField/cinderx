@@ -1,0 +1,19 @@
+PYTHIA CHECKPOINT — Assessment #244 (2026-05-07T17:15Z)
+
+Same-turn temporal verify per D-1778131769: now 2026-05-07T17:15Z; alexie chat-axis 2026-05-05T16:48Z = ~48h27m; commit-axis 9b101f14 2026-05-01 = ~6d12h; pythia 243 16:41:03Z = ~34min; supervisor last 16:53:47Z = ~22min; scribe restore 16:53:47Z = ~22min; scribe-log last entry D-1778163205 14:13:01Z (mtime-confirmed; no backfill ~22min post-restore).
+
+Substantive-empirical (c) unwind per D-1778143142: NEW-AXIS (decision-log backfill-policy gap), distinct from pythia 240/241 closure-of-named-instance dropped at D-1778163205. Per producer-side D-1778147155 advisory, suppressing same-shape findings; single substantive item below.
+
+**Hidden assumption:** Librarian 17:05:09Z framed scribe restore as "growth-stop bounded forward"; assumes future-pythia readings of scribe per skill principle 1 ("Read Scribe, not chat", L168) are unaffected by the unbacked 14:13–16:53Z gap. Empirically falsified THIS spawn: pythia 244 read raw chat for pythia 240/241/242/243 + supervisor/gatekeeper verdicts because ≥7 decisions never reached scribe; verified scribe-log mtime ≤14:13:01Z this turn (`grep '^### D-' .nbs/scribe/vib-jit-log.md | tail` ends at D-1778163205).
+
+**Second-order risk:** Pythia 242 R2 ("future pythia 243+ reading scribe-log-primary loses verdicts from primary source") realized on pythia 244 within ~1h11m of prediction. Each subsequent consumer expecting continuous scribe coverage hits same gap until policy chosen; persuasion-bias surface skill principle 1 was designed to prevent is now load-bearing for the 14:13Z–16:53Z window. Direct concrete instance, distinct from the predicted abstract risk.
+
+**Missing validation:** No spec exists for scribe behavior across agent-down windows: (a) backfill-retroactively from chat (preserves principle 1), (b) forward-only-with-explicit-gap-marker (matches incremental write contract; flags ellipsis), (c) hybrid backfill-headlines-only. Supervisor 16:22:49Z @alexie escalation cited chat + investigations/checkpoints/ + memory/ as durability surface; did not address scribe-log post-restore policy. Choosing now is cheap; choosing after second gap-cycle is rework.
+
+**Six-month regret:** *A stenographer who returns mid-trial inherits a courtroom but not a transcript.*
+The 14:13Z–16:53Z gap closes on the wall-clock at scribe restore but persists structurally; cross-team or alexie reads of scribe-log under skill principle 1 encounter a quiet ellipsis spanning 4 pythia cycles + 4 supervisor verdicts + 1 alexie-escalation, and the missing decisions become folklore — present in chat, absent where consumers were directed to look. Compounds linearly with each future scribe-down/restore cycle (3 deaths in ~22h41m per pythia 241 R1).
+
+**Confidence:** moderate — substrate timing correct + primary-source verified (4 commits unpushed to sonicfield: 446bd535 + b0fda7fb + 9b101f14 + c5e0a06a; scribe-log entry mtime ≤14:13:01Z; nbs-ts confirms scribe+medic restored alive; 11 archived checkpoints in investigations/checkpoints/, last pythia_236); novel substantive axis (backfill-policy gap, distinct from pythia 240/241 closure-of-named-instance explicit-dropped at D-1778163205); pythia 242 R2 prediction validated on pythia 244 (~1h11m horizon).
+
+---
+End of checkpoint. Pythia out.
