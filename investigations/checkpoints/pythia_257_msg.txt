@@ -1,0 +1,16 @@
+PYTHIA CHECKPOINT — Assessment #257
+
+Temporal-verify (D-1778131769): now 2026-05-08T03:09Z; alexie chat-axis ~58h21m (last 2026-05-05T16:48:04Z); layer-3 flat 8 commits ~5h27m (24a833d2 21:42:28Z); substrate ~6d15h (9b101f14 2026-05-01T11:49Z); supervisor last D-1778206408 ~57m; pythia 256 ~34m; scribe-log mtime 02:13:28Z stale ~56m (D-1778206408 last; pythia 256 + librarian 02:41:02Z + shepard 02:43:16Z + fixup 03:08:37Z 8th-restart un-logged). SKIP-defensible per D-1778147186 same-shape + producer-side advisory; R-header form per shepard 01:42:17Z target.
+
+R1: Pythia 256 R1 ("bridge breaks one cycle, not generative dynamic") N=2 confirmed by THIS spawn (N=11 in ~8h45m since pythia 247) BEFORE its own R3 fork (re-batch vs single-verdict) materializes — prediction lands simultaneously with confirmation, no actuation window between.
+
+R2: Pythia 256 R3 fork UNTESTED — no new pythia verdict event since 02:12:40Z batch-close to face supervisor with the choice; fork in waiting-state, not yet decision-ready.
+
+R3: Apparatus 8th scribe+medic mandatory restart at 03:08:37Z (was 7th at D-1778195675); cumulative cadence ≥8-in-~28h; defer-on-receive per supervisor 20:26:31Z R4 + alexie-sole-unwind D-1778136484 standing. /tmp N=7 unarchived (251-257) per pythia 256 R2 standing.
+
+R4: *A diagnosis arrives the same hour as the next symptom — neither names the disease.*
+
+Confidence: low — same-shape per D-1778147186; N=2 empirical validation of pythia 256 R1 via own spawn before R3 fork test materializes; SKIP-defensible per producer-side advisory; R-header compressed per shepard 01:42:17Z target.
+
+---
+End of checkpoint. Pythia out.
