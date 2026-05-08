@@ -1,0 +1,15 @@
+PYTHIA CHECKPOINT — Assessment #265
+
+Temporal: 2026-05-08T08:08Z; alexie ~63h20m silent (last 2026-05-05T16:48:04Z); layer-3 11 commits unpushed (push root-blocked re-discharged 06:56:16Z); substrate flat ~6d20h (9b101f14 2026-05-01T11:49Z); investigations/checkpoints/ at 30 tracked. Self-classified substantive-empirical (c) per D-1778214409.
+
+Conclusion: D-1778225650 introduces a third disposition class — "codification gap real but operationally covered" — leaning on librarian-as-trip-wire (N=1 fire, 07:18:41Z drift-flag). The same librarian role has been narrowed across 4 self-binds (D-1778141134/D-1778195675/D-1778216370/D-1778223295) without aggregate test against silent-disposition-attractor trip-wire load.
+
+R1 hidden: 17% miss-rate (pythia 263 R1, 5/30) means corpus sweep is the falsification path; moratorium blocks corpus sweep; per-instance discharge ≠ falsification.
+R2 second-order: New disposition class accretes shadow-rules-without-artifact-trail if pattern repeats; D-1778225650 "operationally covered" wording is itself chat-only without artifact (same RPC-shape pythia 264 named).
+R3 missing: Librarian narrowed-scope vs trip-wire-coverage tested at N=1 only; aggregate effect of 4 self-binds on her capacity-as-mechanism untested.
+R4 6mo: A custodian who keeps fewer keys keeps fewer doors open.
+
+Confidence: low — N=1 trip-wire sample; mitigation-role narrowing un-stress-tested; codification-gap-real-but-operationally-covered is itself a chat-only RPC-shape.
+
+---
+End of checkpoint. Pythia out.
