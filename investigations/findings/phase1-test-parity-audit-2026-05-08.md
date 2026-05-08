@@ -47,40 +47,35 @@ Compile path goes through `re/_parser.py:202` `getwidth()` → `OverflowError: P
 
 **Failure log.** `/tmp/cinderx_fail_test_jit_preload.log` (full trace).
 
-### (3) build regression — `build.sh` dropped `-DENABLE_XXCLASSLOADER:BOOL=ON` on migration to direct cmake
+### (3) `import xxclassloader` failure — original build.sh-regression diagnosis FALSIFIED; root cause unidentified within time-box; rebuild empirically resolved.
 
-**Symptom.** `import xxclassloader` fails under both cinderx-loaded and vanilla venv: `ModuleNotFoundError: No module named 'xxclassloader'`. Blocks `test_cinderjit` + `test_jit_coroutines` test-load (both transitively import `xxclassloader` via `test_compiler.test_static.compile`).
+**Symptom (09:13:48Z testkeeper).** `import xxclassloader` failed under canonical `run_cinderx_tests.sh` against substrate: `ModuleNotFoundError: No module named 'xxclassloader'`. Blocked `test_cinderjit` + `test_jit_coroutines` test-load (both transitively import `xxclassloader` via `test_compiler.test_static.compile`).
 
-**Empirical chain.**
+**Initial diagnosis (generalist 09:33:03Z) — FALSIFIED.** Initial framing was "build.sh dropped `-DENABLE_XXCLASSLOADER:BOOL=ON` on commit `7f0cc6bb` direct-cmake migration." Librarian 09:39:55Z primary-source verification + supervisor 09:40:29Z acceptance:
 
-1. `xxclassloader.c` is part of `static-python` static library (CMakeLists.txt:316). Module-create call `_Ci_CreateXXClassLoaderModule()` at `_cinderx-lib.cpp:1514` is gated by `#ifdef ENABLE_XXCLASSLOADER`.
-2. CMakeLists.txt:61 has `set_flag(ENABLE_XXCLASSLOADER)`. The `set_flag` macro (L39-44) only adds `-DENABLE_XXCLASSLOADER` to compiler flags **if cmake is invoked with `-DENABLE_XXCLASSLOADER=ON`**.
-3. Current `build.sh` cmake invocation (L126-141) enumerates 13 `-DENABLE_*` flags but omits `-DENABLE_XXCLASSLOADER`. So `_cinderx.so` is built without xxclassloader's module-create call active.
-4. Git history:
-   - Commit `65ecc9f8` (2026-02-18, Alex Turner) "Add xxclassloader build support, opcode fix, and test runner" added `set_flag(ENABLE_XXCLASSLOADER)` to CMakeLists.txt **and** `set_option("ENABLE_XXCLASSLOADER", True)` to setup.py.
-   - Commit `7f0cc6bb` "Rewrite build.sh to use direct cmake instead of pip" migrated build path from pip (which honored `setup.py`'s `set_option`) to direct cmake — but did NOT carry the `-DENABLE_XXCLASSLOADER` flag forward to the new cmake invocation. Regression.
+- `git log -S "DENABLE_XXCLASSLOADER" -- build.sh` returns ONLY commit `7f0cc6bb`, which **added** the flag. Flag has never been dropped.
+- `git show HEAD~1:build.sh` line 139 shows `-DENABLE_XXCLASSLOADER:BOOL=ON` was already present before any of generalist's commits.
+- `nm scratch/build-x86_64/_cinderx.so | grep CreateXX` returned the symbol on the pre-rebuild .so (verified separately on `_cinderx.so.b1_postfix_renamed` Apr 22 backup); symbol was always exported.
+- `llvm-nm scratch/build-x86_64-pydebug/CMakeFiles/_cinderx.dir/cinderx/_cinderx-lib.cpp.o` (pre-rebuild Apr 23 mtime) shows `U _Ci_CreateXXClassLoaderModule` — call site **was already** compiled in old object file. ENABLE_XXCLASSLOADER macro was active on prior builds.
 
-**Phase 1 classification.** NOT a vanilla-fail-too case (xxclassloader is a cinderx-internal C module, not stdlib). This is a build-config regression, remediable in-scope without alexie.
+The build-config was correct already. Initial "regression" framing was wrong.
 
-**Fix.** Single-line append to `build.sh` cmake invocation:
+**What actually happened.** `./build.sh` at 09:38Z rebuilt + reinstalled `cinderx/PythonLib/_cinderx.so` (the file the canonical runner loads via venv). The rebuild empirically resolved `import xxclassloader`. Verified post-rebuild:
 
-```diff
-     -DENABLE_USDT:BOOL=ON \
-+    -DENABLE_XXCLASSLOADER:BOOL=ON \
-     -DENABLE_ZLIB:BOOL=OFF \
-```
+- `test_cinderjit`: 172 pass / 0 fail / 0 error / 0 skip
+- `test_jit_coroutines`: 23 pass / 0 fail / 0 error / 0 skip
 
-**Status.** Fix applied to `build.sh` per supervisor 09:33:31Z directive (this commit / pending). Rebuild + verify deferred until parallel testkeeper sharding (09:33Z) returns — avoids invalidating in-flight test runs by rewriting substrate `_cinderx.so`.
+**Root cause of original failure — UNIDENTIFIED within 30min time-box (supervisor 09:50:03Z accepted (B)-deeper-RCA as low-yield since pre-rebuild state was overwritten).** Empirically working state restored. Candidates not falsified:
 
-**Verify procedure (post-rebuild).**
+- (a) Pre-rebuild `cinderx/PythonLib/_cinderx.so` was a stale or differently-built file relative to `scratch/build-x86_64/_cinderx.so`. Rebuild reconciled the install copy with the build copy. Cannot directly verify (overwritten).
+- (b) `__pycache__` stale `.pyc` holding wrong binding. Not directly verified.
+- (c) Test-load ordering / venv state issue that resolved on re-run.
 
-```bash
-./build.sh
-PYTHONPATH=cinderx/PythonLib /data/users/alexturner/venv/bin/python -c "import cinderx; cinderx.init(); import xxclassloader; print(xxclassloader)"
-# expect: <module 'xxclassloader' from ...>
-```
+**Phase 1 classification.** NOT a vanilla-fail-too case (xxclassloader is a cinderx-internal C module, not stdlib). NOT a build-config regression (falsified). Empirical-only: rebuild fixes the symptom; investigate root cause if recurrence.
 
-Then re-run `test_cinderjit` + `test_jit_coroutines` test-load gate (no full execution required to verify fix; import-success at module-load is sufficient).
+**Status.** Empirically resolved by `./build.sh` (the rebuild itself, not any code change in commit `5380a997` — that commit's build.sh edit was a no-op duplicate of `-DENABLE_ZLIB:BOOL=OFF` and is reverted in the corrective commit alongside this finding update). 2 of 3 original Phase 1 FAILs cleared (`test_cinderjit` + `test_jit_coroutines`); `test_jit_preload` cinderx-defect (item 2) remains.
+
+**Process self-flag.** This finding originally shipped (commit `5380a997`) with an inaccurate "regression on commit `7f0cc6bb`" mechanism cited in the commit message. Librarian primary-source verification falsified the cite same-turn. Future build-flag claims must be verified against `git log -S` + `git show HEAD~1:` before being framed as regressions. Pattern: import-trust-verify (`feedback_import_trust_verify_umbrella.md`) — third instance in this substrate cycle.
 
 ## Audit-tail status
 
