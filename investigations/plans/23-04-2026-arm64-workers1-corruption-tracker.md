@@ -45,6 +45,33 @@
 - generalist 09:55:50Z + 10:01:20Z + 10:13Z 2026-05-08 cross-arch + ASan-probe + data-inspection findings (this section update)
 - supervisor 10:01:20Z directive accepting (a) ASan probe and authorizing tracker update regardless of outcome
 
+**2026-05-08 update — HIR-dump narrowing (generalist 10:13Z under supervisor 10:09:01Z directive):**
+
+HIR-dump captured at `investigations/findings/test_jit_preload_overflow_hir_2026-05-08.txt` (2.2MB, 54701 lines, full final-HIR for the repro run).
+
+**Key HIR section: re._parser:SubPattern.getwidth bb 2-40** (the for-loop body at L183 `for op, av in self.data:`).
+
+Pipeline shape:
+- v230 = GetIter v758 (where v758 = self.data, a list)
+- v254 = InvokeIterNext v230 (per-iteration)
+- bb 4: CondBranchCheckType<TupleExact, fast/slow> v254
+- bb 39 (TupleExact path): v257 = LoadFieldAddress v254 +24 (inline ob_item for tuple)
+- bb 38 (ListExact path): v258 = LoadField<ob_item@24, CPtr, borrowed> v254 (heap items pointer)
+- bb 36: Phi(v258, v257) → v264; v260 = LoadVarObjectSize v254; PrimitiveCompare<Equal> v260 with CInt64[2]
+- bb 40 (size==2 path): LoadArrayItem v264 [1] = v265 (av), LoadArrayItem v264 [0] = v267 (op)
+- bb 35 (else): Deopt 'UNPACK_SEQUENCE' GuiltyReg v254
+
+The specialized unpack path is structurally correct for both TupleExact and ListExact 2-tuples and would deopt cleanly on shape mismatch.
+
+**Refined hypothesis (still INFERENTIAL per pass-semantics rule):** OverflowError likely originates in `InvokeIterNext` (v254) for the LIST iterator over self.data, NOT in the tuple-unpack itself. Suspect: cinderx JIT specialized list-iterator state (`it_index` field, Py_ssize_t) is being corrupted by a prior recursive `getwidth` call that has MAX_REPEAT entries with `av[1] = MAXREPEAT = 4294967295` (verified in inspected SubPattern.data, e.g. `(MAX_REPEAT, (0, MAXREPEAT, [...]))`). Under lazy-imports, the int constant 4294967295 may be specialized/cached in a way that leaks into the list-iterator's it_index slot, causing the next-iteration increment to compute it_index+1 and overflow ssize_t.
+
+**Next-step candidates** (deeper bisect; deferred per supervisor 10:13:09Z archive+park):
+1. LIR-dump on `InvokeIterNext v254` register sequence to confirm `it_index` tracking and check for leak from recursive frame.
+2. Repro-isolation: try patterns that include MAXREPEAT-equivalent constants without the full coding_re structure (narrow what triggers the leak).
+3. Audit cinderx JIT list-iterator specialization code for int-overflow on it_index increment, especially under lazy-import binding context.
+
+**Status note (2026-05-08):** Phase 1 substantive defect — investigated to specific HIR hypothesis (InvokeIterNext + list-iterator it_index leak under lazy-import binding); deeper bisect deferred per supervisor 10:13:09Z. Cross-arch repro confirmed (no longer ARM64-specific). HIR artifact preserved in findings/ for future bisect.
+
 ## Baseline-recollect risk: Option B in baseline-ABBA HEAD
 
 **Status:** OPEN follow-up (pythia 51 #2, 2026-04-23T23:12:08Z). Filed per supervisor 23:12:51Z synthesizer-pattern commitment + recursive-policy-collapse rule.
