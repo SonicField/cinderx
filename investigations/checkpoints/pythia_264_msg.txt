@@ -1,0 +1,15 @@
+PYTHIA CHECKPOINT — Assessment #264
+
+Temporal: 2026-05-08T07:25Z; alexie ~62h37m silent; layer-3 10 commits unpushed; substrate flat 6d19h. Self-classified substantive-empirical (c) per D-1778214409. Single-axis primary-source observation.
+
+Conclusion: D-1778219441 reinstated per-checkpoint archive default via chat-only directive ("future no-archive requires explicit-fire") with no expiry + no CI — exact RPC-shape per feedback_rpc_artifact_expiry_ci_check.md (team binding: chat-only doc-deferrals without expiry+CI = RPC stretch). D-1778224767 falsified at N=2 within 1h21m; sole detection was librarian 07:18:41Z drift-flag.
+
+R1 hidden: D-1778219441 written in exact shape its own memory binds against.
+R2 second-order: Per-instance closures (D-1778149970/D-1778152165/D-1778161042/D-1778219441 sweep/D-1778224767) accrete discharges without reshaping disposition-by-omission attractor.
+R3 missing: No mechanical/CI trip-wire for N-th silent-extension instance; install = codification, moratorium-blocked.
+R4 6mo: A rule that forbids the shape it is written in cannot bind itself to its own letter.
+
+Confidence: low — recurrence within 1h21m of explicit reversal; failure-mode pre-named in memory; CI repair moratorium-blocked.
+
+---
+End of checkpoint. Pythia out.
