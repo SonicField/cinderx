@@ -28,12 +28,22 @@
 
 **Pre-impl gate:** mechanism positive site pin requires heap-instrumentation (ASan/Valgrind). All current options blocked on devgpu004 ARM64 (clang/gcc/valgrind all unavailable per testkeeper 22:43:27Z + 22:44:43Z). Cross-validation on x86_64 with ASan possible IF corruption reproduces (may be ARM64-specific).
 
+**2026-05-08 update — cross-arch + ASan probe (generalist 10:01:20Z directive):**
+
+- **Cross-arch.** OverflowError reproduces on x86_64 (Meta-Python 3.12.13+meta) with `python -X jit-all -L -c "re.compile(complex_pattern)"`. Trigger isolated to combination `-X jit-all + -L`; either alone is OK. Closes "may-be-ARM64-specific" gate above. Bug is platform-portable.
+- **ASan probe.** Repro run under `LD_PRELOAD=/usr/lib/clang/21/lib/x86_64-redhat-linux-gnu/libclang_rt.asan.so` + `scratch/build-asan/_cinderx.so` (ASan-instrumented build of cinderx). ASan canary verified functional in same env (catches synthetic heap-buffer-overflow). Repro under ASan: only OverflowError fires; **no ASan diagnostics**. Per supervisor 10:01:20Z framework: "ASan clean → OverflowError isn't heap-corruption (different hypothesis needed)."
+- **Inspection of `re._parser.SubPattern.data` at the moment of overflow** (monkey-patched `getwidth`): data is **structurally normal** — `[(ANY, None)]` (inner SubPattern, len=1) and outer with len=13 of well-formed `(op, av)` tuples (LITERAL/MAX_REPEAT/SUBPATTERN/IN/etc., no oversized ints, all values consistent with vanilla re._parser output). The OverflowError fires on `for op, av in self.data:` despite normal data — i.e., during list iteration / tuple unpacking, NOT on access of any specific element value.
+- **Updated hypothesis (INFERENTIAL).** Bug is in cinderx JIT specialization of list iteration / tuple unpacking under lazy-imports, not in module-load or class-resolution lazy-import path. The specialized iteration produces an interpretation step that overflows ssize_t conversion despite the underlying object being a normal Python list of normal Python tuples. Possible specific paths: SEND_ITER / FOR_ITER specialization on tuple-unpack, or LOAD_FAST_AND_CLEAR on the loop-var tuple. Pre-impl gate now: HIR-dump on this hot path under `-X jit-all -L` + bisect specialization opcodes.
+- **Status note.** Mechanism class still test_jit_preload-blocking; Option B (commit 01a373f2) remains defensive-depth-only as previously framed. Bug-hunt next step is HIR-dump + specialized-opcode bisect, not heap-corruption deep-dive.
+
 **Cross-references:**
 - testkeeper 22:39:52Z 5-config matrix post-Option-B
 - testkeeper 22:43:27Z + 22:44:43Z all-ARM64-heap-check-tools-blocked summary
 - theologian 22:35:31Z idempotency principle (LOAD_GLOBAL pattern uses idempotent PyDict_GetItem; ResolveContainer is non-idempotent)
 - supervisor 22:45:14Z defer endorsement
 - 01a373f2 defensive-depth commit (honest "DOES NOT close test" framing)
+- generalist 09:55:50Z + 10:01:20Z + 10:13Z 2026-05-08 cross-arch + ASan-probe + data-inspection findings (this section update)
+- supervisor 10:01:20Z directive accepting (a) ASan probe and authorizing tracker update regardless of outcome
 
 ## Baseline-recollect risk: Option B in baseline-ABBA HEAD
 
