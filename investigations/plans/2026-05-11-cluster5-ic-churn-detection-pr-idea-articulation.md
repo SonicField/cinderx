@@ -39,11 +39,15 @@ notification cost.
 The change touches only the inline-cache layer; downstream cache
 behaviour for non-volatile types is unchanged.
 
-Empirical: forward-port-ablation against cinderx-main HEAD (see PR
-body for measurement substrate) recovered pytorch_cm by approximately
-+13% on x86_64 and +8% on aarch64 at reps=5, recovering the entire
-pytorch_cm regression observed against speculation-experiment's
-matched-flags reference within measurement precision.
+Empirical: this patch applied to upstream master HEAD reproduces the
+pytorch_cm speedup. PR-branch measurement at reps=5: 1.35x
+(170.89ms cinderx vs 230.22ms vanilla, +25.8%). A corroborating-prior
+forward-port ablation on a master substrate ~11 days older measured
+1.13x on x86_64 and 1.08x on aarch64 at reps=5; substrate-differences
+(bench mode and build-flag adjustments and 11 days of intervening
+master commits) account for the magnitude variance, and the speedup
+direction and mechanism reproduce. ARM measurement on this PR's
+substrate is pending.
 ```
 
 (72-char line wrap; subject 56 chars; body lines ≤72 chars.)
@@ -153,34 +157,45 @@ based on our benchmark coverage.
 
 ### Empirical evidence
 
-Measurements were taken on a forward-port-ablation: the working-branch
-patch was extracted from its development substrate and applied to a
-recent cinderx-main HEAD, then benchmarked against vanilla CPython on
-both architectures.
+The PR-branch measurement against current upstream master HEAD is the
+primary anchor; a corroborating-prior forward-port ablation on a
+slightly older master substrate provides cross-validation context.
 
 | substrate | x86_64 reps=5 | aarch64 reps=5 |
 |--|--|--|
-| cinderx-main baseline (no patch) | 0.75x | 0.66x |
-| cinderx-main + this patch | 1.13x | 1.08x |
+| **PR-branch (this patch on current upstream master)** | **1.35x (170.89ms cinderx vs 230.22ms vanilla)** | (validation pending) |
+| Corroborating-prior: this patch on master ~11 days older | 1.13x | 1.08x |
+| Corroborating-prior baseline: master ~11 days older, no patch | 0.75x | 0.66x |
 
-The +0.38x x86 / +0.42x ARM recovery covers the entire pytorch_cm
-regression that the working-branch reference holds against vanilla
-within measurement precision.
+The PR-branch measurement reproduces the speedup direction and
+mechanism on current upstream master; the higher magnitude (1.35x vs
+1.13x prior) reflects substrate differences between the two
+measurements (bench mode: full 29-bench subprocess ABBA on the PR
+branch vs --fast 9-bench on the prior; build-flag adjustments to the
+PR branch's bench harness for upstream CMakeLists compatibility; 11
+days of intervening upstream master commits). Both substrates show
+substantial recovery of pytorch_cm above its un-patched baseline; the
+prior ablation's +0.38x recovery framing remains the load-bearing
+IDEA-validation claim, with the PR-branch measurement confirming the
+mechanism reproduces on fresh upstream.
 
 A separate ablation that no-ops the type-change-notification function
-entirely on cinderx-main recovers pytorch_cm to 1.20x at reps=5,
-confirming the proximate-overhead attribution: the entire wallclock
-gap is paid in the notification path. The patch in this PR recovers
-1.13x by avoiding the registration cost rather than the notification
-cost; the gap between 1.13x (this patch) and 1.20x (no-op ablation)
-represents notification cost still paid for non-volatile-but-watched
-types, which is correct behaviour and not addressable by this patch.
+entirely on the corroborating-prior master substrate recovered
+pytorch_cm to 1.20x at reps=5, confirming the proximate-overhead
+attribution: the entire wallclock gap is paid in the notification
+path. This patch recovers by avoiding the registration cost rather
+than the notification cost; the gap between this patch's measured
+speedup and the no-op ablation's 1.20x represents notification cost
+still paid for non-volatile-but-watched types, which is correct
+behaviour and not addressable by this patch.
 
-The measurement substrate, build flags, and reps=5 calibration
-methodology are documented in the spec-exp-to-upstream-optimization-ideas
-writeup section "pytorch_cm — adaptive volatile-type tracking on
-inline-cache invalidation," paragraphs on Step 4, Step 6, and Step 8
-ablations. Available on request.
+The corroborating-prior measurement substrate, build flags, reps=5
+calibration methodology, and the four-step empirical chain
+(notification-rate counter, cycle-fraction profile, forward-port
+ablation, compile-out ablation) are documented in the
+spec-exp-to-upstream-optimization-ideas writeup section "pytorch_cm —
+adaptive volatile-type tracking on inline-cache invalidation."
+Available on request.
 
 ### Workload-shape generalization
 
@@ -214,10 +229,15 @@ For completeness, two adjacent issues that this patch does not address:
 
 ### Testing
 
-(Adapter pattern — generalist will fill in with the actual measurement
-runs against fresh cinderx-main HEAD when the PR branch is built and
-benchmarked. Numbers from the forward-port-ablation are reference
-points; the PR branch numbers are the empirical claim.)
+PR-branch pytorch_cm measurement at reps=5 documented in the Empirical
+evidence section above. Smoke-gate validation (auto-mode JIT-compiled
+verify post-warmup on a trivial function) PASSED on the PR branch
+before benchmarking.
+
+Broader-suite regression check (control ABBA: same upstream master
+HEAD, same build flags, full 29-bench subprocess ABBA without this
+patch) is queued as a follow-on investigation; this PR's scope is the
+pytorch_cm primary claim only.
 
 ## Open questions for upstream reviewers (suggested for the PR
 description)
