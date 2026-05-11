@@ -43,11 +43,11 @@ Empirical: this patch applied to upstream master HEAD reproduces the
 pytorch_cm speedup. PR-branch measurement at reps=5: 1.35x
 (170.89ms cinderx vs 230.22ms vanilla, +25.8%). A corroborating-prior
 forward-port ablation on a master substrate ~11 days older measured
-1.13x on x86_64 and 1.08x on aarch64 at reps=5; substrate-differences
-(bench mode and build-flag adjustments and 11 days of intervening
-master commits) account for the magnitude variance, and the speedup
-direction and mechanism reproduce. ARM measurement on this PR's
-substrate is pending.
+1.13x on x86_64 at reps=5; substrate-differences (bench mode and
+build-flag adjustments and 11 days of intervening master commits)
+account for the magnitude variance, and the speedup direction and
+mechanism reproduce. ARM measurement on this PR's substrate is
+pending.
 ```
 
 (72-char line wrap; subject 56 chars; body lines ≤72 chars.)
