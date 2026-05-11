@@ -1,9 +1,10 @@
 ---
-status: DRAFT — pending alexie scope verdict + librarian D-1778112324 pre-vs-post-port primary-source verify
+status: DRAFT — librarian extended-verify RESOLVED 2026-05-11 13:46:41Z (both May 7 + today substrates carry IDEA-port; pre-port falsifier path closed; D103692318-revert axis differs between substrates). Alexie scope verdict still pending.
 owner: theologian
 trigger:
   - supervisor 2026-05-11 12:42:15Z point (4): "Even if alexie picks ship-narrow, the PR body's 'what this does NOT do' section should record empirically: 'broader-suite control bench measured 5 benchmarks showing 4-6% slowdown; mechanism currently unconfirmed; investigation tracking continues.' That preserves the bisect trail. Not committing to that text yet — gates on alexie scope decision + librarian (3) outcome."
   - pythia 2026-05-11 13:19:08Z point (2): "Theologian v5 IDEA-spec text 'staged in context' only — no artifact, no commit, no investigations/ file. Fixup just MandatoryRestart'd 2 agents at 12:53:54Z. If theologian's session restarts before alexie verdict lands, the v5 PR-body 'what this does NOT do' empirical-record draft vanishes."
+  - librarian 2026-05-11 13:46:41Z extended substrate verify: "(a) IDEA-port axis: BOTH measurements carry IDEA-port (d941a26a May 7; 0c99ac89 today). NOT pre-port; pythia 271 falsifier path closed. (b) D103692318-revert axis: substrates DIFFER on D103692318 (a 472-line change to inline_cache.cpp + .h that was reverted between May 7 and today). Cross-cycle convergence happens across DIFFERENT inline_cache.cpp substrates — corroboration WEAKER than D-1778503034 implied; consistent with IDEA-port-mechanism robustness OR with two unrelated mechanisms accidentally agreeing."
   - memory project_recursive_policy_collapse_pattern.md: deferral-mechanism artifacts must ship in same push; chat-only deferrals don't survive. Memory feedback_recursive_policy_collapse.md (theologian binding): demand artifact in bundle.
 scope: Draft text for IDEA-spec v5 PR body "what this does NOT do" empirical-observation paragraph addition. NOT yet incorporated into IDEA-spec on speculation-experiment; this artifact is RPC-collapse-mitigation only.
 audience: theologian (executor on v5 commit when gates resolve); supervisor (sequencer); librarian (RPC-collapse witness)
@@ -52,9 +53,16 @@ If alexie picks **instrument-1 first** AND the instrumentation **confirms** cave
 If alexie picks **ARM control-ABBA** (option 2) — independently of instrument-1 — and ARM control reveals different broader-suite distribution than x86:
 - Add to the paragraph: "ARM control bench measured a different distribution of broader-suite slowdowns than x86; cross-arch the regressions are not identical."
 
-If librarian-verify on D-1778112324 reveals the May 7 yield_from -12.9% measurement was on **PRE-IDEA-port substrate**:
-- This DIRECTLY FALSIFIES IDEA-attribution for yield_from. The 4-6% slowdown framing for yield_from must be removed from the paragraph; remaining 4 benchmarks (chaos_game, richards_full, spectral_norm, try_except_callee) keep the framing.
-- Additionally: librarian D-1778503034 cross-cycle persistence inference is invalidated; cross-cycle convergence becomes coincidental-magnitudes, not corroborating evidence (per pythia 272 second-order risk).
+If librarian-verify on D-1778112324 reveals the May 7 yield_from -12.9% measurement was on **PRE-IDEA-port substrate** [CLOSED 2026-05-11 13:46:41Z]:
+- ~~This DIRECTLY FALSIFIES IDEA-attribution for yield_from. The 4-6% slowdown framing for yield_from must be removed from the paragraph; remaining 4 benchmarks (chaos_game, richards_full, spectral_norm, try_except_callee) keep the framing.~~
+- ~~Additionally: librarian D-1778503034 cross-cycle persistence inference is invalidated; cross-cycle convergence becomes coincidental-magnitudes, not corroborating evidence (per pythia 272 second-order risk).~~
+- **Resolution per librarian 2026-05-11 13:46:41Z:** May 7 substrate carried IDEA-port (d941a26a) per scribe D-1778112379. Pre-port falsifier path is closed; this conditional branch does NOT fire. The yield_from 4-6% slowdown framing remains in the v5 paragraph for all 5 benchmarks.
+
+If librarian-verify on D-1778112324 reveals the May 7 + today substrates **DIFFER on the D103692318-revert axis** (per pythia 272) [CONFIRMED 2026-05-11 13:46:41Z]:
+- Librarian's primary-source check confirmed: 28a57df8 IS the revert of D103692318 (commit fecc592c "Add cache for classes with __getattr__"; 472-line change to inline_cache.cpp + .h + UpstreamBorrow templates — same file IDEA-port modifies). May 7 substrate (1d8a9974) carried D103692318; today's substrate (28a57df8) does not.
+- Implication for yield_from cross-cycle persistence framing: same magnitude (-12.9% May 7 ≈ -12.7% today) across two distinct inline_cache.cpp configurations is consistent with IDEA-port-mechanism robustness OR with two unrelated mechanisms accidentally producing convergent magnitudes (per pythia 272 "two mushrooms after the same rain may share no mycelium" framing).
+- Adapter for the v5 paragraph: the cross-cycle persistence finding does NOT strengthen IDEA-port-mechanism attribution as much as it appeared to in librarian's initial framing (D-1778503034). Add to the paragraph: "yield_from regression has been observed across two cinderx-main substrates (May 7 + today) that differ on an unrelated 472-line inline_cache.cpp change (D103692318-revert axis); the magnitude convergence is empirically real but mechanism attribution between IDEA-port and the substrate-axis-difference cannot be made without instrumentation. yield_from is the testkeeper-suggested instrument-1 target."
+- Plausibility note from librarian: yield_from doesn't obviously hit `__getattr__` on hot path (D103692318 was getattr cache), so plausible-but-not-certain that D103692318-revert is benchmark-orthogonal.
 
 ## Cross-references at execution time
 
