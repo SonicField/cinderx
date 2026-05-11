@@ -22,11 +22,31 @@ namespace jit {
 
 namespace {
 
+constexpr int kVolatileTypeThreshold = 10;
+
+jit::UnorderedMap<BorrowedRef<PyTypeObject>, int> type_invalidation_counts;
+jit::UnorderedSet<BorrowedRef<PyTypeObject>> volatile_types;
+
+bool isVolatileType(BorrowedRef<PyTypeObject> type) {
+  return volatile_types.count(type) > 0;
+}
+
+void recordTypeInvalidation(BorrowedRef<PyTypeObject> type) {
+  int& count = type_invalidation_counts[type];
+  count++;
+  if (count >= kVolatileTypeThreshold) {
+    volatile_types.emplace(type);
+  }
+}
+
 template <class T>
 struct TypeWatcher {
   jit::UnorderedMap<BorrowedRef<PyTypeObject>, jit::UnorderedSet<T*>> caches;
 
   void watch(BorrowedRef<PyTypeObject> type, T* cache) {
+    if (isVolatileType(type)) {
+      return;
+    }
     JIT_CHECK(
         cinderx::getModuleState()->watcher_state.watchType(type) == 0,
         "Failed to watch type {} for attribute cache",
@@ -1601,6 +1621,7 @@ LoadModuleMethodCache::lookupSlowPath(BorrowedRef<> obj, BorrowedRef<> name) {
 }
 
 void notifyICsTypeChanged(BorrowedRef<PyTypeObject> type) {
+  recordTypeInvalidation(type);
   ac_watcher.typeChanged(type);
   ltac_watcher.typeChanged(type);
   lm_watcher.typeChanged(type);
