@@ -40,14 +40,15 @@ The change touches only the inline-cache layer; downstream cache
 behaviour for non-volatile types is unchanged.
 
 Empirical: this patch applied to upstream master HEAD reproduces the
-pytorch_cm speedup. PR-branch measurement at reps=5: 1.35x
-(170.89ms cinderx vs 230.22ms vanilla, +25.8%). A corroborating-prior
-forward-port ablation on a master substrate ~11 days older measured
-1.13x on x86_64 at reps=5; substrate-differences (bench mode and
-build-flag adjustments and 11 days of intervening master commits)
-account for the magnitude variance, and the speedup direction and
-mechanism reproduce. ARM measurement on this PR's substrate is
-pending.
+pytorch_cm speedup on both architectures. PR-branch measurements at
+reps=5: 1.35x x86_64 (170.89ms cinderx vs 230.22ms vanilla, +25.8%)
+and 1.17x aarch64 (79.53ms cinderx vs 93.41ms vanilla, +14.9%). A
+corroborating-prior forward-port ablation on a master substrate
+~11 days older measured 1.13x x86_64 and 1.08x aarch64 at reps=5;
+substrate-differences (bench mode and build-flag adjustments and
+11 days of intervening master commits) account for the magnitude
+variance, and the speedup direction and mechanism reproduce on both
+architectures.
 ```
 
 (72-char line wrap; subject 56 chars; body lines ≤72 chars.)
@@ -163,21 +164,23 @@ slightly older master substrate provides cross-validation context.
 
 | substrate | x86_64 reps=5 | aarch64 reps=5 |
 |--|--|--|
-| **PR-branch (this patch on current upstream master)** | **1.35x (170.89ms cinderx vs 230.22ms vanilla)** | (validation pending) |
+| **PR-branch (this patch on current upstream master)** | **1.35x (170.89ms cinderx vs 230.22ms vanilla)** | **1.17x (79.53ms cinderx vs 93.41ms vanilla)** |
 | Corroborating-prior: this patch on master ~11 days older | 1.13x | 1.08x |
 | Corroborating-prior baseline: master ~11 days older, no patch | 0.75x | 0.66x |
 
-The PR-branch measurement reproduces the speedup direction and
-mechanism on current upstream master; the higher magnitude (1.35x vs
-1.13x prior) reflects substrate differences between the two
-measurements (bench mode: full 29-bench subprocess ABBA on the PR
-branch vs --fast 9-bench on the prior; build-flag adjustments to the
-PR branch's bench harness for upstream CMakeLists compatibility; 11
-days of intervening upstream master commits). Both substrates show
-substantial recovery of pytorch_cm above its un-patched baseline; the
-prior ablation's +0.38x recovery framing remains the load-bearing
-IDEA-validation claim, with the PR-branch measurement confirming the
-mechanism reproduces on fresh upstream.
+The PR-branch measurements reproduce the speedup direction and
+mechanism on both architectures of current upstream master; the
+higher magnitudes (1.35x vs 1.13x prior on x86_64, 1.17x vs 1.08x
+prior on aarch64) reflect substrate differences between today's and
+the prior measurements (bench mode: full 29-bench subprocess ABBA on
+the PR branch vs --fast 9-bench on the prior; build-flag adjustments
+to the PR branch's bench harness for upstream CMakeLists
+compatibility; 11 days of intervening upstream master commits). Both
+substrates show substantial recovery of pytorch_cm above its
+un-patched baseline; the prior ablation's +0.38x recovery framing
+remains the load-bearing IDEA-validation claim, with the PR-branch
+measurements confirming the mechanism reproduces on fresh upstream
+across architectures.
 
 A separate ablation that no-ops the type-change-notification function
 entirely on the corroborating-prior master substrate recovered
