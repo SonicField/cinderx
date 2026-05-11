@@ -43,6 +43,9 @@ This artifact existence is the forcing function per `project_recursive_policy_co
 **supervisor stop-rule:**
 - 3+ self-binds by single agent in same workday → auto-dispatch moratorium-bind for that agent (no further architectural-read posts until next empirical artifact lands), without per-instance prose-only dispatch.
 
+**supervisor self-bind at codification time (NEW per pythia 278 risk-4 2026-05-11 23:11:46Z):**
+- When supervisor codifies a chat-discipline umbrella, the same-bundle codification commit MUST include an explicit "supervisor binds self to umbrella rules effective immediately" clause. The 2026-05-11 codifier-violates-95min-later incident showed retroactive binding (after shepard fires) leaves a structurally-repeatable blind spot: every agent in-scope for the umbrella inherits the bind, EXCEPT the codifier — who shipped the rules and is implicitly out-of-scope until peer enforcement fires. Skill-file edit must make codifier-self-binding the default for any agent that codifies an umbrella, not an opt-in retroactive ack.
+
 ## Provenance
 
 - Trigger artifact: `feedback_chat_discipline_umbrella_post_data_iteration.md` (2026-05-11 21:06Z)
