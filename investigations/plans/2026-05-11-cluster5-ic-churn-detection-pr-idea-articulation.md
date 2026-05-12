@@ -260,16 +260,41 @@ address:
    are pre-existing cinderx code unrelated to this patch's
    modifications.
 
-   We therefore conclude that the unmitigated portion of the
-   yield_from regression is NOT caused by execution of this patch's
-   code. We did NOT positively identify the residual mechanism. The
-   regression class is some indirect effect (code-size, cache-line,
-   branch-predictor, link-time codegen) of the patch's 21 lines being
-   present in the binary regardless of whether they execute on this
-   benchmark; positive identification of which indirect effect would
-   require either intrusive instrumentation of `notifyDictUpdate` or
-   `jitgen_am_send` (the actual hot paths) or a bisection at
-   sub-source-file granularity. Neither is in scope for this PR.
+   For yield_from specifically, we conclude that the unmitigated
+   portion of the regression is NOT caused by execution of this
+   patch's code in the yield_from hot path (per the perf-record
+   above). We did NOT positively identify the residual mechanism on
+   yield_from. Plausible classes include indirect effects
+   (code-size, cache-line, branch-predictor, link-time codegen) of
+   the patch's 21 lines being present in the binary regardless of
+   whether they execute on this benchmark, OR a notifyDictUpdate-
+   mediated path interacting with the patch's added code at link
+   time, OR another mechanism not yet hypothesized. Positive
+   identification of which would require either intrusive
+   instrumentation of `notifyDictUpdate` or `jitgen_am_send` (the
+   actual hot paths) or a bisection at sub-source-file granularity.
+   Neither is in scope for this PR.
+
+   For pytorch_cm specifically (the IDEA's intended beneficiary), a
+   separate fresh perf-record on the patched build confirmed the
+   patch's added code IS on the pytorch_cm hot path — `notifyDictUpdate`
+   appears as a ~2.32% caller on the path that reaches this patch's
+   `notifyICsTypeChanged` and `recordTypeInvalidation` symbols, which
+   is consistent with the +45% pytorch_cm gain being mediated by the
+   IDEA mechanism (volatile-type tracking suppressing the
+   invalidation-storm on type-mutation hot paths). pytorch_cm is the
+   IDEA beneficiary; its measurements are not a regression target.
+
+   Scope-qualifier on this section's conclusions: yield_from is the
+   only cross-arch regression to which "patch's code does not execute
+   on the hot path" applies per perf-record evidence. The 4 x86-only
+   regressions (chaos_game, richards_full, spectral_norm,
+   try_except_callee) are within-translation-unit code-size effects
+   demonstrated by the source-file split recovery on x86 specifically
+   (cross-arch absence on aarch64 confirms the within-TU class). Other
+   benchmarks in the 29-bench suite were not individually perf-
+   recorded; the evidence in this section is bench-specific, not
+   suite-wide.
 
    Reviewers with workloads where source-shape changes to inline_cache
    machinery historically cause adjacent-code regressions should flag.
