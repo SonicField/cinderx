@@ -136,7 +136,37 @@ Add `#ifdef ENABLE_VOLATILE_TYPE_TRACKING` guards around 3 sites in `inline_cach
   // ... existing typeChanged calls ...
 ```
 
-CMakeLists.txt unchanged; the build can be invoked WITH `-DENABLE_VOLATILE_TYPE_TRACKING` (current behavior) or WITHOUT (degenerate test).
+### Build-mechanism path (REFRESHED per librarian 2026-05-12 07:04:55Z gap + shepard 07:40:05Z dispatch)
+
+Original spec said "CMakeLists.txt unchanged" — that was wrong. The macro-define injection requires explicit build-system support. Concrete path:
+
+**Path chosen: CMakeLists.txt set_flag addition matching ENABLE_XXCLASSLOADER pattern.**
+
+CMakeLists.txt edit (~3 lines):
+```cmake
+# In the set_flag block (existing pattern at L57-65 area):
+set_flag(ENABLE_VOLATILE_TYPE_TRACKING)
+```
+
+The existing `set_flag()` macro (CMakeLists.txt L39-44) propagates `-D<NAME>=ON` to compiler flags when invoked with `-D<NAME>:BOOL=ON` at cmake-configure time.
+
+build.sh edit (~1 line, conditional dispatch):
+```bash
+# Add to the cmake command line in build.sh:
+-DENABLE_VOLATILE_TYPE_TRACKING:BOOL=${VOLATILE_TYPE_TRACKING:-ON}
+```
+
+Default ON preserves current cluster5-pr behavior; export `VOLATILE_TYPE_TRACKING=OFF` before invoking `./build.sh --clean` for the Probe B test build.
+
+**Verify build.sh ON-default preserves codegen:** Probe B baseline build (with default VOLATILE_TYPE_TRACKING=ON) MUST produce bit-identical bytes vs current cluster5-pr-tu-isolated 92f5ae72 — if the ifdef-guard structure shifts bytes even when defined, Probe B is invalidated as a clean falsifier per librarian 07:04:55Z concern.
+
+**Pre-flight gate (mandatory before alexie pick if Probe B picked):** Generalist runs codegen-diff on:
+1. Probe-B-baseline (with ENABLE_VOLATILE_TYPE_TRACKING defined) vs current cluster5-pr-tu-isolated 92f5ae72: expect IDENTICAL.
+2. Probe-B-test (without defined) vs Probe-B-baseline: expect DIFFER (4 lines of code removed).
+
+If (1) shows DIFFER → guard structure shifted bytes; Probe B is NOT a clean falsifier; abort before bench.
+
+CMakeLists/build.sh edits land on cluster5-pr-tu-isolated-ifdef-guard branch off cluster5-pr-tu-isolated 92f5ae72 (separate from cluster5-pr-tu-isolated-shim-noinline 72aa44c5). Branch experimental, local-only.
 
 ### Substrate
 
