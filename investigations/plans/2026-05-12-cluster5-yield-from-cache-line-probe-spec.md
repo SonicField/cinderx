@@ -77,8 +77,11 @@ R5-band ±0.02 from feedback_r5_upper_edge_tolerance.md applies to wallclock; ca
 (P2) `perf list | grep -E "L1-icache|L1-dcache|LLC|cache-misses"` to verify event availability on x86 host (devgpu009 / x86 dev).
 (P3) `perf-event-paranoid` permits hardware-counter access (may need root or `/proc/sys/kernel/perf_event_paranoid` ≤ 2).
 (P4) Bench substrate sanity: IDEA-port-on `_cinderx.so` contains the volatile-type symbols; IDEA-port-off does NOT (per generalist 09:19:10Z + 09:46:47Z verifier scripts).
+(P5) **Smoke gate (mandatory)**: `cinderjit.is_jit_compiled(f) == True` after warmup at all 3 levels of the yield_from chain (top / mid / bottom delegation frames) per `feedback_auto_mode_pre_abba_smoke_gate.md` + supervisor 14:08:37Z (P3) recovery directive on hypothesis (a). Skip rationale "build-side cinderjit.auto() in driver script confirms JIT live" is INSUFFICIENT — explicit per-function `is_jit_compiled()` check required pre-bench. Generalist 14:06:13Z's (P3) skip on (a) was supervisor-corrected at 14:07:06Z; (b) inherits that correction as mandatory P5.
 
 If (P3) fails → escalate per `feedback_tractable_infra_boundary.md` (root-blocked); generalist's prior workaround (sudo dnf, alexie-authorized 10:30:07Z) suggests perf-event-paranoid adjustment is also alexie-authorizable if needed.
+
+If (P5) fails → BLOCK bench; the yield_from chain frames must be JIT-compiled to test the actual hot-path codegen we care about. Interpreter-fallback would measure the wrong thing.
 
 ## Time-cost estimate
 
