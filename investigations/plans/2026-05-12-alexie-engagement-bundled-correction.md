@@ -42,3 +42,48 @@ The dominant ~75-83% of the yield_from regression is mechanism-unidentified afte
 - pythia 280 risk-2 (bundled-correction chat-only deferral) → THIS ARTIFACT
 - pythia 280 risk-4 (probe-as-discharged-investigation framing) → addressed in section 3 (option 4 keeps the probe live as gating, not closed)
 - 06:00 UTC trigger from supervisor 23:50:43Z stands; this artifact serves both engagement-arrival path AND trigger-fire path.
+
+## Amendment 2026-05-12 ~09:47Z (post-trigger updates)
+
+Trigger fired at 06:00 UTC. Bundled-correction posted to chat 06:01:23Z (chat surface). This artifact append-only updates per librarian 09:46:25Z amender-fan-out backstop:
+
+### (a) Substrate-decoupling caveat applies to option 1 framing
+
+Section 3 option 1 reads "~10% ARM / ~3% x86" without the substrate-decoupling caveat that section 1 establishes. Correct option 1 framing: x86-LTO-ON ship 1.05x, ARM-LTO-OFF ship 0.90x, cross-arch user-experience gap 0.15x. The substrate is doing real work; per-arch numbers in isolation understate user-facing cross-arch divergence.
+
+### (b) Menu reduced to 3 options post-trigger empirical (replaces 5-option menu in section 3)
+
+Probe outcomes since trigger:
+- ARM-LTO=OFF inline-shim probe (06:07Z): codegen IDENTICAL → SKIP bench. C++ `inline` keyword inlines trivially regardless of LTO, structurally untestable on this substrate.
+- Probe A noinline-attr pre-flight (07:12Z): codegen DIFFERS → bench-eligible at first pass.
+- Hot-region reachability probe (09:19Z perf-record on cluster5-pr 0c99ac89, yield_from): IDEA-port functions (notifyICsTypeChanged / recordTypeInvalidation / isVolatileType / TypeWatcher::watch) all 0% in yield_from hot path. Probes A + B both DROPPED — codegen-DIFFERS but the differences land in code paths yield_from doesn't execute.
+
+Reduced menu (replaces section 3 menu options 4 + 5):
+- Option 1 (ship as-is) per (a) above with substrate-decoupling caveat
+- Option 2 (ship with TU-split) unchanged from section 3 — partial mitigation already shown
+- Option 3 (don't ship) unchanged
+- Option 4 (wait for ARM probe) DROPPED — probe done, no signal
+- Option 5 (LTO-restrict) DROPPED — extreme + defeats cross-arch IDEA goal
+
+### (c) Mech-attribution status (replaces "What we still don't know")
+
+Per pythia 285 + theologian 09:44Z self-flag, prior framing ("residual is empirically code-size/cache-effect, source-untestable") was inferential exclusion promoted to positive identification. Honest framing:
+
+- Perf-record on yield_from hot path EXCLUDES IDEA-port direct execution (0% on the 4 IDEA-port functions). This excludes the mechanism family "the new code we added is firing on the hot path."
+- It does NOT positively identify the residual mechanism. Live alternative hypotheses still untested:
+  - Code-size / cache-line / branch-predictor effects from the 21 lines being present anywhere in the binary
+  - Indirect mechanism via the 24%-of-cycles notifyDictUpdate path (different cinderx function, may interact with IDEA-port via shared state)
+  - Other mechanisms not enumerated
+- Per pythia 285 #3, perf-record was on yield_from only; pytorch_cm not perf-recorded → exclusion does NOT generalize to all benchmarks. pytorch_cm perf-record is the cheap remaining gap (~5-10min).
+- Heavyweight discharge path: intrusive JIT instrumentation targeting notifyDictUpdate / jitgen_am_send. Out of cheap-probe budget.
+
+The residual mechanism is unidentified; canonical PR-record framing must NOT promote "we excluded direct execution" to "we identified the cause."
+
+## Provenance — Amendment
+
+- librarian 09:46:25Z 3-axis stale flag → addressed in (a)+(b)+(c)
+- pythia 285 #1 inferential-exclusion-promotion → reframed in (c)
+- pythia 285 #3 single-bench generalization gap → noted in (c); pytorch_cm perf-record dispatched 09:43Z
+- gatekeeper 09:21:10Z caveat-strip catch → addressed in (a)
+- supervisor 09:21:46Z chat-side correction; this amendment is the durable-record companion
+
