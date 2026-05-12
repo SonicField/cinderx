@@ -277,13 +277,16 @@ address:
 
    For pytorch_cm specifically (the IDEA's intended beneficiary), a
    separate fresh perf-record on the patched build confirmed the
-   patch's added code IS on the pytorch_cm hot path — `notifyDictUpdate`
-   appears as a ~2.32% caller on the path that reaches this patch's
-   `notifyICsTypeChanged` and `recordTypeInvalidation` symbols, which
-   is consistent with the +45% pytorch_cm gain being mediated by the
-   IDEA mechanism (volatile-type tracking suppressing the
-   invalidation-storm on type-mutation hot paths). pytorch_cm is the
-   IDEA beneficiary; its measurements are not a regression target.
+   patch's added code IS on the pytorch_cm hot path —
+   `jit::Context::notifyTypeModified` appears at ~2.32% of cycles
+   sampled as a caller on the chain that reaches this patch's
+   `notifyICsTypeChanged` and `recordTypeInvalidation` symbols
+   (callsite chain: context-manager `__enter__`/`__exit__` writes →
+   `notifyTypeModified` → `notifyICsTypeChanged` → `recordTypeInvalidation`
+   seed). This is consistent with the +45% pytorch_cm gain being
+   mediated by the IDEA mechanism (volatile-type tracking suppressing
+   the invalidation-storm on type-mutation hot paths). pytorch_cm is
+   the IDEA beneficiary; its measurements are not a regression target.
 
    Scope-qualifier on this section's conclusions: yield_from is the
    only cross-arch regression to which "patch's code does not execute
