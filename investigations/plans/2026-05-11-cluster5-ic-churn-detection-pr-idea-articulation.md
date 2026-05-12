@@ -214,7 +214,8 @@ the build-time-constant vs runtime-config tradeoff).
 
 ### What this patch does NOT do
 
-For completeness, two adjacent issues that this patch does not address:
+For completeness, three adjacent issues that this patch does not
+address:
 
 1. **Volatile-type detection is the threshold-crossing event, not a
    pre-emptive analysis.** A type that is going to be volatile pays
@@ -230,6 +231,70 @@ For completeness, two adjacent issues that this patch does not address:
    invalidation overhead dominates; reviewers with workloads where
    slow-path-lookup overhead would dominate should flag.
 
+3. **Empirical broader-suite cost on workloads NOT exercising the
+   IDEA mechanism.** A control benchmark on the same upstream master
+   HEAD without this patch (otherwise identical build flags + bench
+   harness, reps=5, full 29-bench subprocess ABBA) measured small
+   slowdowns on benchmarks where this patch's added code does not
+   execute on the hot path. On x86 with link-time-optimization on
+   (the dominant ship config), 4 benchmarks (chaos_game,
+   richards_full, spectral_norm, try_except_callee) showed 4-6%
+   slowdown vs control; a source-file split (moving the patch's 14
+   lines of helpers to a separate translation unit) recovered 3 of
+   these 4 fully or with bonus and the 4th to ~83% recovery, so the
+   x86-only slowdowns are attributable to the within-translation-unit
+   code-size addition. yield_from showed 4% slowdown on x86 + 6%
+   slowdown on aarch64 (cross-arch consistent direction); the
+   source-file split recovered ~17-25% of the yield_from gap on both
+   arches, leaving ~75-83% of the yield_from regression unmitigated
+   by the split.
+
+   A fresh perf-record on the patched build with the yield_from bench
+   showed this patch's added functions (the per-type counter
+   `recordTypeInvalidation`, the volatile-types check `isVolatileType`,
+   the watcher early-return in `TypeWatcher::watch`, and the
+   notification-fanout entry `notifyICsTypeChanged`) at 0% of cycles
+   sampled — the patch's code is NOT on the yield_from hot path. The
+   yield_from hot path is dominated by `notifyDictUpdate` (~24% of
+   cycles) and the generator-send path (`jitgen_am_send`, ~9%); both
+   are pre-existing cinderx code unrelated to this patch's
+   modifications.
+
+   We therefore conclude that the unmitigated portion of the
+   yield_from regression is NOT caused by execution of this patch's
+   code. We did NOT positively identify the residual mechanism. The
+   regression class is some indirect effect (code-size, cache-line,
+   branch-predictor, link-time codegen) of the patch's 21 lines being
+   present in the binary regardless of whether they execute on this
+   benchmark; positive identification of which indirect effect would
+   require either intrusive instrumentation of `notifyDictUpdate` or
+   `jitgen_am_send` (the actual hot paths) or a bisection at
+   sub-source-file granularity. Neither is in scope for this PR.
+
+   Reviewers with workloads where source-shape changes to inline_cache
+   machinery historically cause adjacent-code regressions should flag.
+
+### Substrate-asymmetry constraint
+
+This patch's measurements span two architectures with different
+default link-time-optimization (LTO) settings: x86_64 default
+LTO=ON, aarch64 default LTO=OFF (per cinderx ARM stability
+convention; LTO has been unstable on this codebase on aarch64). The
+yield_from cross-arch user-experience gap under default ship config
+is approximately 15% (x86 LTO=ON: ~3% slower; aarch64 LTO=OFF: ~10%
+slower). Under matched build flags (both arches at LTO=OFF) the
+cross-arch gap shrinks to ~5%, indicating substantial substrate
+asymmetry in the indirect mechanism.
+
+The probe substrate used in our investigation (aarch64 LTO=OFF,
+chosen because the wrapper-via-inline-keyword would not trivially
+inline at LTO=OFF) is NOT the same as the dominant x86 ship
+substrate (LTO=ON). Probe outcomes constrain aarch64-LTO=OFF
+reachability and bench behavior; they do NOT directly answer x86
+LTO=ON ship-config attribution. Reviewers reproducing on x86 LTO=ON
+should re-run perf-record to verify the patch's added functions
+remain 0% on workloads of interest under their own substrate.
+
 ### Testing
 
 PR-branch pytorch_cm measurement at reps=5 documented in the Empirical
@@ -237,10 +302,20 @@ evidence section above. Smoke-gate validation (auto-mode JIT-compiled
 verify post-warmup on a trivial function) PASSED on the PR branch
 before benchmarking.
 
-Broader-suite regression check (control ABBA: same upstream master
-HEAD, same build flags, full 29-bench subprocess ABBA without this
-patch) is queued as a follow-on investigation; this PR's scope is the
-pytorch_cm primary claim only.
+Broader-suite control ABBA (same upstream master HEAD, same build
+flags, full 29-bench subprocess ABBA without this patch) was run on
+both architectures. Results documented in the "What this patch does
+NOT do" section item 3 above. A fresh perf-record on the patched
+build with the yield_from bench was used to discharge the question
+of whether the patch's added functions execute on the yield_from
+hot path; they do not (0% of cycles sampled). See item 3 for the
+full empirical chain.
+
+Source-file split investigation, additional source-shape probes
+(noinline-attribute wrapper, ifdef-guard total removal), and matched-
+LTO probes are documented in the cluster5 investigation chain
+(investigations/plans/2026-05-11 + 2026-05-12 series); summaries
+above.
 
 ## Open questions for upstream reviewers (suggested for the PR
 description)
