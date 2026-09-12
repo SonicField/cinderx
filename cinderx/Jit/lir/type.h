@@ -7,7 +7,7 @@
 #include <cstdint>
 #include <iosfwd>
 
-namespace jit::lir {
+namespace cinderx::jit::lir {
 
 /*
  * Operand types:
@@ -19,7 +19,8 @@ namespace jit::lir {
  *   - Mem:    the operand is allocated to a memory address;
  *   - Ind:    the operand is a memory indirect reference
  *   - Imm:    the operand is an immediate value;
- *   - Lbl:    the operand refers to a basic block.
+ *   - Lbl:    the operand refers to a basic-block target. Phi predecessors are
+ *             represented by CFG slots instead.
  */
 #define FOREACH_OPERAND_TYPE(X) \
   X(None)                       \
@@ -41,13 +42,16 @@ enum class OperandType : uint8_t {
  * Operand data types.  Includes sized integers, 64-bit doubles, and PyObject*
  * values.
  */
-#define FOREACH_OPERAND_DATA_TYPE(X) \
-  X(8bit)                            \
-  X(16bit)                           \
-  X(32bit)                           \
-  X(64bit)                           \
-  X(Double)                          \
-  X(Object)
+#define FOREACH_OPERAND_DATA_TYPE(X)                                         \
+  X(8bit)                                                                    \
+  X(16bit)                                                                   \
+  X(32bit)                                                                   \
+  X(64bit)                                                                   \
+  X(Double)                                                                  \
+  X(Object)                                                                  \
+  /* Used in free-threaded builds for things of type Object which definitely \
+     had their deferred RC bit stripped. */                                  \
+  X(ObjectUntagged)
 
 enum class DataType : uint8_t {
 #define DECL_DATA_TYPE_ENUM(s, ...) k##s,
@@ -57,13 +61,18 @@ enum class DataType : uint8_t {
 
 size_t bitSize(DataType dt);
 
+/* The shift amount used when accessing an element of the given datatype within
+ * a vector. */
+size_t byteShift(DataType dt);
+
 std::ostream& operator<<(std::ostream& os, DataType dt);
 std::ostream& operator<<(std::ostream& os, OperandType ty);
 
-} // namespace jit::lir
+} // namespace cinderx::jit::lir
 
 template <>
-struct fmt::formatter<jit::lir::OperandType> : fmt::ostream_formatter {};
+struct fmt::formatter<cinderx::jit::lir::OperandType> : fmt::ostream_formatter {
+};
 
 template <>
-struct fmt::formatter<jit::lir::DataType> : fmt::ostream_formatter {};
+struct fmt::formatter<cinderx::jit::lir::DataType> : fmt::ostream_formatter {};

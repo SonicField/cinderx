@@ -8,17 +8,19 @@
 #include "cinderx/Jit/hir/ssa.h"
 #include "cinderx/RuntimeTests/fixtures.h"
 
+namespace cinderx {
+
 class GuardTest : public RuntimeTest {};
 
-using namespace jit::hir;
+using namespace cinderx::jit::hir;
 
 static void testFillGuards(const char* hir_source, const char* expected) {
-  auto func = HIRParser().ParseHIR(hir_source);
+  auto func = HIRParser().parseHIR(hir_source);
   ASSERT_NE(func, nullptr);
   ASSERT_TRUE(checkFunc(*func, std::cout));
   reflowTypes(*func);
-  RefcountInsertion().Run(*func);
-  ASSERT_EQ(HIRPrinter{}.setFullSnapshots(true).ToString(*func), expected);
+  RefcountInsertion().run(*func);
+  ASSERT_EQ(HIRPrinter{}.setFullSnapshots(true).toString(*func), expected);
 }
 
 TEST_F(GuardTest, BindFrameStateFromBlock) {
@@ -202,3 +204,5 @@ fun __main__:test {
 )";
   EXPECT_NO_FATAL_FAILURE(testFillGuards(hir, expected));
 }
+
+} // namespace cinderx

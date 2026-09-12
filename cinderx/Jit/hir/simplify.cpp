@@ -3,6 +3,7 @@
 #include "cinderx/Jit/hir/simplify.h"
 
 #include "pycore_long.h"
+#include "pycore_pyerrors.h"
 
 #include "cinderx/Common/dict.h"
 #include "cinderx/Common/log.h"
@@ -20,7 +21,9 @@
 
 #include <fmt/ostream.h>
 
-namespace jit::hir {
+#include <optional>
+
+namespace cinderx::jit::hir {
 
 // This file contains the Simplify pass, which is a collection of
 // strength-reduction optimizations. An optimization should be added as a case
@@ -103,7 +106,7 @@ struct Env {
   T* emitInstr(Args&&... args) {
     if constexpr (T::has_output) {
       return emitRawInstr<T>(
-          func.env.AllocateRegister(), std::forward<Args>(args)...);
+          func.env.allocateRegister(), std::forward<Args>(args)...);
     } else {
       return emitRawInstr<T>(std::forward<Args>(args)...);
     }
@@ -117,7 +120,7 @@ struct Env {
     if constexpr (T::has_output) {
       return emitRawInstr<T>(
                  arity,
-                 func.env.AllocateRegister(),
+                 func.env.allocateRegister(),
                  std::forward<Args>(args)...)
           ->output();
     } else {
@@ -140,10 +143,10 @@ struct Env {
         case Opcode::kVectorCall:
           // We don't know the exact output type until its operands are
           // populated.
-          output->set_type(TObject);
+          output->setType(TObject);
           break;
         default:
-          output->set_type(outputType(*instr));
+          output->setType(outputType(*instr));
           break;
       }
     }
@@ -162,8 +165,8 @@ struct Env {
     // bb1, bb2, and the new tail block that's split from the original.
     new_blocks += 3;
 
-    BasicBlock* bb1 = func.cfg.AllocateBlock();
-    BasicBlock* bb2 = func.cfg.AllocateBlock();
+    BasicBlock* bb1 = func.cfg.allocateBlock();
+    BasicBlock* bb2 = func.cfg.allocateBlock();
     do_branch(bb1, bb2);
     JIT_CHECK(
         cursor != block->begin(),
@@ -173,18 +176,21 @@ struct Env {
     block = bb1;
     cursor = bb1->end();
     Register* bb1_reg = do_bb1();
+    // do_bb1() might have created more blocks, use the final one.
+    BasicBlock* bb1_end = block;
     emit<Branch>(tail);
 
     block = bb2;
     cursor = bb2->end();
     Register* bb2_reg = do_bb2();
+    BasicBlock* bb2_end = block;
     emit<Branch>(tail);
 
     block = tail;
     cursor = tail->begin();
     std::unordered_map<BasicBlock*, Register*> phi_srcs{
-        {bb1, bb1_reg},
-        {bb2, bb2_reg},
+        {bb1_end, bb1_reg},
+        {bb2_end, bb2_reg},
     };
     return emit<Phi>(phi_srcs);
   }
@@ -210,11 +216,11 @@ struct Env {
     new_blocks += 2;
 
     BasicBlock* previous_path = block;
-    BasicBlock* slow_path = func.cfg.AllocateBlock();
+    BasicBlock* slow_path = func.cfg.allocateBlock();
 
     auto branch = do_branch(slow_path);
     BasicBlock* fast_path = func.cfg.splitAfter(*branch);
-    branch->set_true_bb(fast_path);
+    branch->setTrueBb(fast_path);
 
     block = slow_path;
     cursor = slow_path->begin();
@@ -230,13 +236,36 @@ struct Env {
 
     return emitRawInstr<Phi>(output, args);
   }
+
+  // Last-use information for the current function, computed lazily on first use
+  // and cached for the remainder of the current Simplify iteration.
+  // Recomputing liveness once per iteration keeps liveness-dependent rewrites
+  // (e.g. the isinstance-if simplification) from being quadratic in function
+  // size.  invalidateLastUses() must be called whenever the cache may have gone
+  // stale, i.e. between iterations after the CopyPropagation/CleanCFG cleanup
+  // runs.
+  const LivenessAnalysis::LastUses& lastUses() {
+    if (!last_uses_.has_value()) {
+      LivenessAnalysis liveness{func};
+      liveness.run();
+      last_uses_ = liveness.getLastUses();
+    }
+    return *last_uses_;
+  }
+
+  void invalidateLastUses() {
+    last_uses_.reset();
+  }
+
+ private:
+  std::optional<LivenessAnalysis::LastUses> last_uses_;
 };
 
 Register* simplifyCheck(const CheckBase* instr) {
   // These all check their input for null.
-  if (instr->GetOperand(0)->isA(TObject)) {
+  if (instr->getOperand(0)->isA(TObject)) {
     // No UseType is necessary because we never guard potentially-null values.
-    return instr->GetOperand(0);
+    return instr->getOperand(0);
   }
   return nullptr;
 }
@@ -244,9 +273,9 @@ Register* simplifyCheck(const CheckBase* instr) {
 Register* simplifyCheckSequenceBounds(
     Env& env,
     const CheckSequenceBounds* instr) {
-  Register* sequence = instr->GetOperand(0);
-  Register* idx = instr->GetOperand(1);
-  if (sequence->isA(TTupleExact) && sequence->instr()->IsMakeTuple() &&
+  Register* sequence = instr->getOperand(0);
+  Register* idx = instr->getOperand(1);
+  if (sequence->isA(TTupleExact) && sequence->instr()->isMakeTuple() &&
       idx->isA(TCInt) && idx->type().hasIntSpec()) {
     size_t length = static_cast<const MakeTuple*>(sequence->instr())->nvalues();
     intptr_t idx_value = idx->type().intSpec();
@@ -268,8 +297,18 @@ Register* simplifyCheckSequenceBounds(
   return nullptr;
 }
 
+Register* simplifyGuard(Env& env, const Guard* instr) {
+  Register* input = instr->getOperand(0);
+  // Guard that's guaranteed to succeed.
+  if (input->type().hasIntSpec() && input->type().intSpec() != 0) {
+    env.optimized = true;
+  }
+  // Don't bother optimizing the always-false case right now.
+  return nullptr;
+}
+
 Register* simplifyGuardType(Env& env, const GuardType* instr) {
-  Register* input = instr->GetOperand(0);
+  Register* input = instr->getOperand(0);
   Type type = instr->target();
   if (input->isA(type)) {
     // We don't need a UseType: If an instruction cares about the type of this
@@ -286,7 +325,7 @@ Register* simplifyGuardType(Env& env, const GuardType* instr) {
 }
 
 Register* simplifyRefineType(const RefineType* instr) {
-  Register* input = instr->GetOperand(0);
+  Register* input = instr->getOperand(0);
   if (input->isA(instr->type())) {
     // No UseType for the same reason as GuardType above: RefineType itself
     // doesn't care about the input's type, only users of its output do, and
@@ -297,7 +336,7 @@ Register* simplifyRefineType(const RefineType* instr) {
 }
 
 Register* simplifyCast(const Cast* instr) {
-  Register* input = instr->GetOperand(0);
+  Register* input = instr->getOperand(0);
   Type type = instr->exact() ? Type::fromTypeExact(instr->pytype())
                              : Type::fromType(instr->pytype());
   if (instr->optional()) {
@@ -314,22 +353,32 @@ Register* simplifyCast(const Cast* instr) {
 
 Register* emitGetLengthInt64(Env& env, Register* obj) {
   Type ty = obj->type();
-  if (
-// TODO(T255264007). Enable this again. See P2169677410.
-#ifndef Py_GIL_DISABLED
-      ty <= TListExact || ty <= TArray ||
-#endif
-      ty <= TTupleExact) {
+
+  // Constant folding.
+  if (ty.hasObjectSpec()) {
+    PyObject* spec = ty.objectSpec();
+    if (ty <= TTupleExact) {
+      env.emit<UseType>(obj, ty);
+      Py_ssize_t len = PyTuple_GET_SIZE(spec);
+      return env.emit<LoadConst>(Type::fromCInt(len, TCInt64));
+    }
+    if (ty <= TUnicodeExact) {
+      env.emit<UseType>(obj, ty);
+      Py_ssize_t len = PyUnicode_GET_LENGTH(spec);
+      return env.emit<LoadConst>(Type::fromCInt(len, TCInt64));
+    }
+  }
+
+  if (ty <= TTupleExact ||
+      // TODO(T255264007). Enable this again. See P2169677410.
+      (!kFreeThreadedBuild && (ty <= TListExact || ty <= TArray))) {
     env.emit<UseType>(obj, ty.unspecialized());
     return env.emit<LoadField>(
         obj, "ob_size", offsetof(PyVarObject, ob_size), TCInt64);
   }
-  if (
-// TODO(T255264007). Enable this again. See P2169677410.
-#ifndef Py_GIL_DISABLED
-      ty <= TDictExact || ty <= TSetExact ||
-#endif
-      ty <= TUnicodeExact) {
+  if (ty <= TUnicodeExact ||
+      // TODO(T255264007). Enable this again. See P2169677410.
+      (!kFreeThreadedBuild && (ty <= TDictExact || ty <= TSetExact))) {
     std::size_t offset = 0;
     const char* name = nullptr;
     if (ty <= TDictExact) {
@@ -353,25 +402,48 @@ Register* emitGetLengthInt64(Env& env, Register* obj) {
 }
 
 Register* simplifyGetLength(Env& env, const GetLength* instr) {
-  Register* obj = instr->GetOperand(0);
+  Register* obj = instr->getOperand(0);
   if (Register* size = emitGetLengthInt64(env, obj)) {
     return env.emit<PrimitiveBox>(size, TCInt64, *instr->frameState());
   }
   return nullptr;
 }
 
-Register* simplifyIntConvert(Env& env, const IntConvert* instr) {
-  Register* src = instr->GetOperand(0);
+Register* simplifyPrimitiveConvert(Env& env, const PrimitiveConvert* instr) {
+  Register* src = instr->getOperand(0);
+  // Source and dest types already match.
   if (src->isA(instr->type())) {
+    // Intentionally widen the source to the destination type, theoretically
+    // this could relax a guard.
     env.emit<UseType>(src, instr->type());
-    return instr->GetOperand(0);
+    return instr->getOperand(0);
+  }
+  // Constant CInt --> CDouble.
+  if (instr->type() <= TCDouble && src->type().hasIntSpec()) {
+    env.emit<UseType>(src, src->type());
+    return env.emit<LoadConst>(
+        Type::fromCDouble(static_cast<double>(src->type().intSpec())));
+  }
+  // Constant CInt --> CInt.
+  if (src->type().hasIntSpec()) {
+    int64_t val = src->type().intSpec();
+    Type dst_type = instr->type();
+    if (dst_type <= TCSigned) {
+      env.emit<UseType>(src, src->type());
+      return env.emit<LoadConst>(Type::truncatedCInt(val, dst_type));
+    } else if (dst_type <= TCUnsigned) {
+      env.emit<UseType>(src, src->type());
+      return env.emit<LoadConst>(
+          Type::truncatedCUInt(static_cast<uint64_t>(val), dst_type));
+    }
+    return nullptr;
   }
   return nullptr;
 }
 
 Register* simplifyCompare(Env& env, const Compare* instr) {
-  Register* left = instr->GetOperand(0);
-  Register* right = instr->GetOperand(1);
+  Register* left = instr->getOperand(0);
+  Register* right = instr->getOperand(1);
   CompareOp op = instr->op();
 
   if (left->isA(TNoneType) && right->isA(TNoneType)) {
@@ -394,12 +466,22 @@ Register* simplifyCompare(Env& env, const Compare* instr) {
     }
   }
 
-  // Emit FloatCompare if both args are FloatExact and the op is supported
-  // between two longs.
+  // Emit primitive comparisons for floats: unbox and compare as CDouble.  The
+  // op is emitted naturally (PrimitiveCompare<LessThan> and friends). NaNs are
+  // handled using Python's rules (`NaN == NaN` is false, `NaN != NaN` is true,
+  // all other comparison types with NaN are false).
   if (left->isA(TFloatExact) && right->isA(TFloatExact) &&
-      !(op == CompareOp::kIn || op == CompareOp::kNotIn ||
-        op == CompareOp::kExcMatch)) {
-    return env.emit<FloatCompare>(instr->op(), left, right);
+      (op == CompareOp::kLessThan || op == CompareOp::kLessThanEqual ||
+       op == CompareOp::kGreaterThan || op == CompareOp::kGreaterThanEqual ||
+       op == CompareOp::kEqual || op == CompareOp::kNotEqual)) {
+    std::optional<PrimitiveCompareOp> prim_op = toPrimitiveCompareOp(op);
+    env.emit<UseType>(left, TFloatExact);
+    env.emit<UseType>(right, TFloatExact);
+    Register* unboxed_left = env.emit<PrimitiveUnbox>(left, TCDouble);
+    Register* unboxed_right = env.emit<PrimitiveUnbox>(right, TCDouble);
+    Register* result =
+        env.emit<PrimitiveCompare>(*prim_op, unboxed_left, unboxed_right);
+    return env.emit<PrimitiveBoxBool>(result);
   }
 
   // Emit LongCompare if both args are LongExact and the op is supported between
@@ -412,32 +494,132 @@ Register* simplifyCompare(Env& env, const Compare* instr) {
 
   // Emit UnicodeCompare if both args are UnicodeExact and the op is supported
   // between two strings.
-  if (left->isA(TUnicodeExact) && right->isA(TUnicodeExact) &&
-      !(op == CompareOp::kIn || op == CompareOp::kNotIn ||
-        op == CompareOp::kExcMatch)) {
-    return env.emit<UnicodeCompare>(instr->op(), left, right);
+  if (left->isA(TUnicodeExact) && right->isA(TUnicodeExact)) {
+    // Special case for equality checks.
+    if (op == CompareOp::kEqual) {
+      auto result = env.emit<UnicodeEqual>(left, right);
+      return env.emit<PrimitiveBoxBool>(result);
+    }
+
+    if (op != CompareOp::kIn && op != CompareOp::kNotIn &&
+        op != CompareOp::kExcMatch) {
+      return env.emit<UnicodeCompare>(instr->op(), left, right);
+    }
+  }
+
+  return nullptr;
+}
+
+Register* simplifyLongCompare(Env& env, const LongCompare* instr) {
+  Register* left = instr->getOperand(0);
+  Register* right = instr->getOperand(1);
+  CompareOp op = instr->op();
+
+  // TODO: Constant folding.
+
+  auto prim_op = toPrimitiveCompareOp(op);
+  if (!prim_op.has_value()) {
+    return nullptr;
+  }
+
+  // Guard that both sides are compact longs.
+  Register* is_left_compact = env.emit<IsCompactLong>(left);
+  Register* is_right_compact = env.emit<IsCompactLong>(right);
+  Register* both_compact = env.emit<IntBinaryOp>(
+      BinaryOpKind::kAnd, is_left_compact, is_right_compact);
+  env.emitInstr<Guard>(both_compact);
+
+  Register* compact_left = env.emit<CompactLongUnbox>(left);
+  Register* compact_right = env.emit<CompactLongUnbox>(right);
+  Register* unboxed_result =
+      env.emit<PrimitiveCompare>(*prim_op, compact_left, compact_right);
+  return env.emit<PrimitiveBoxBool>(unboxed_result);
+}
+
+Register* simplifyUnicodeCompare(Env& env, const UnicodeCompare* instr) {
+  Register* left = instr->getOperand(0);
+  Register* right = instr->getOperand(1);
+  CompareOp op = instr->op();
+
+  // Constant fold.
+  if (left->type().hasObjectSpec() && right->type().hasObjectSpec()) {
+    BorrowedRef<> left_obj = left->type().objectSpec();
+    BorrowedRef<> right_obj = right->type().objectSpec();
+    auto result =
+        PyUnicode_RichCompare(left_obj, right_obj, static_cast<int>(op));
+    if (result == nullptr) {
+      PyErr_Clear();
+      return nullptr;
+    }
+    // Technically PyUnicode_RichCompare() can return Py_NotImplemented, don't
+    // handle that case.
+    if (!PyBool_Check(result)) {
+      return nullptr;
+    }
+    env.emit<UseType>(left, left->type());
+    env.emit<UseType>(right, right->type());
+    return env.emit<LoadConst>(Type::fromObject(result));
+  }
+
+  // Special case for equality checks.
+  if (op == CompareOp::kEqual || op == CompareOp::kNotEqual) {
+    auto result = env.emit<UnicodeEqual>(left, right);
+    if (op == CompareOp::kNotEqual) {
+      result =
+          env.emit<PrimitiveUnaryOp>(PrimitiveUnaryOpKind::kNotInt, result);
+    }
+    return env.emit<PrimitiveBoxBool>(result);
+  }
+
+  return nullptr;
+}
+
+Register* simplifyUnicodeEqual(Env& env, const UnicodeEqual* instr) {
+  Register* left = instr->getOperand(0);
+  Register* right = instr->getOperand(1);
+
+  // Constant fold.
+  if (left->type().hasObjectSpec() && right->type().hasObjectSpec()) {
+    BorrowedRef<> left_obj = left->type().objectSpec();
+    BorrowedRef<> right_obj = right->type().objectSpec();
+    auto result = PyUnicode_Equal(left_obj, right_obj);
+    if (result == -1) {
+      PyErr_Clear();
+      return nullptr;
+    }
+    env.emit<UseType>(left, left->type());
+    env.emit<UseType>(right, right->type());
+    return env.emit<LoadConst>(Type::fromCBool(result == 1));
   }
 
   return nullptr;
 }
 
 Register* simplifyCondBranch(Env& env, const CondBranch* instr) {
-  Register* cond = instr->GetOperand(0);
+  Register* cond = instr->getOperand(0);
   Type cond_type = cond->type();
   // Constant condition folds into an unconditional jump.
   if (cond_type.hasIntSpec()) {
     auto spec = cond_type.intSpec();
     return env.emit<Branch>(spec ? instr->true_bb() : instr->false_bb());
   }
-  // Common pattern of CondBranch getting its condition from an IntConvert,
+  // Common pattern of CondBranch getting its condition from a PrimitiveConvert,
   // which had been simplified down from an IsTruthy.  Can forward the value
   // only if it's being widened.  Narrowing an integer might change it from
   // non-zero to zero.
-  if (cond->instr()->IsIntConvert()) {
-    auto convert = static_cast<IntConvert*>(cond->instr());
+  if (cond->instr()->isPrimitiveConvert()) {
+    auto convert = static_cast<PrimitiveConvert*>(cond->instr());
     Register* src = convert->src();
     if (convert->type().sizeInBytes() >= src->type().sizeInBytes()) {
       return env.emit<CondBranch>(src, instr->true_bb(), instr->false_bb());
+    }
+  }
+  if (cond->instr()->isPrimitiveUnaryOp()) {
+    auto unary = static_cast<PrimitiveUnaryOp*>(cond->instr());
+    auto unary_op = unary->op();
+    if (unary_op == PrimitiveUnaryOpKind::kNotInt) {
+      return env.emit<CondBranch>(
+          unary->getOperand(0), instr->false_bb(), instr->true_bb());
     }
   }
   return nullptr;
@@ -446,7 +628,7 @@ Register* simplifyCondBranch(Env& env, const CondBranch* instr) {
 Register* simplifyCondBranchCheckType(
     Env& env,
     const CondBranchCheckType* instr) {
-  Register* value = instr->GetOperand(0);
+  Register* value = instr->getOperand(0);
   Type actual_type = value->type();
   Type expected_type = instr->type();
   if (actual_type <= expected_type) {
@@ -461,7 +643,7 @@ Register* simplifyCondBranchCheckType(
 }
 
 Register* simplifyIsTruthy(Env& env, const IsTruthy* instr) {
-  Type ty = instr->GetOperand(0)->type();
+  Type ty = instr->getOperand(0)->type();
   PyObject* obj = ty.asObject();
   if (obj != nullptr) {
     // Should only consider immutable Objects
@@ -478,25 +660,25 @@ Register* simplifyIsTruthy(Env& env, const IsTruthy* instr) {
     if (kTrustedTypes.contains(Py_TYPE(obj))) {
       int res = PyObject_IsTrue(obj);
       JIT_CHECK(res >= 0, "PyObject_IsTrue failed on trusted type");
-      // Since we no longer use instr->GetOperand(0), we need to make sure that
+      // Since we no longer use instr->getOperand(0), we need to make sure that
       // we don't lose any associated type checks
-      env.emit<UseType>(instr->GetOperand(0), ty);
+      env.emit<UseType>(instr->getOperand(0), ty);
       return env.emit<LoadConst>(Type::fromCBool(res));
     }
   }
   if (ty <= TBool) {
-    Register* left = instr->GetOperand(0);
+    Register* left = instr->getOperand(0);
     env.emit<UseType>(left, TBool);
     Register* right = env.emit<LoadConst>(Type::fromObject(Py_True));
     Register* result =
         env.emit<PrimitiveCompare>(PrimitiveCompareOp::kEqual, left, right);
     return result;
   }
-  if (Register* size = emitGetLengthInt64(env, instr->GetOperand(0))) {
+  if (Register* size = emitGetLengthInt64(env, instr->getOperand(0))) {
     return env.emit<CIntToCBool>(size);
   }
   if (ty <= TLongExact) {
-    Register* left = instr->GetOperand(0);
+    Register* left = instr->getOperand(0);
     env.emit<UseType>(left, ty);
     Register* right = env.emit<LoadConst>(Type::fromObject(_PyLong_GetZero()));
     Register* result =
@@ -506,8 +688,60 @@ Register* simplifyIsTruthy(Env& env, const IsTruthy* instr) {
   return nullptr;
 }
 
+Register* simplifyIsCompactLong(Env& env, const IsCompactLong* instr) {
+  Type ty = instr->getOperand(0)->type();
+  JIT_CHECK(
+      ty <= TLongExact || ty <= TCInt64,
+      "IsCompactLong generated for invalid type '{}'",
+      ty);
+  if (ty.hasObjectSpec()) {
+    env.emit<UseType>(instr->getOperand(0), ty);
+    bool compact =
+        _PyLong_IsCompact(reinterpret_cast<PyLongObject*>(ty.objectSpec()));
+    return env.emit<LoadConst>(Type::fromCBool(compact));
+  }
+
+  // IsCompactLong(box(n)) --> IsCompactLong(n).
+  Register* operand = instr->getOperand(0);
+  if (operand->instr()->isPrimitiveBox()) {
+    auto* box = static_cast<const PrimitiveBox*>(operand->instr());
+    if (box->type() <= TCInt64) {
+      return env.emit<IsCompactLong>(box->value());
+    }
+  }
+
+  return nullptr;
+}
+
+Register* simplifyCompactLongUnbox(Env& env, const CompactLongUnbox* instr) {
+  Type ty = instr->getOperand(0)->type();
+  JIT_CHECK(
+      ty <= TLongExact, "CompactLongUnbox generated for invalid type '{}'", ty);
+  if (ty.hasObjectSpec()) {
+    auto* long_obj = reinterpret_cast<PyLongObject*>(ty.objectSpec());
+    if (!_PyLong_IsCompact(long_obj)) {
+      // Should be unreachable.
+      return nullptr;
+    }
+    env.emit<UseType>(instr->getOperand(0), ty);
+    Py_ssize_t value = _PyLong_CompactValue(long_obj);
+    return env.emit<LoadConst>(Type::fromCInt(value, TCInt64));
+  }
+
+  // CompactLongUnbox(box(n)) --> n.
+  Register* operand = instr->getOperand(0);
+  if (operand->instr()->isPrimitiveBox()) {
+    auto* box = static_cast<const PrimitiveBox*>(operand->instr());
+    if (box->type() <= TCInt64) {
+      return box->value();
+    }
+  }
+
+  return nullptr;
+}
+
 Register* simplifyLoadTupleItem(Env& env, const LoadTupleItem* instr) {
-  Register* src = instr->GetOperand(0);
+  Register* src = instr->getOperand(0);
   Type src_ty = src->type();
   if (!src_ty.hasValueSpec(TTuple)) {
     return nullptr;
@@ -528,12 +762,19 @@ Register* simplifyLoadArrayItem(Env& env, const LoadArrayItem* instr) {
   // We can only do this for tuples because lists and arrays, the other
   // sequence types, are mutable. A more general LoadElimination pass could
   // accomplish that, though.
-  if (src->instr()->IsMakeTuple()) {
+  if (src->instr()->isMakeTuple()) {
     size_t length = static_cast<const MakeTuple*>(src->instr())->nvalues();
     if (idx < length) {
-      env.emit<UseType>(src, TTupleExact);
-      env.emit<UseType>(instr->idx(), instr->idx()->type());
-      return src->instr()->GetOperand(idx);
+      // Find the InitTupleElements that fills this tuple.
+      auto* block = src->instr()->block();
+      for (auto it = block->iterator_to(*src->instr()); it != block->end();
+           ++it) {
+        if (it->isInitTupleElements() && it->getOperand(0) == src) {
+          env.emit<UseType>(src, TTupleExact);
+          env.emit<UseType>(instr->idx(), instr->idx()->type());
+          return it->getOperand(idx + 1);
+        }
+      }
     }
   }
   if (src->type().hasValueSpec(TTupleExact)) {
@@ -549,12 +790,12 @@ Register* simplifyLoadArrayItem(Env& env, const LoadArrayItem* instr) {
 }
 
 Register* simplifyLoadVarObjectSize(Env& env, const LoadVarObjectSize* instr) {
-  Register* obj_reg = instr->GetOperand(0);
+  Register* obj_reg = instr->getOperand(0);
   Type type = obj_reg->type();
   // We can only do this for tuples because lists and arrays, the other
   // sequence types, are mutable. A more general LoadElimination pass could
   // accomplish that, though.
-  if (obj_reg->instr()->IsMakeTuple()) {
+  if (obj_reg->instr()->isMakeTuple()) {
     env.emit<UseType>(obj_reg, type);
     size_t size = static_cast<const MakeTuple*>(obj_reg->instr())->nvalues();
     Type output_type = instr->output()->type();
@@ -573,14 +814,14 @@ Register* simplifyLoadVarObjectSize(Env& env, const LoadVarObjectSize* instr) {
 Register* simplifyLoadModuleMethodCached(
     Env& env,
     const LoadMethod* load_meth) {
-  Register* receiver = load_meth->GetOperand(0);
-  int name_idx = load_meth->name_idx();
+  Register* receiver = load_meth->getOperand(0);
+  int name_idx = load_meth->nameIdx();
   return env.emit<LoadModuleMethodCached>(
       receiver, name_idx, *load_meth->frameState());
 }
 
 Register* simplifyLoadTypeMethodCached(Env& env, const LoadMethod* load_meth) {
-  Register* receiver = load_meth->GetOperand(0);
+  Register* receiver = load_meth->getOperand(0);
   const int cache_id = env.func.env.allocateLoadTypeMethodCache();
   env.emit<UseType>(receiver, TType);
   Register* guard = env.emit<LoadTypeMethodCacheEntryType>(cache_id);
@@ -594,7 +835,7 @@ Register* simplifyLoadTypeMethodCached(Env& env, const LoadMethod* load_meth) {
         return env.emit<LoadTypeMethodCacheEntryValue>(cache_id, receiver);
       },
       [&] { // Slow path
-        int name_idx = load_meth->name_idx();
+        int name_idx = load_meth->nameIdx();
         return env.emit<FillTypeMethodCache>(
             receiver, name_idx, cache_id, *load_meth->frameState());
       });
@@ -604,7 +845,7 @@ Register* simplifyLoadMethod(Env& env, const LoadMethod* load_meth) {
   if (!getConfig().attr_caches) {
     return nullptr;
   }
-  Register* receiver = load_meth->GetOperand(0);
+  Register* receiver = load_meth->getOperand(0);
   Type ty = receiver->type();
   if (receiver->isA(TType)) {
     return simplifyLoadTypeMethodCached(env, load_meth);
@@ -613,10 +854,224 @@ Register* simplifyLoadMethod(Env& env, const LoadMethod* load_meth) {
   if (type == &PyModule_Type || type == &Ci_StrictModule_Type) {
     return simplifyLoadModuleMethodCached(env, load_meth);
   }
-  return env.emit<LoadMethodCached>(
-      load_meth->GetOperand(0),
-      load_meth->name_idx(),
-      *load_meth->frameState());
+  return nullptr;
+}
+
+Register*
+checkConstantListOrTupleIndex(Env& env, Register* container, Register* index) {
+  int overflow;
+  Py_ssize_t index_val =
+      PyLong_AsLongAndOverflow(index->type().objectSpec(), &overflow);
+  if (overflow) {
+    return nullptr;
+  }
+
+  if (container->isA(TTupleExact) && container->instr()->isMakeTuple()) {
+    size_t length =
+        static_cast<const MakeTuple*>(container->instr())->nvalues();
+    if (index_val < 0) {
+      index_val += length;
+    }
+    if (static_cast<size_t>(index_val) < length) {
+      env.emit<UseType>(container, container->type());
+      env.emit<UseType>(index, index->type());
+      return env.emit<LoadConst>(Type::fromCInt(index_val, TCInt64));
+    } else {
+      return nullptr;
+    }
+  }
+
+  env.emit<UseType>(container, container->type());
+  env.emit<UseType>(index, index->type());
+
+  Register* length = emitGetLengthInt64(env, container);
+  if (index_val < 0) {
+    Register* tmp = env.emit<LoadConst>(Type::fromCInt(index_val, TCInt64));
+    index = env.emit<IntBinaryOp>(BinaryOpKind::kAdd, tmp, length);
+  } else {
+    index = env.emit<LoadConst>(Type::fromCInt(index_val, TCInt64));
+  }
+  Register* in_bounds = env.emit<PrimitiveCompare>(
+      PrimitiveCompareOp::kLessThanUnsigned, index, length);
+  env.emit<Guard>(in_bounds);
+  return index;
+}
+
+Register* unboxAndCheckListOrTupleIndex(
+    Env& env,
+    const DeoptBase* instr,
+    Register* lhs,
+    Register* rhs) {
+  // TASK(T93509109): Replace TCInt64 with a less platform-specific
+  // representation of the type, which should be analagous to Py_ssize_t.
+  JIT_CHECK(
+      lhs->isA(TListExact) || lhs->isA(TTupleExact),
+      "lhs must be a TListExact or TTupleExact, not a {}",
+      lhs->type());
+  JIT_CHECK(
+      rhs->isA(TLongExact), "rhs must be a TLongExact, not a {}", rhs->type());
+  // A free-threaded build must not hand out a borrowed reference to a list
+  // slot; another thread can overwrite it at any time.  Exact tuples are
+  // immutable once published, so their items stay valid while the tuple is
+  // alive.
+  JIT_CHECK(
+      !kFreeThreadedBuild || lhs->isA(TTupleExact),
+      "only valid for exact tuples in a free-threaded build, not a {}",
+      lhs->type());
+
+  if (rhs->type().hasObjectSpec()) {
+    return checkConstantListOrTupleIndex(env, lhs, rhs);
+  }
+
+  env.emit<UseType>(lhs, lhs->isA(TListExact) ? TListExact : TTupleExact);
+  env.emit<UseType>(rhs, TLongExact);
+
+  // Unbox
+  Register* is_compact_long = env.emit<IsCompactLong>(rhs);
+  env.emit<Guard>(is_compact_long);
+  Register* unboxed_index = env.emit<CompactLongUnbox>(rhs);
+
+  // Normalize
+  Register* length = emitGetLengthInt64(env, lhs);
+  Register* zero = env.emit<LoadConst>(Type::fromCInt(0, TCInt64));
+  Register* is_negative = env.emit<PrimitiveCompare>(
+      PrimitiveCompareOp::kLessThan, unboxed_index, zero);
+  // Capture the dominating FrameState before emitCond splits the block.
+  // The dominating Snapshot has the operands on the stack, matching what the
+  // interpreter expects when re-executing the bytecode on deopt.
+  const FrameState* dominating_fs = instr->getDominatingFrameState();
+  JIT_CHECK(
+      dominating_fs != nullptr,
+      "no dominating FrameState for index bounds check");
+  Register* normalized_index = env.emitCond(
+      [&](BasicBlock* true_bb, BasicBlock* false_bb) {
+        env.emit<CondBranch>(is_negative, true_bb, false_bb);
+      },
+      [&] {
+        return env.emit<IntBinaryOp>(BinaryOpKind::kAdd, unboxed_index, length);
+      },
+      [&] { return unboxed_index; });
+
+  // Check bounds
+  env.emit<Snapshot>(*dominating_fs);
+  Register* in_bounds = env.emit<PrimitiveCompare>(
+      PrimitiveCompareOp::kLessThanUnsigned, normalized_index, length);
+  env.emit<Guard>(in_bounds);
+
+  return normalized_index;
+}
+
+Register* simplifySubscript(Env& env, const BinaryOp* instr) {
+  BinaryOpKind op = instr->op();
+  Register* lhs = instr->left();
+  Register* rhs = instr->right();
+  JIT_CHECK(
+      op == BinaryOpKind::kSubscript,
+      "simplifySubscript trying to optimize {}",
+      op);
+
+  if (lhs->isA(TDictExact)) {
+    return env.emit<DictSubscr>(lhs, rhs, *instr->frameState());
+  }
+  if (!rhs->isA(TLongExact)) {
+    return nullptr;
+  }
+
+  Type lhs_type = lhs->type();
+  Type rhs_type = rhs->type();
+
+  // Constant tuple subscripted by constant long.
+  if (lhs_type <= TTupleExact && lhs_type.hasObjectSpec() &&
+      rhs_type.hasObjectSpec()) {
+    int overflow;
+    Py_ssize_t index =
+        PyLong_AsLongAndOverflow(rhs_type.objectSpec(), &overflow);
+    if (!overflow) {
+      BorrowedRef<> lhs_obj = lhs_type.objectSpec();
+      if (index >= 0 && index < PyTuple_GET_SIZE(lhs_obj)) {
+        BorrowedRef<> item = PyTuple_GET_ITEM(lhs_obj.get(), index);
+        env.emit<UseType>(lhs, lhs_type);
+        env.emit<UseType>(rhs, rhs_type);
+        return env.emit<LoadConst>(
+            Type::fromObject(env.func.env.addReference(item)));
+      }
+    }
+  }
+
+  // In free-threaded builds we can't use the borrowed LoadArrayItem path for
+  // lists because another thread may overwrite the slot at any time.  With an
+  // exact list, we can still skip PyObject_GetItem's generic dispatch by
+  // emitting ListSubscr, which returns an owned reference via
+  // PyList_GetItemRef.  Exact tuples are immutable once published, so their
+  // items stay alive as long as the tuple does and keep the direct path.
+  if (kFreeThreadedBuild && lhs->isA(TListExact)) {
+    return env.emit<ListSubscr>(lhs, rhs, *instr->frameState());
+  }
+
+  if (lhs->isA(TListExact) || lhs->isA(TTupleExact)) {
+    Register* adjusted_idx =
+        unboxAndCheckListOrTupleIndex(env, instr, lhs, rhs);
+    if (adjusted_idx == nullptr) {
+      return nullptr;
+    }
+    Py_ssize_t offset = offsetof(PyTupleObject, ob_item);
+    Register* array = lhs;
+    // Lists carry a nested array of ob_item whereas tuples are variable-sized
+    // structs.
+    if (lhs->isA(TListExact)) {
+      array = env.emit<LoadField>(
+          lhs, "ob_item", offsetof(PyListObject, ob_item), TCPtr);
+      offset = 0;
+    }
+    return env.emit<LoadArrayItem>(array, adjusted_idx, lhs, offset, TObject);
+  }
+
+  // Unicode subscript.
+  if (lhs_type <= TUnicodeExact && rhs_type <= TLongExact) {
+    // Constant fold.  Every Python C-API call below needs the GIL, both to read
+    // the error indicator (PyErr_Occurred) and to create the new interned
+    // string.
+    if (lhs_type.hasObjectSpec() && rhs_type.hasObjectSpec()) {
+      ThreadedCompileGILHolder lock;
+      Py_ssize_t idx = PyLong_AsSsize_t(rhs_type.objectSpec());
+      if (idx == -1 && PyErr_Occurred()) {
+        PyErr_Clear();
+        return nullptr;
+      }
+      Py_ssize_t n = PyUnicode_GetLength(lhs_type.objectSpec());
+      if (idx < -n || idx >= n) {
+        return nullptr;
+      }
+
+      if (idx < 0) {
+        idx += n;
+      }
+
+      Py_UCS4 c = PyUnicode_ReadChar(lhs_type.objectSpec(), idx);
+      PyObject* substr = PyUnicode_FromKindAndData(PyUnicode_4BYTE_KIND, &c, 1);
+      if (substr == nullptr) {
+        return nullptr;
+      }
+      PyUnicode_InternInPlace(&substr);
+      Ref<> result = Ref<>::steal(substr);
+
+      // Use exact types since we're relying on the object specializations.
+      env.emit<UseType>(lhs, lhs_type);
+      env.emit<UseType>(rhs, rhs_type);
+      return env.emit<LoadConst>(
+          Type::fromObject(env.func.env.addReference(std::move(result))));
+    }
+
+    env.emit<UseType>(lhs, TUnicodeExact);
+    env.emit<UseType>(rhs, TLongExact);
+    Register* unboxed_idx = env.emit<IndexUnbox>(rhs);
+    env.emit<IsNegativeAndErrOccurred>(unboxed_idx, *instr->frameState());
+    Register* adjusted_idx =
+        env.emit<CheckSequenceBounds>(lhs, unboxed_idx, *instr->frameState());
+    return env.emit<UnicodeSubscr>(lhs, adjusted_idx, *instr->frameState());
+  }
+
+  return nullptr;
 }
 
 Register* simplifyBinaryOp(Env& env, const BinaryOp* instr) {
@@ -625,110 +1080,14 @@ Register* simplifyBinaryOp(Env& env, const BinaryOp* instr) {
   Register* rhs = instr->right();
 
   if (op == BinaryOpKind::kSubscript) {
-    if (lhs->isA(TDictExact)) {
-      return env.emit<DictSubscr>(lhs, rhs, *instr->frameState());
-    }
-    if (!rhs->isA(TLongExact)) {
-      return nullptr;
-    }
-    Type lhs_type = lhs->type();
-    Type rhs_type = rhs->type();
-    if (lhs_type <= TTupleExact && lhs_type.hasObjectSpec() &&
-        rhs_type.hasObjectSpec()) {
-      int overflow;
-      Py_ssize_t index =
-          PyLong_AsLongAndOverflow(rhs_type.objectSpec(), &overflow);
-      if (!overflow) {
-        PyObject* lhs_obj = lhs_type.objectSpec();
-        if (index >= 0 && index < PyTuple_GET_SIZE(lhs_obj)) {
-          BorrowedRef<> item = PyTuple_GET_ITEM(lhs_obj, index);
-          env.emit<UseType>(lhs, lhs_type);
-          env.emit<UseType>(rhs, rhs_type);
-          return env.emit<LoadConst>(
-              Type::fromObject(env.func.env.addReference(item)));
-        }
-        // Fallthrough
-      }
-      // Fallthrough
-    }
-// TODO(T255264263). Enable this again. See P2169673256.
-#ifndef Py_GIL_DISABLED
-    if (lhs->isA(TListExact) || lhs->isA(TTupleExact)) {
-      // TASK(T93509109): Replace TCInt64 with a less platform-specific
-      // representation of the type, which should be analagous to Py_ssize_t.
-      env.emit<UseType>(lhs, lhs->isA(TListExact) ? TListExact : TTupleExact);
-      env.emit<UseType>(rhs, TLongExact);
-      Register* right_index = env.emit<IndexUnbox>(rhs);
-      env.emit<IsNegativeAndErrOccurred>(right_index, *instr->frameState());
-      Register* adjusted_idx =
-          env.emit<CheckSequenceBounds>(lhs, right_index, *instr->frameState());
-      Py_ssize_t offset = offsetof(PyTupleObject, ob_item);
-      Register* array = lhs;
-      // Lists carry a nested array of ob_item whereas tuples are variable-sized
-      // structs.
-      if (lhs->isA(TListExact)) {
-        array = env.emit<LoadField>(
-            lhs, "ob_item", offsetof(PyListObject, ob_item), TCPtr);
-        offset = 0;
-      }
-      return env.emit<LoadArrayItem>(array, adjusted_idx, lhs, offset, TObject);
-    }
-#endif
-    if (lhs_type <= TUnicodeExact && rhs_type <= TLongExact) { // Unicode subscr
-      if (lhs_type.hasObjectSpec() && rhs_type.hasObjectSpec()) {
-        // This isn't safe in the multi-threaded compilation on 3.12 because
-        // we don't hold the GIL which is required for
-        // PyUnicode_InternInPlace.
-        RETURN_MULTITHREADED_COMPILE(nullptr);
-
-        // Constant propagation
-        Py_ssize_t idx = PyLong_AsSsize_t(rhs_type.objectSpec());
-        if (idx == -1 && PyErr_Occurred()) {
-          PyErr_Clear();
-          return nullptr;
-        }
-        Py_ssize_t n = PyUnicode_GetLength(lhs_type.objectSpec());
-
-        if (idx < -n || idx >= n) {
-          return nullptr;
-        }
-
-        if (idx < 0) {
-          idx += n;
-        }
-
-        ThreadedCompileSerialize guard;
-        Py_UCS4 c = PyUnicode_ReadChar(lhs_type.objectSpec(), idx);
-        PyObject* substr =
-            PyUnicode_FromKindAndData(PyUnicode_4BYTE_KIND, &c, 1);
-        if (substr == nullptr) {
-          return nullptr;
-        }
-        PyUnicode_InternInPlace(&substr);
-        Ref<> result = Ref<>::steal(substr);
-
-        // Use exact types since we're relying on the object specializations.
-        env.emit<UseType>(lhs, lhs_type);
-        env.emit<UseType>(rhs, rhs_type);
-        return env.emit<LoadConst>(
-            Type::fromObject(env.func.env.addReference(std::move(result))));
-      } else {
-        env.emit<UseType>(lhs, TUnicodeExact);
-        env.emit<UseType>(rhs, TLongExact);
-        Register* unboxed_idx = env.emit<IndexUnbox>(rhs);
-        env.emit<IsNegativeAndErrOccurred>(unboxed_idx, *instr->frameState());
-        Register* adjusted_idx = env.emit<CheckSequenceBounds>(
-            lhs, unboxed_idx, *instr->frameState());
-        return env.emit<UnicodeSubscr>(lhs, adjusted_idx, *instr->frameState());
-      }
-    }
+    return simplifySubscript(env, instr);
   }
 
   if (lhs->isA(TLongExact) && rhs->isA(TLongExact)) {
     // All binary ops on TLong's return mutable so can be freely simplified with
     // no explicit check.
-    if (op == BinaryOpKind::kMatrixMultiply || op == BinaryOpKind::kSubscript) {
-      // These will generate an error at runtime.
+    if (op == BinaryOpKind::kMatrixMultiply) {
+      // This will generate an error at runtime.
       return nullptr;
     }
     env.emit<UseType>(lhs, TLongExact);
@@ -742,6 +1101,105 @@ Register* simplifyBinaryOp(Env& env, const BinaryOp* instr) {
     env.emit<UseType>(lhs, TFloatExact);
     env.emit<UseType>(rhs, TFloatExact);
     return env.emit<FloatBinaryOp>(instr->op(), lhs, rhs, *instr->frameState());
+  }
+
+  // Mixed float/int binary ops where the int is a known constant: convert the
+  // int to a double at compile time and emit an unboxed DoubleBinaryOp.  This
+  // avoids going through CPython's generic binary op dispatch which would do
+  // the int-to-float conversion at runtime.
+  if ((op == BinaryOpKind::kAdd || op == BinaryOpKind::kSubtract ||
+       op == BinaryOpKind::kMultiply || op == BinaryOpKind::kTrueDivide ||
+       op == BinaryOpKind::kPower)) {
+    Register* float_reg = nullptr;
+    Register* int_reg = nullptr;
+    bool int_on_right = false;
+
+    if (lhs->isA(TFloatExact) && rhs->isA(TLongExact) &&
+        rhs->type().hasObjectSpec()) {
+      float_reg = lhs;
+      int_reg = rhs;
+      int_on_right = true;
+    } else if (
+        lhs->isA(TLongExact) && rhs->isA(TFloatExact) &&
+        lhs->type().hasObjectSpec()) {
+      float_reg = rhs;
+      int_reg = lhs;
+      int_on_right = false;
+    }
+
+    if (float_reg != nullptr) {
+      int overflow;
+      long long_val =
+          PyLong_AsLongAndOverflow(int_reg->type().objectSpec(), &overflow);
+      if (!overflow) {
+        auto double_val = static_cast<double>(long_val);
+        env.emit<UseType>(float_reg, TFloatExact);
+        env.emit<UseType>(int_reg, int_reg->type());
+        Register* unbox_float = env.emit<PrimitiveUnbox>(float_reg, TCDouble);
+        Register* const_double =
+            env.emit<LoadConst>(Type::fromCDouble(double_val));
+        Register* unbox_left = int_on_right ? unbox_float : const_double;
+        Register* unbox_right = int_on_right ? const_double : unbox_float;
+        // Need to guard against division by zero.
+        if (op == BinaryOpKind::kTrueDivide) {
+          Register* zero = env.emit<LoadConst>(Type::fromCDouble(0.0));
+          Register* is_nonzero = env.emit<PrimitiveCompare>(
+              PrimitiveCompareOp::kNotEqual, unbox_right, zero);
+          env.emitInstr<Guard>(is_nonzero);
+        }
+        Register* result =
+            env.emit<DoubleBinaryOp>(op, unbox_left, unbox_right);
+        return env.emit<PrimitiveBox>(result, TCDouble, *instr->frameState());
+      }
+    }
+  }
+
+  // Mixed float/int binary ops where the int is NOT a known constant: guard
+  // that the int is compact (fits in a single 30-bit digit, thus losslessly
+  // convertible to double), unbox both to CDouble, and emit DoubleBinaryOp.
+  if ((op == BinaryOpKind::kAdd || op == BinaryOpKind::kSubtract ||
+       op == BinaryOpKind::kMultiply || op == BinaryOpKind::kTrueDivide ||
+       op == BinaryOpKind::kPower)) {
+    Register* float_reg = nullptr;
+    Register* int_reg = nullptr;
+    bool int_on_right = false;
+
+    if (lhs->isA(TFloatExact) && rhs->isA(TLongExact) &&
+        !rhs->type().hasObjectSpec()) {
+      float_reg = lhs;
+      int_reg = rhs;
+      int_on_right = true;
+    } else if (
+        lhs->isA(TLongExact) && rhs->isA(TFloatExact) &&
+        !lhs->type().hasObjectSpec()) {
+      float_reg = rhs;
+      int_reg = lhs;
+      int_on_right = false;
+    }
+
+    if (float_reg != nullptr) {
+      env.emit<UseType>(float_reg, TFloatExact);
+      env.emit<UseType>(int_reg, TLongExact);
+      // Guard that the long is compact (at most one digit, fits in double).
+      Register* is_compact = env.emit<IsCompactLong>(int_reg);
+      env.emitInstr<Guard>(is_compact);
+      // Unbox the compact long to CInt64 and convert to CDouble.
+      Register* unbox_int = env.emit<CompactLongUnbox>(int_reg);
+      Register* int_as_double = env.emit<PrimitiveConvert>(unbox_int, TCDouble);
+      // Unbox the float to CDouble.
+      Register* unbox_float = env.emit<PrimitiveUnbox>(float_reg, TCDouble);
+      Register* unbox_left = int_on_right ? unbox_float : int_as_double;
+      Register* unbox_right = int_on_right ? int_as_double : unbox_float;
+      // Need to guard against division by zero.
+      if (op == BinaryOpKind::kTrueDivide) {
+        Register* zero = env.emit<LoadConst>(Type::fromCDouble(0.0));
+        Register* is_nonzero = env.emit<PrimitiveCompare>(
+            PrimitiveCompareOp::kNotEqual, unbox_right, zero);
+        env.emitInstr<Guard>(is_nonzero);
+      }
+      Register* result = env.emit<DoubleBinaryOp>(op, unbox_left, unbox_right);
+      return env.emit<PrimitiveBox>(result, TCDouble, *instr->frameState());
+    }
   }
 
   if ((lhs->isA(TUnicodeExact) && rhs->isA(TLongExact)) &&
@@ -788,18 +1246,50 @@ Register* simplifyInPlaceOp(Env& env, const InPlaceOp* instr) {
         break;
     }
   }
+
+  // Convert `x += y` into `x = x + y` because floats are immutable, there are
+  // further simplification cases for FloatBinaryOp.
+  if (lhs->isA(TFloatExact) && rhs->isA(TFloatExact)) {
+    std::optional<BinaryOpKind> binop;
+    switch (instr->op()) {
+      case InPlaceOpKind::kAdd:
+        binop = BinaryOpKind::kAdd;
+        break;
+      case InPlaceOpKind::kSubtract:
+        binop = BinaryOpKind::kSubtract;
+        break;
+      case InPlaceOpKind::kMultiply:
+        binop = BinaryOpKind::kMultiply;
+        break;
+      case InPlaceOpKind::kTrueDivide:
+        binop = BinaryOpKind::kTrueDivide;
+        break;
+      case InPlaceOpKind::kFloorDivide:
+        binop = BinaryOpKind::kFloorDivide;
+        break;
+      case InPlaceOpKind::kModulo:
+        binop = BinaryOpKind::kModulo;
+        break;
+      case InPlaceOpKind::kPower:
+        binop = BinaryOpKind::kPower;
+        break;
+      default:
+        break;
+    }
+    if (binop) {
+      env.emit<UseType>(lhs, TFloatExact);
+      env.emit<UseType>(rhs, TFloatExact);
+      return env.emit<FloatBinaryOp>(*binop, lhs, rhs, *instr->frameState());
+    }
+  }
   return nullptr;
 }
 
 Register* simplifyLongBinaryOp(Env& env, const LongBinaryOp* instr) {
-  // This isn't safe in the multi-threaded compilation on 3.12 because
-  // we don't hold the GIL which is required for allocation.
-  RETURN_MULTITHREADED_COMPILE(nullptr);
-
   Type left_type = instr->left()->type();
   Type right_type = instr->right()->type();
   if (left_type.hasObjectSpec() && right_type.hasObjectSpec()) {
-    ThreadedCompileSerialize guard;
+    ThreadedCompileGILHolder lock;
     Ref<> result;
     if (instr->op() == BinaryOpKind::kPower) {
       result = Ref<>::steal(PyLong_Type.tp_as_number->nb_power(
@@ -822,9 +1312,44 @@ Register* simplifyLongBinaryOp(Env& env, const LongBinaryOp* instr) {
 }
 
 Register* simplifyFloatBinaryOp(Env& env, const FloatBinaryOp* instr) {
-  // This isn't safe in the multi-threaded compilation on 3.12 because
-  // we don't hold the GIL which is required for allocation.
-  RETURN_MULTITHREADED_COMPILE(nullptr);
+  BinaryOpKind op = instr->op();
+
+  // Transform add/sub/mul to unboxed double operations.  These never raise
+  // exceptions for any double inputs, guards aren't needed.
+  if (op == BinaryOpKind::kAdd || op == BinaryOpKind::kSubtract ||
+      op == BinaryOpKind::kMultiply) {
+    Register* unbox_left = env.emit<PrimitiveUnbox>(instr->left(), TCDouble);
+    Register* unbox_right = env.emit<PrimitiveUnbox>(instr->right(), TCDouble);
+    Register* result = env.emit<DoubleBinaryOp>(op, unbox_left, unbox_right);
+    return env.emit<PrimitiveBox>(result, TCDouble, *instr->frameState());
+  }
+
+  // True-divide is similar to add/sub/mul, but needs to guard against division
+  // by zero as that would raise a ZeroDivisionError in the interpreter.
+  if (op == BinaryOpKind::kTrueDivide) {
+    Register* unbox_left = env.emit<PrimitiveUnbox>(instr->left(), TCDouble);
+    Register* unbox_right = env.emit<PrimitiveUnbox>(instr->right(), TCDouble);
+    Register* zero = env.emit<LoadConst>(Type::fromCDouble(0.0));
+    Register* is_nonzero = env.emit<PrimitiveCompare>(
+        PrimitiveCompareOp::kNotEqual, unbox_right, zero);
+    env.emitInstr<Guard>(is_nonzero);
+    Register* result = env.emit<DoubleBinaryOp>(op, unbox_left, unbox_right);
+    return env.emit<PrimitiveBox>(result, TCDouble, *instr->frameState());
+  }
+
+  // `x ** 0.5`, convert to the unboxed path.  The LIR generator can lower this
+  // into a call to sqrt().
+  if (op == BinaryOpKind::kPower) {
+    Type right_type = instr->right()->type();
+    if (right_type.hasObjectSpec() && PyFloat_Check(right_type.objectSpec()) &&
+        PyFloat_AS_DOUBLE(right_type.objectSpec()) == 0.5) {
+      Register* unbox_left = env.emit<PrimitiveUnbox>(instr->left(), TCDouble);
+      Register* half = env.emit<LoadConst>(Type::fromCDouble(0.5));
+      Register* result =
+          env.emit<DoubleBinaryOp>(BinaryOpKind::kPower, unbox_left, half);
+      return env.emit<PrimitiveBox>(result, TCDouble, *instr->frameState());
+    }
+  }
 
   Type left_type = instr->left()->type();
   Type right_type = instr->right()->type();
@@ -833,7 +1358,7 @@ Register* simplifyFloatBinaryOp(Env& env, const FloatBinaryOp* instr) {
     return nullptr;
   }
 
-  ThreadedCompileSerialize guard;
+  ThreadedCompileGILHolder lock;
   Ref<> result;
 
   if (instr->op() == BinaryOpKind::kPower) {
@@ -860,26 +1385,62 @@ Register* simplifyUnaryOp(Env& env, const UnaryOp* instr) {
   Register* operand = instr->operand();
 
   if (instr->op() == UnaryOpKind::kNot && operand->isA(TBool)) {
+    if (operand->type().hasObjectSpec()) {
+      env.emit<UseType>(operand, operand->type());
+      return env.emit<LoadConst>(Type::fromObject(
+          Py_IsTrue(operand->type().objectSpec()) ? Py_False : Py_True));
+    }
+
     env.emit<UseType>(operand, TBool);
-    Register* unboxed = env.emit<PrimitiveUnbox>(operand, TCBool);
-    Register* negated =
-        env.emit<PrimitiveUnaryOp>(PrimitiveUnaryOpKind::kNotInt, unboxed);
-    return env.emit<PrimitiveBoxBool>(negated);
+    return env.emit<UnaryNot>(operand);
+  }
+
+  return nullptr;
+}
+
+Register* simplifyIntBinaryOp(Env& env, const IntBinaryOp* instr) {
+  Register* lhs = instr->left();
+  Register* rhs = instr->right();
+  BinaryOpKind op = instr->op();
+
+  // CBool & Const.
+  if (op == BinaryOpKind::kAnd && lhs->isA(TCBool) && rhs->isA(TCBool)) {
+    if (lhs->type().hasIntSpec()) {
+      std::swap(lhs, rhs);
+    }
+    if (rhs->type().hasIntSpec()) {
+      env.emit<UseType>(rhs, rhs->type());
+      return rhs->type().intSpec() ? lhs : rhs;
+    }
+  }
+
+  // CBool | Const.
+  if (op == BinaryOpKind::kOr && lhs->isA(TCBool) && rhs->isA(TCBool)) {
+    if (lhs->type().hasIntSpec()) {
+      std::swap(lhs, rhs);
+    }
+    if (rhs->type().hasIntSpec()) {
+      env.emit<UseType>(rhs, rhs->type());
+      return rhs->type().intSpec() ? rhs : lhs;
+    }
   }
 
   return nullptr;
 }
 
 Register* simplifyPrimitiveCompare(Env& env, const PrimitiveCompare* instr) {
-  Register* left = instr->GetOperand(0);
-  Register* right = instr->GetOperand(1);
-  if (instr->op() == PrimitiveCompareOp::kEqual ||
-      instr->op() == PrimitiveCompareOp::kNotEqual) {
+  Register* left = instr->getOperand(0);
+  Register* right = instr->getOperand(1);
+  PrimitiveCompareOp op = instr->op();
+  bool commutative =
+      op == PrimitiveCompareOp::kEqual || op == PrimitiveCompareOp::kNotEqual;
+
+  if (commutative) {
     auto do_cbool = [&](bool value) {
       env.emit<UseType>(left, left->type());
       env.emit<UseType>(right, right->type());
       return env.emit<LoadConst>(Type::fromCBool(
-          instr->op() == PrimitiveCompareOp::kNotEqual ? !value : value));
+          op == PrimitiveCompareOp::kNotEqual ? !value : value));
     };
     if (!left->type().couldBe(right->type())) {
       return do_cbool(false);
@@ -891,17 +1452,68 @@ Register* simplifyPrimitiveCompare(Env& env, const PrimitiveCompare* instr) {
       return do_cbool(left->type().objectSpec() == right->type().objectSpec());
     }
   }
-  // box(b) == True --> b
-  if (instr->op() == PrimitiveCompareOp::kEqual &&
-      left->instr()->IsPrimitiveBoxBool() &&
-      right->type().asObject() == Py_True) {
-    return left->instr()->GetOperand(0);
+
+  // Canonicalize boolean constants to the right for == and !=.
+  if (commutative && left->isA(TBool) && right->isA(TBool) &&
+      left->type().hasObjectSpec() && !right->type().hasObjectSpec()) {
+    return env.emit<PrimitiveCompare>(op, right, left);
   }
+  if (commutative && left->isA(TCBool) && right->isA(TCBool) &&
+      left->type().hasIntSpec() && !right->type().hasIntSpec()) {
+    return env.emit<PrimitiveCompare>(op, right, left);
+  }
+
+  // box(b) == True --> b
+  if (op == PrimitiveCompareOp::kEqual && left->instr()->isPrimitiveBoxBool() &&
+      right->type().asObject() == Py_True) {
+    return left->instr()->getOperand(0);
+  }
+  // box(b) == False --> !b
+  if (op == PrimitiveCompareOp::kEqual && left->instr()->isPrimitiveBoxBool() &&
+      right->type().asObject() == Py_False) {
+    return env.emit<PrimitiveUnaryOp>(
+        PrimitiveUnaryOpKind::kNotInt, left->instr()->getOperand(0));
+  }
+  // box(b1) CMP box(b2) --> b1 CMP b2
+  if (left->instr()->isPrimitiveBoxBool() &&
+      right->instr()->isPrimitiveBoxBool()) {
+    return env.emit<PrimitiveCompare>(
+        op, left->instr()->getOperand(0), right->instr()->getOperand(0));
+  }
+
   return nullptr;
 }
 
+Register* simplifyPrimitiveBox(Env& env, const PrimitiveBox* instr) {
+  Register* input = instr->getOperand(0);
+  Type ty = instr->type();
+
+  if (!ty.hasIntSpec() && !ty.hasDoubleSpec()) {
+    return nullptr;
+  }
+
+  ThreadedCompileGILHolder lock;
+  Ref<> boxed;
+  if (ty.hasIntSpec()) {
+    boxed = Ref<>::steal(
+        ty <= TCSigned ? PyLong_FromSsize_t(ty.intSpec())
+                       : PyLong_FromSize_t(static_cast<size_t>(ty.intSpec())));
+  } else {
+    boxed = Ref<>::steal(PyFloat_FromDouble(ty.doubleSpec()));
+  }
+
+  if (boxed == nullptr) {
+    PyErr_Clear();
+    return nullptr;
+  }
+
+  env.emit<UseType>(input, ty);
+  return env.emit<LoadConst>(
+      Type::fromObject(env.func.env.addReference(std::move(boxed))));
+}
+
 Register* simplifyPrimitiveBoxBool(Env& env, const PrimitiveBoxBool* instr) {
-  Register* input = instr->GetOperand(0);
+  Register* input = instr->getOperand(0);
   if (input->type().hasIntSpec()) {
     env.emit<UseType>(input, input->type());
     auto bool_obj = input->type().intSpec() ? Py_True : Py_False;
@@ -911,14 +1523,14 @@ Register* simplifyPrimitiveBoxBool(Env& env, const PrimitiveBoxBool* instr) {
 }
 
 Register* simplifyUnbox(Env& env, const Instr* instr) {
-  Register* input_value = instr->GetOperand(0);
+  Register* input_value = instr->getOperand(0);
   Type output_type = instr->output()->type();
-  if (input_value->instr()->IsPrimitiveBox()) {
+  if (input_value->instr()->isPrimitiveBox()) {
     // Simplify unbox(box(x)) -> x
     const auto box = static_cast<PrimitiveBox*>(input_value->instr());
     if (box->type() == output_type) {
       // We can't optimize away the potential overflow in unboxing.
-      return box->GetOperand(0);
+      return box->getOperand(0);
     }
   }
   // Ensure that we are dealing with either a integer or a double.
@@ -938,12 +1550,12 @@ Register* simplifyUnbox(Env& env, const Instr* instr) {
       return nullptr;
     }
     if (output_type <= TCSigned) {
-      if (!Type::CIntFitsType(number, output_type)) {
+      if (!Type::cIntFitsType(number, output_type)) {
         return nullptr;
       }
       return env.emit<LoadConst>(Type::fromCInt(number, output_type));
     } else {
-      if (!Type::CUIntFitsType(number, output_type)) {
+      if (!Type::cuIntFitsType(number, output_type)) {
         return nullptr;
       }
       return env.emit<LoadConst>(Type::fromCUInt(number, output_type));
@@ -965,13 +1577,12 @@ Register* simplifyLoadAttrSplitDict(
     const LoadAttr* load_attr,
     BorrowedRef<PyTypeObject> type,
     BorrowedRef<PyUnicodeObject> name) {
-#ifdef Py_GIL_DISABLED
-  // See T255055907.
-  return nullptr;
-#endif
+  if constexpr (kFreeThreadedBuild) {
+    // See T255055907.
+    return nullptr;
+  }
 
-  if (!PyType_HasFeature(
-          type, Py_TPFLAGS_MANAGED_DICT | Py_TPFLAGS_INLINE_VALUES)) {
+  if (!PyType_HasFeature(type, Py_TPFLAGS_INLINE_VALUES)) {
     return nullptr;
   }
   BorrowedRef<PyHeapTypeObject> heap_type{type};
@@ -986,9 +1597,10 @@ Register* simplifyLoadAttrSplitDict(
   // T244151823: For now we deopt on the type keys changing and in that case,
   // de-opt the whole function. Ideally we'd just skip to the slow-path in this
   // case.
-  Register* receiver = load_attr->GetOperand(0);
+  Register* receiver = load_attr->getOperand(0);
   auto patchpoint = env.emitInstr<DeoptPatchpoint>(
       env.func.allocateCodePatcher<SplitDictDeoptPatcher>(type, name, keys));
+  env.func.env.addReference(name);
   patchpoint->setGuiltyReg(receiver);
   patchpoint->setDescr("SplitDictDeoptPatcher");
   env.emit<UseType>(receiver, receiver->type());
@@ -1018,7 +1630,7 @@ Register* simplifyLoadAttrSplitDict(
       [&] { // Not valid - slow-path, call getattr.
         return env.emit<LoadAttr>(
             receiver,
-            load_attr->name_idx(),
+            load_attr->nameIdx(),
             *load_attr->frameState(),
             /* already_optimized= */ true);
       });
@@ -1036,17 +1648,9 @@ Register* simplifyLoadAttrSplitDict(
     const LoadAttr* load_attr,
     BorrowedRef<PyTypeObject> type,
     BorrowedRef<PyUnicodeObject> name) {
-
-#if PY_VERSION_HEX >= 0x030C0000
   if (!PyType_HasFeature(type, Py_TPFLAGS_MANAGED_DICT)) {
     return nullptr;
   }
-#else
-  if (!PyType_HasFeature(type, Py_TPFLAGS_HEAPTYPE) ||
-      type->tp_dictoffset < 0) {
-    return nullptr;
-  }
-#endif
   BorrowedRef<PyHeapTypeObject> ht(type);
   if (ht->ht_cached_keys == nullptr) {
     return nullptr;
@@ -1057,21 +1661,17 @@ Register* simplifyLoadAttrSplitDict(
     return nullptr;
   }
 
-  Register* receiver = load_attr->GetOperand(0);
+  Register* receiver = load_attr->getOperand(0);
   auto patchpoint = env.emitInstr<DeoptPatchpoint>(
       env.func.allocateCodePatcher<SplitDictDeoptPatcher>(type, name, keys));
+  env.func.env.addReference(name);
   patchpoint->setGuiltyReg(receiver);
   patchpoint->setDescr("SplitDictDeoptPatcher");
   env.emit<UseType>(receiver, receiver->type());
 
-#if PY_VERSION_HEX >= 0x030C0000
   // PyDictOrValues is stored at -3 per _PyObject_DictOrValuesPointer
   Register* obj_dict = env.emit<LoadField>(
       receiver, "__dict__", -3 * sizeof(PyObject*), TOptDict);
-#else
-  Register* obj_dict =
-      env.emit<LoadField>(receiver, "__dict__", type->tp_dictoffset, TOptDict);
-#endif
   // We pass the attribute's name to this CheckField (not "__dict__") because
   // ultimately it means that the attribute we're trying to load is missing,
   // and the AttributeError to be raised should contain the attribute's name.
@@ -1079,7 +1679,6 @@ Register* simplifyLoadAttrSplitDict(
       env.emit<CheckField>(obj_dict, name, *load_attr->frameState());
   static_cast<CheckField*>(checked_dict->instr())->setGuiltyReg(receiver);
 
-#if PY_VERSION_HEX >= 0x030C0000
   Register* one = env.emit<LoadConst>(Type::fromCUInt(1, TCUInt64));
   Register* dict_ptr = env.emit<BitCast>(checked_dict, TCUInt64);
   Register* is_values =
@@ -1091,17 +1690,6 @@ Register* simplifyLoadAttrSplitDict(
   Register* values_obj = env.emit<BitCast>(values, TOptObject);
   Register* attr = env.emit<LoadField>(
       values_obj, "attr", attr_idx * sizeof(PyObject*), TOptObject);
-#else
-  Register* dict_keys = env.emit<LoadField>(
-      checked_dict, "ma_keys", offsetof(PyDictObject, ma_keys), TCPtr);
-  Register* expected_keys = env.emit<LoadConst>(Type::fromCPtr(keys));
-  Register* equal = env.emit<PrimitiveCompare>(
-      PrimitiveCompareOp::kEqual, dict_keys, expected_keys);
-  auto guard = env.emitInstr<Guard>(equal);
-  guard->setGuiltyReg(receiver);
-  guard->setDescr("ht_cached_keys comparison");
-  Register* attr = env.emit<LoadSplitDictItem>(checked_dict, attr_idx);
-#endif
 
   Register* checked_attr =
       env.emit<CheckField>(attr, name, *load_attr->frameState());
@@ -1136,6 +1724,8 @@ void emitTypeAttrDeoptPatcher(
   auto patchpoint = env.emitInstr<DeoptPatchpoint>(
       env.func.allocateCodePatcher<TypeAttrDeoptPatcher>(
           info.py_type, info.attr_name, info.descr));
+  env.func.env.addReference(info.attr_name);
+  env.func.env.addReference(info.descr);
   patchpoint->setGuiltyReg(info.receiver);
   patchpoint->setDescr(description);
 }
@@ -1200,9 +1790,9 @@ Register* simplifyLoadAttrProperty(Env& env, const DescrInfo& info) {
   env.emit<UseType>(info.receiver, info.type);
   Register* getter_obj = env.emit<LoadConst>(Type::fromObject(getter));
   auto call = env.emitRawInstr<VectorCall>(
-      2, env.func.env.AllocateRegister(), CallFlags::None, *info.frame_state);
-  call->SetOperand(0, getter_obj);
-  call->SetOperand(1, info.receiver);
+      2, env.func.env.allocateRegister(), CallFlags::None, *info.frame_state);
+  call->setOperand(0, getter_obj);
+  call->setOperand(1, info.receiver);
   return call->output();
 }
 
@@ -1219,8 +1809,15 @@ Register* simplifyLoadAttrGenericDescriptor(Env& env, const DescrInfo& info) {
     // We unfortunately have to use a generic TypeDeoptPatcher here that
     // patches on any changes to the type, since type_setattro() calls
     // PyType_Modified() before updating tp_descr_{get,set}.
-    auto patchpoint = env.emitInstr<DeoptPatchpoint>(
-        env.func.allocateCodePatcher<TypeDeoptPatcher>(descr_type));
+    auto patcher = env.func.allocateCodePatcher<TypeDeoptPatcher>(descr_type);
+    // The slot values cannot be re-derived from the patcher, so capture them
+    // for re-validation: a threaded compile installs its watch after the
+    // GIL was released, and a change in between would otherwise go unnoticed.
+    env.func.env.setWatchValidator(patcher, [descr_type, descr_get, descr_set] {
+      return descr_type->tp_descr_get == descr_get &&
+          descr_type->tp_descr_set == descr_set;
+    });
+    auto patchpoint = env.emitInstr<DeoptPatchpoint>(patcher);
     patchpoint->setGuiltyReg(info.receiver);
     patchpoint->setDescr("tp_descr_get/tp_descr_set");
   }
@@ -1229,12 +1826,12 @@ Register* simplifyLoadAttrGenericDescriptor(Env& env, const DescrInfo& info) {
   Register* type_reg = env.emit<LoadConst>(Type::fromObject(info.py_type));
   auto call = env.emitRawInstr<CallStatic>(
       3,
-      env.func.env.AllocateRegister(),
+      env.func.env.allocateRegister(),
       reinterpret_cast<void*>(descr_get),
       TOptObject);
-  call->SetOperand(0, descr_reg);
-  call->SetOperand(1, info.receiver);
-  call->SetOperand(2, type_reg);
+  call->setOperand(0, descr_reg);
+  call->setOperand(1, info.receiver);
+  call->setOperand(2, type_reg);
   return env.emit<CheckExc>(call->output(), *info.frame_state);
 }
 
@@ -1243,7 +1840,7 @@ Register* simplifyLoadAttrGenericDescriptor(Env& env, const DescrInfo& info) {
 Register* simplifyLoadAttrInstanceReceiver(
     Env& env,
     const LoadAttr* load_attr) {
-  Register* receiver = load_attr->GetOperand(0);
+  Register* receiver = load_attr->getOperand(0);
   Type type = receiver->type();
   BorrowedRef<PyTypeObject> py_type{type.runtimePyType()};
 
@@ -1252,13 +1849,7 @@ Register* simplifyLoadAttrInstanceReceiver(
       py_type->tp_getattro != PyObject_GenericGetAttr) {
     return nullptr;
   }
-  if (getThreadedCompileContext().compileRunning()) {
-    // Calling ensureVersionTag() in 3.12+ doesn't work during multi-threaded
-    // compile as it wants to access tstate.
-    if (!Ci_Type_HasValidVersionTag(py_type)) {
-      return nullptr;
-    }
-  } else if (!ensureVersionTag(py_type)) {
+  if (!ensureVersionTag(py_type)) {
     return nullptr;
   }
 
@@ -1288,7 +1879,7 @@ Register* simplifyLoadAttrInstanceReceiver(
 }
 
 Register* simplifyLoadAttrTypeReceiver(Env& env, const LoadAttr* load_attr) {
-  Register* receiver = load_attr->GetOperand(0);
+  Register* receiver = load_attr->getOperand(0);
   if (!receiver->isA(TType)) {
     return nullptr;
   }
@@ -1306,10 +1897,131 @@ Register* simplifyLoadAttrTypeReceiver(Env& env, const LoadAttr* load_attr) {
         return env.emit<LoadTypeAttrCacheEntryValue>(cache_id);
       },
       [&] { // Slow path
-        int name_idx = load_attr->name_idx();
+        int name_idx = load_attr->nameIdx();
         return env.emit<FillTypeAttrCache>(
             receiver, name_idx, cache_id, *load_attr->frameState());
       });
+}
+
+// Resolve a module attribute at compile time, mirroring the safety checks in
+// LoadModuleAttrCache::lookup(): the module must use the stock attribute lookup
+// and nothing on its type may shadow the name. Returns nullptr if the attribute
+// can't be safely resolved. A GuardIs on the result keeps this correct even if
+// these checks are imprecise (the worst case is a deopt, never a wrong result).
+BorrowedRef<> loadModuleAttrSafe(
+    BorrowedRef<> mod,
+    BorrowedRef<PyUnicodeObject> name) {
+  BorrowedRef<PyTypeObject> tp{Py_TYPE(mod)};
+  JIT_DCHECK(
+      tp->tp_getattro == PyModule_Type.tp_getattro ||
+          tp->tp_getattro == Ci_StrictModule_Type.tp_getattro,
+      "should be module");
+
+  if constexpr (kFreeThreadedBuild) {
+    // In free-threaded builds, we can't cache module attributes safely, so we
+    // skip this optimization.
+    return nullptr;
+  }
+
+  if (typeLookupSafe(tp, name) != nullptr) {
+    return nullptr;
+  }
+
+  BorrowedRef<PyDictObject> dict{Ci_MaybeStrictModule_Dict(mod)};
+  if (dict == nullptr || !hasOnlyUnicodeKeys(dict)) {
+    return nullptr;
+  }
+
+  BorrowedRef<> value;
+#ifdef META_PYTHON
+// Lazy import support
+#if PY_VERSION_HEX >= 0x030E0000
+#if PY_VERSION_HEX < 0x030F0000
+  ThreadedCompileGILHolder lock;
+  PyObject* tmp;
+  if (_PyDict_GetItemRefKeepLazy(dict, name, &tmp) < 0) {
+    PyErr_Clear();
+    return nullptr;
+  }
+  value = tmp;
+  // rely on dict keeping it alive
+  Py_XDECREF(tmp);
+#else
+  value = PyDict_GetItemWithError(dict, name);
+#endif
+#else
+  value = _PyDict_GetItemKeepLazy(dict, name);
+#endif
+#else
+  // No lazy imports
+  value = PyDict_GetItemWithError(dict, name);
+#endif
+  JIT_DCHECK(
+      !_PyErr_Occurred(ThreadedCompileContext::tstate()),
+      "should have no errors on lookup, it's not multi-thread compile safe");
+
+  return value;
+}
+
+// Return the module object that the given register statically refers to, or
+// nullptr if it doesn't refer to a statically-known module. A module chain like
+// `pkg.submod.attr` resolves because simplifyLoadAttr pins each intermediate
+// module with a GuardIs whose output carries the module's object
+// specialization, so the next level's receiver is already statically known.
+BorrowedRef<> staticModuleForReceiver(Register* reg) {
+  // Trace through passthrough copies (e.g. the transient Assign the simplifier
+  // inserts when it rewrites an instruction) to reach the GuardIs that carries
+  // the object specialization.
+  Type ty = modelReg(reg)->type();
+  if (ty.hasObjectSpec()) {
+    BorrowedRef<> obj{ty.objectSpec()};
+    if (PyModule_CheckExact(obj) || Ci_StrictModule_CheckExact(obj)) {
+      return obj;
+    }
+  }
+  return nullptr;
+}
+
+// Given a LoadModuleAttrCached (cached) that reads `load_attr`'s attribute from
+// the statically-known module `mod`, resolve the attribute at compile time and,
+// if it is itself a module or a type, pin its identity with a GuardIs. Returns
+// the pinned register, or nullptr if nothing was pinned (leaving `cached`
+// as-is).
+//
+// Pinning modules lets a chain like `pkg.submod.attr` recognize each level as a
+// module; pinning types exposes the concrete type to type-based optimizations.
+// Other values (functions, constants, ...) are left to the runtime cache. The
+// GuardIs deopts if the attribute is later rebound to a different object, and
+// the runtime LoadModuleAttrCached is retained for correctness.
+Register* pinModuleAttr(
+    Env& env,
+    BorrowedRef<> mod,
+    const LoadAttr* load_attr,
+    Register* cached) {
+  if (mod == nullptr) {
+    return nullptr;
+  }
+  BorrowedRef<PyUnicodeObject> name{load_attr->name()};
+  JIT_DCHECK(PyUnicode_CheckExact(name), "should only have unicode names");
+
+  BorrowedRef<> value = loadModuleAttrSafe(mod, name);
+  if (value == nullptr ||
+      !(PyModule_Check(value) || Ci_StrictModule_Check(value) ||
+        PyType_Check(value))) {
+    return nullptr;
+  }
+
+  // Unlike LoadGlobalCached, LoadModuleAttrCached is not replayable (its slow
+  // path can run arbitrary code), so it resets the guard-binding pass's notion
+  // of the dominating FrameState. Emit a Snapshot with the load's FrameState so
+  // the following GuardIs deopts back to re-executing this load. The load's
+  // FrameState was captured after the receiver was popped off the operand
+  // stack, so push it back on: re-executing LOAD_ATTR reads the receiver from
+  // the top of the interpreter's stack.
+  FrameState frame{*load_attr->frameState()};
+  frame.stack.push(load_attr->getOperand(0));
+  env.emit<Snapshot>(frame);
+  return env.emit<GuardIs>(env.func.env.addReference(value), cached);
 }
 
 Register* simplifyLoadAttr(Env& env, const LoadAttr* load_attr) {
@@ -1321,24 +2033,27 @@ Register* simplifyLoadAttr(Env& env, const LoadAttr* load_attr) {
     return reg;
   }
   if (getConfig().attr_caches) {
-    Register* receiver = load_attr->GetOperand(0);
+    Register* receiver = load_attr->getOperand(0);
     Type ty = receiver->type();
     BorrowedRef<PyTypeObject> type{ty.runtimePyType()};
 
     if (type == &PyModule_Type || type == &Ci_StrictModule_Type) {
-      return env.emit<LoadModuleAttrCached>(
-          load_attr->GetOperand(0),
-          load_attr->name_idx(),
+      Register* cached = env.emit<LoadModuleAttrCached>(
+          load_attr->getOperand(0),
+          load_attr->nameIdx(),
           *load_attr->frameState());
+      Register* reg;
+      BorrowedRef<> mod = staticModuleForReceiver(receiver);
+      if (mod != nullptr &&
+          (reg = pinModuleAttr(env, mod, load_attr, cached))) {
+        return reg;
+      }
+      return cached;
     }
 
     if (Register* reg = simplifyLoadAttrTypeReceiver(env, load_attr)) {
       return reg;
     }
-    return env.emit<LoadAttrCached>(
-        load_attr->GetOperand(0),
-        load_attr->name_idx(),
-        *load_attr->frameState());
   }
   return nullptr;
 }
@@ -1346,7 +2061,7 @@ Register* simplifyLoadAttr(Env& env, const LoadAttr* load_attr) {
 // If we're loading ob_fval from a known float into a double, this can be
 // simplified into a LoadConst.
 Register* simplifyLoadField(Env& env, const LoadField* instr) {
-  Register* loadee = instr->GetOperand(0);
+  Register* loadee = instr->getOperand(0);
   Type load_output_type = instr->output()->type();
   // Ensure that we are dealing with either a integer or a double.
   Type loadee_type = loadee->type();
@@ -1366,7 +2081,7 @@ Register* simplifyLoadField(Env& env, const LoadField* instr) {
 Register* simplifyIsNegativeAndErrOccurred(
     Env& env,
     const IsNegativeAndErrOccurred* instr) {
-  if (!instr->GetOperand(0)->instr()->IsLoadConst()) {
+  if (!instr->getOperand(0)->instr()->isLoadConst()) {
     return nullptr;
   }
   // Other optimizations might reduce the strength of global loads, etc. to load
@@ -1377,17 +2092,6 @@ Register* simplifyIsNegativeAndErrOccurred(
   // still have access to the result. Otherwise, DCE will take care of this.
   Type output_type = instr->output()->type();
   return env.emit<LoadConst>(Type::fromCInt(0, output_type));
-}
-
-Register* simplifyStoreAttr(Env& env, const StoreAttr* store_attr) {
-  if (getConfig().attr_caches) {
-    return env.emit<StoreAttrCached>(
-        store_attr->GetOperand(0),
-        store_attr->GetOperand(1),
-        store_attr->name_idx(),
-        *store_attr->frameState());
-  }
-  return nullptr;
 }
 
 static bool isBuiltin(PyMethodDef* meth, const char* name) {
@@ -1459,7 +2163,6 @@ static Register* resolveArgs(
       size_t num_non_defaults = co_argcount - num_defaults;
       size_t default_idx = i - num_non_defaults;
 
-      ThreadedCompileSerialize guard;
       auto def = PyTuple_GET_ITEM(defaults, default_idx);
       JIT_CHECK(def != nullptr, "expected non-null default");
       auto type = Type::fromObject(env.func.env.addReference(def));
@@ -1469,7 +2172,7 @@ static Register* resolveArgs(
   }
 
   Register* defaults_obj = env.emit<LoadField>(
-      instr->GetOperand(0),
+      instr->getOperand(0),
       "func_defaults",
       offsetof(PyFunctionObject, func_defaults),
       TTuple);
@@ -1478,18 +2181,18 @@ static Register* resolveArgs(
   // and inserts it to the current block. Returns the output of vectorcall
   auto new_instr = env.emitRawInstr<VectorCall>(
       resolved_args.size() + 1,
-      env.func.env.AllocateRegister(), // output register
+      env.func.env.allocateRegister(), // output register
       CallFlags::None,
       *instr->frameState());
   Register* result = new_instr->output();
 
   // populate the call arguments of the newly created VectorCall
   // the first arg is the function to call
-  new_instr->SetOperand(0, instr->func());
+  new_instr->setOperand(0, instr->func());
   for (size_t i = 0; i < resolved_args.size(); i++) {
-    new_instr->SetOperand(i + 1, resolved_args.at(i));
+    new_instr->setOperand(i + 1, resolved_args.at(i));
   }
-  result->set_type(outputType(*new_instr));
+  result->setType(outputType(*new_instr));
   return result;
 }
 
@@ -1499,26 +2202,26 @@ Register* simplifyCallMethod(Env& env, const CallMethod* instr) {
   if constexpr (PY_VERSION_HEX >= 0x030E0000) {
     if (instr->self()->type() <= TNullptr) {
       auto call = env.emitRawInstr<VectorCall>(
-          instr->NumOperands() - 1,
-          env.func.env.AllocateRegister(),
+          instr->numOperands() - 1,
+          env.func.env.allocateRegister(),
           instr->flags(),
           *instr->frameState());
-      call->SetOperand(0, instr->GetOperand(0));
-      for (size_t i = 2; i < instr->NumOperands(); ++i) {
-        call->SetOperand(i - 1, instr->GetOperand(i));
+      call->setOperand(0, instr->getOperand(0));
+      for (size_t i = 2; i < instr->numOperands(); ++i) {
+        call->setOperand(i - 1, instr->getOperand(i));
       }
-      call->output()->set_type(instr->output()->type());
+      call->output()->setType(instr->output()->type());
       return call->output();
     }
   } else {
     if (instr->func()->type() <= TNullptr) {
       auto call = env.emitRawInstr<VectorCall>(
-          instr->NumOperands() - 1,
-          env.func.env.AllocateRegister(),
+          instr->numOperands() - 1,
+          env.func.env.allocateRegister(),
           instr->flags(),
           *instr->frameState());
-      for (size_t i = 1; i < instr->NumOperands(); ++i) {
-        call->SetOperand(i - 1, instr->GetOperand(i));
+      for (size_t i = 1; i < instr->numOperands(); ++i) {
+        call->setOperand(i - 1, instr->getOperand(i));
       }
       return call->output();
     }
@@ -1530,10 +2233,6 @@ Register* simplifyCallMethod(Env& env, const CallMethod* instr) {
 // Translate VectorCall to CallStatic whenever possible, saving stack
 // manipulation costs (pushing args to stack).
 static Register* trySpecializeCCall(Env& env, const VectorCall* instr) {
-  if (instr->flags() & CallFlags::Awaited) {
-    // We can't pass the awaited flag outside of vectorcall.
-    return nullptr;
-  }
   Register* callable = instr->func();
   Type callable_type = callable->type();
   PyObject* callable_obj = callable_type.asObject();
@@ -1590,7 +2289,6 @@ std::optional<std::pair<Instr*, std::vector<Instr*>>> isVectorCallIfIsInstance(
     const VectorCall* instr) {
   std::vector<Instr*> snapshots;
 
-  LivenessAnalysis::LastUses last_uses;
   Register* output = nullptr;
 
   enum state { kInitial, kCondBranch, kIsTruthy, kFailed };
@@ -1602,15 +2300,12 @@ std::optional<std::pair<Instr*, std::vector<Instr*>>> isVectorCallIfIsInstance(
        ++current) {
     switch (state) {
       case kInitial: {
-        if (!current->IsCondBranch()) {
+        if (!current->isCondBranch()) {
           state = kFailed;
           break;
         }
 
-        LivenessAnalysis analysis{env.func};
-        analysis.Run();
-
-        last_uses = analysis.GetLastUses();
+        const auto& last_uses = env.lastUses();
         auto lu_at_condbranch = last_uses.find(&*current);
         if (lu_at_condbranch == last_uses.end() ||
             lu_at_condbranch->second.size() != 1) {
@@ -1621,12 +2316,13 @@ std::optional<std::pair<Instr*, std::vector<Instr*>>> isVectorCallIfIsInstance(
         }
 
         state = kCondBranch;
-        output = current->GetOperand(0);
+        output = current->getOperand(0);
         break;
       }
       case kCondBranch: {
-        if (current->IsIsTruthy() && output == current->output() &&
-            current->GetOperand(0) == instr->output()) {
+        if (current->isIsTruthy() && output == current->output() &&
+            current->getOperand(0) == instr->output()) {
+          const auto& last_uses = env.lastUses();
           auto lu_at_istruthy = last_uses.find(&*current);
           if (lu_at_istruthy == last_uses.end() ||
               lu_at_istruthy->second.size() != 1) {
@@ -1639,7 +2335,7 @@ std::optional<std::pair<Instr*, std::vector<Instr*>>> isVectorCallIfIsInstance(
           break;
         }
 
-        if (current->IsSnapshot()) {
+        if (current->isSnapshot()) {
           snapshots.push_back(&*current);
           break;
         }
@@ -1653,7 +2349,7 @@ std::optional<std::pair<Instr*, std::vector<Instr*>>> isVectorCallIfIsInstance(
           return std::make_optional(std::make_pair(output->instr(), snapshots));
         }
 
-        if (current->IsSnapshot()) {
+        if (current->isSnapshot()) {
           // Leave these snapshots in place.
           break;
         }
@@ -1680,22 +2376,22 @@ Register* simplifyVectorCall(Env& env, const VectorCall* instr) {
     return nullptr;
   }
 
-  Register* target = instr->GetOperand(0);
+  Register* target = instr->getOperand(0);
   Type target_type = target->type();
-  if (target_type == env.type_object && instr->NumOperands() == 2) {
+  if (target_type == env.type_object && instr->numOperands() == 2) {
     env.emit<UseType>(target, env.type_object);
     return env.emit<LoadField>(
-        instr->GetOperand(1), "ob_type", offsetof(PyObject, ob_type), TType);
+        instr->getOperand(1), "ob_type", offsetof(PyObject, ob_type), TType);
   }
   if (isBuiltin(target, "len") && instr->numArgs() == 1) {
     env.emit<UseType>(target, target->type());
     return env.emit<GetLength>(instr->arg(0), *instr->frameState());
   }
   if (isBuiltin(target, "isinstance") && instr->numArgs() == 2 &&
-      instr->GetOperand(2)->type() <= TType &&
-      !(instr->GetOperand(2)->type() <= TTuple)) {
-    auto obj_op = instr->GetOperand(1);
-    auto type_op = instr->GetOperand(2);
+      instr->getOperand(2)->type() <= TType &&
+      !(instr->getOperand(2)->type() <= TTuple)) {
+    auto obj_op = instr->getOperand(1);
+    auto type_op = instr->getOperand(2);
 
     auto obj_type = env.emit<LoadField>(
         obj_op, "ob_type", offsetof(PyObject, ob_type), TType);
@@ -1745,7 +2441,7 @@ Register* simplifyVectorCall(Env& env, const VectorCall* instr) {
       // compare instead. This works, but requires that we change the
       // instruction's output type to match in order to pass the assertions that
       // come after the call to simplifyInstr.
-      instr->output()->set_type(TCBool);
+      instr->output()->setType(TCBool);
 
       return result;
     }
@@ -1782,18 +2478,40 @@ Register* simplifyVectorCall(Env& env, const VectorCall* instr) {
 }
 
 Register* simplifyStoreSubscr(Env& env, const StoreSubscr* instr) {
-  if (instr->GetOperand(0)->isA(TDictExact)) {
-    auto output = env.func.env.AllocateRegister();
+  if (instr->getOperand(0)->isA(TDictExact)) {
+    env.emit<UseType>(instr->getOperand(0), TDictExact);
+    auto output = env.func.env.allocateRegister();
     env.emitRawInstr<CallStatic>(
         3,
         output,
         reinterpret_cast<void*>(PyDict_Type.tp_as_mapping->mp_ass_subscript),
         TCInt32,
-        instr->GetOperand(0),
-        instr->GetOperand(1),
-        instr->GetOperand(2));
+        instr->getOperand(0),
+        instr->getOperand(1),
+        instr->getOperand(2));
 
     env.emit<CheckNeg>(output, *instr->frameState());
+    return nullptr;
+  }
+
+  // TODO(T255264263). Enable this for FT builds. See P2169673256.
+  if (!kFreeThreadedBuild && instr->getOperand(0)->isA(TListExact) &&
+      instr->getOperand(1)->isA(TLongExact)) {
+    Register* container = instr->getOperand(0);
+    Register* raw_idx = instr->getOperand(1);
+    Register* value = instr->getOperand(2);
+    Register* adjusted_idx =
+        unboxAndCheckListOrTupleIndex(env, instr, container, raw_idx);
+    if (adjusted_idx == nullptr) {
+      return nullptr;
+    }
+    Register* ob_item = env.emit<LoadField>(
+        container, "ob_item", offsetof(PyListObject, ob_item), TCPtr);
+    Register* old_value = env.emit<LoadArrayItem>(
+        ob_item, adjusted_idx, container, 0, TObject, false);
+    env.emit<StoreArrayItem>(ob_item, adjusted_idx, value, container, TObject);
+    env.emit<UseObj>(old_value);
+    env.optimized = true;
     return nullptr;
   }
 
@@ -1801,7 +2519,7 @@ Register* simplifyStoreSubscr(Env& env, const StoreSubscr* instr) {
 }
 
 Register* simplifyCIntToCBool(Env& env, const CIntToCBool* instr) {
-  Type input_type = instr->GetOperand(0)->type();
+  Type input_type = instr->getOperand(0)->type();
   if (input_type.hasIntSpec()) {
     return env.emit<LoadConst>(Type::fromCBool(input_type.intSpec()));
   }
@@ -1817,6 +2535,8 @@ Register* simplifyInstr(Env& env, const Instr* instr) {
     case Opcode::kCheckSequenceBounds:
       return simplifyCheckSequenceBounds(
           env, static_cast<const CheckSequenceBounds*>(instr));
+    case Opcode::kGuard:
+      return simplifyGuard(env, static_cast<const Guard*>(instr));
     case Opcode::kGuardType:
       return simplifyGuardType(env, static_cast<const GuardType*>(instr));
     case Opcode::kRefineType:
@@ -1826,6 +2546,13 @@ Register* simplifyInstr(Env& env, const Instr* instr) {
 
     case Opcode::kCompare:
       return simplifyCompare(env, static_cast<const Compare*>(instr));
+    case Opcode::kLongCompare:
+      return simplifyLongCompare(env, static_cast<const LongCompare*>(instr));
+    case Opcode::kUnicodeCompare:
+      return simplifyUnicodeCompare(
+          env, static_cast<const UnicodeCompare*>(instr));
+    case Opcode::kUnicodeEqual:
+      return simplifyUnicodeEqual(env, static_cast<const UnicodeEqual*>(instr));
 
     case Opcode::kCondBranch:
       return simplifyCondBranch(env, static_cast<const CondBranch*>(instr));
@@ -1836,23 +2563,33 @@ Register* simplifyInstr(Env& env, const Instr* instr) {
     case Opcode::kGetLength:
       return simplifyGetLength(env, static_cast<const GetLength*>(instr));
 
-    case Opcode::kIntConvert:
-      return simplifyIntConvert(env, static_cast<const IntConvert*>(instr));
+    case Opcode::kPrimitiveConvert:
+      return simplifyPrimitiveConvert(
+          env, static_cast<const PrimitiveConvert*>(instr));
 
     case Opcode::kIsTruthy:
       return simplifyIsTruthy(env, static_cast<const IsTruthy*>(instr));
+    case Opcode::kIsCompactLong:
+      return simplifyIsCompactLong(
+          env, static_cast<const IsCompactLong*>(instr));
+    case Opcode::kCompactLongUnbox:
+      return simplifyCompactLongUnbox(
+          env, static_cast<const CompactLongUnbox*>(instr));
 
-// TODO(T255262756) - Enable this again. See P2169675076 and P2184559031 (same
-// pattern but applied to simplifyLoadAttrTypeReceiver).
-#ifndef Py_GIL_DISABLED
     case Opcode::kLoadAttr:
+      // TODO(T255262756) - Enable this again. See P2169675076 and
+      // P2184559031 (same pattern but applied to
+      // simplifyLoadAttrTypeReceiver).
+      if constexpr (kFreeThreadedBuild) {
+        return nullptr;
+      }
       return simplifyLoadAttr(env, static_cast<const LoadAttr*>(instr));
-#endif
-// TODO(T255263721) - Enable this again. See P2169673579 and P2184559031.
-#ifndef Py_GIL_DISABLED
     case Opcode::kLoadMethod:
+      // TODO(T255263721) - Enable this again. See P2169673579 and P2184559031.
+      if constexpr (kFreeThreadedBuild) {
+        return nullptr;
+      }
       return simplifyLoadMethod(env, static_cast<const LoadMethod*>(instr));
-#endif
     case Opcode::kLoadField:
       return simplifyLoadField(env, static_cast<const LoadField*>(instr));
     case Opcode::kLoadTupleItem:
@@ -1876,10 +2613,14 @@ Register* simplifyInstr(Env& env, const Instr* instr) {
           env, static_cast<const FloatBinaryOp*>(instr));
     case Opcode::kUnaryOp:
       return simplifyUnaryOp(env, static_cast<const UnaryOp*>(instr));
+    case Opcode::kIntBinaryOp:
+      return simplifyIntBinaryOp(env, static_cast<const IntBinaryOp*>(instr));
 
     case Opcode::kPrimitiveCompare:
       return simplifyPrimitiveCompare(
           env, static_cast<const PrimitiveCompare*>(instr));
+    case Opcode::kPrimitiveBox:
+      return simplifyPrimitiveBox(env, static_cast<const PrimitiveBox*>(instr));
     case Opcode::kPrimitiveBoxBool:
       return simplifyPrimitiveBoxBool(
           env, static_cast<const PrimitiveBoxBool*>(instr));
@@ -1890,9 +2631,6 @@ Register* simplifyInstr(Env& env, const Instr* instr) {
     case Opcode::kIsNegativeAndErrOccurred:
       return simplifyIsNegativeAndErrOccurred(
           env, static_cast<const IsNegativeAndErrOccurred*>(instr));
-
-    case Opcode::kStoreAttr:
-      return simplifyStoreAttr(env, static_cast<const StoreAttr*>(instr));
 
     case Opcode::kCallMethod:
       return simplifyCallMethod(env, static_cast<const CallMethod*>(instr));
@@ -1913,7 +2651,7 @@ Register* simplifyInstr(Env& env, const Instr* instr) {
 
 } // namespace
 
-void Simplify::Run(Function& irfunc) {
+void Simplify::run(Function& irfunc) {
   Env env{irfunc};
 
   const SimplifierConfig& config = getConfig().simplifier;
@@ -1927,6 +2665,9 @@ void Simplify::Run(Function& irfunc) {
        changed && i < iteration_limit && env.new_blocks < new_block_limit;
        ++i) {
     changed = false;
+    // The previous iteration's cleanup passes (below) may have invalidated
+    // liveness; recompute it lazily on next use this iteration.
+    env.invalidateLastUses();
     for (auto& block : irfunc.cfg.blocks) {
       env.block = &block;
 
@@ -1961,12 +2702,12 @@ void Simplify::Run(Function& irfunc) {
           env.emitRawInstr<Assign>(instr.output(), new_output);
         }
 
-        if (instr.IsCondBranch() || instr.IsCondBranchIterNotDone() ||
-            instr.IsCondBranchCheckType()) {
+        if (instr.isCondBranch() || instr.isCondBranchIterNotDone() ||
+            instr.isCondBranchCheckType()) {
           JIT_CHECK(env.cursor != env.block->begin(), "Unexpected empty block");
           Instr& prev_instr = *std::prev(env.cursor);
           JIT_CHECK(
-              instr.opcode() == prev_instr.opcode() || prev_instr.IsBranch(),
+              instr.opcode() == prev_instr.opcode() || prev_instr.isBranch(),
               "The only supported simplification for CondBranch* is to a "
               "Branch or a different CondBranch, got unexpected '{}'",
               prev_instr);
@@ -1974,7 +2715,7 @@ void Simplify::Run(Function& irfunc) {
           // If we've optimized a CondBranchBase into a Branch, we also need to
           // remove any Phi references to the current block from the block that
           // we no longer visit.
-          if (prev_instr.IsBranch()) {
+          if (prev_instr.isBranch()) {
             auto cond = static_cast<CondBranchBase*>(&instr);
             BasicBlock* new_dst = prev_instr.successor(0);
             BasicBlock* old_branch_block = cond->false_bb() == new_dst
@@ -2005,12 +2746,18 @@ void Simplify::Run(Function& irfunc) {
     }
 
     if (changed) {
+      // This iteration may have split blocks or folded CondBranches into
+      // Branches, so any cached dominance is stale before we run CleanCFG
+      // (which consults the dominator tree).  This is conservative, `changed`
+      // also covers instruction-only rewrites that preserve dominance.
+      irfunc.invalidateDomTree();
+
       // Perform some simple cleanup between each pass.
-      CopyPropagation{}.Run(irfunc);
+      CopyPropagation{}.run(irfunc);
       reflowTypes(irfunc);
-      CleanCFG{}.Run(irfunc);
+      CleanCFG{}.run(irfunc);
     }
   }
 }
 
-} // namespace jit::hir
+} // namespace cinderx::jit::hir

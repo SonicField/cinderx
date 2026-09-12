@@ -2,9 +2,13 @@
 
 #include <gtest/gtest.h>
 
+#include "cinderx/Common/util.h"
+#include "cinderx/Jit/codegen/arch.h"
+#include "cinderx/Jit/hir/hir.h"
+#include "cinderx/Jit/lir/linear_scan.h"
 #include "cinderx/Jit/lir/operand.h"
 #include "cinderx/Jit/lir/parser.h"
-#include "cinderx/Jit/lir/regalloc.h"
+#include "cinderx/Jit/lir/spill_alloc.h"
 
 #include <fmt/ostream.h>
 
@@ -12,18 +16,48 @@
 #include <sstream>
 #include <vector>
 
-using namespace jit;
+using namespace cinderx::jit;
 
-namespace jit::lir {
+namespace cinderx::jit::lir {
 class LinearScanAllocatorTest : public ::testing::Test {
  public:
+  static const char* criticalEdgePhiLIR() {
+    return R"(Function:
+BB %0 - succs: %3 %5
+  %1 = Move 10
+  %2 = Move 1
+  CondBranch %2, BB%3, BB%5
+BB %3 - succs: %5
+  %4 = Move 20
+BB %5 - succs: %8
+  %6 = Phi (BB%3, %4), (BB%0, %1)
+  Return %6
+BB %8
+
+)";
+  }
+
+  static const char* duplicateEdgePhiLIR() {
+    return R"(Function:
+BB %0 - succs: %3 %3
+  %1 = Move 10
+  %2 = Move 20
+  CondBranch %1, BB%3, BB%3
+BB %3 - succs: %5
+  %4 = Phi (BB%0, %1), (BB%0, %2)
+  Return %4
+BB %5
+
+)";
+  }
+
   static bool LiveIntervalPtrLess(
       const LiveInterval* lhs,
       const LiveInterval* rhs) {
-    if (lhs->operand == rhs->operand) {
+    if (lhs->operand() == rhs->operand()) {
       return lhs->startLocation() < rhs->startLocation();
     }
-    return lhs->operand < rhs->operand;
+    return lhs->operand() < rhs->operand();
   }
 
   UnorderedMap<const Operand*, int> buildOperandToIndexMap(
@@ -59,6 +93,18 @@ class LinearScanAllocatorTest : public ::testing::Test {
   void runAllocator(Function* func) {
     LinearScanAllocator allocator{func};
     allocator.run();
+  }
+
+  codegen::PhyRegisterSet fixedRegisterIntervals(
+      const LinearScanAllocator& allocator) {
+    codegen::PhyRegisterSet result;
+    for (const auto& pair : allocator.intervalMap()) {
+      const LiveInterval& interval = pair.second;
+      if (interval.isFixed() && interval.isRegisterAllocated()) {
+        result.set(interval.allocatedLoc());
+      }
+    }
+    return result;
   }
 };
 
@@ -185,8 +231,8 @@ BB %14
     fmt::print(
         allocated,
         "{}->{}\n",
-        opnd_id_map.at(interval->operand),
-        interval->allocated_loc.loc);
+        opnd_id_map.at(interval->operand()),
+        interval->allocatedLoc().loc);
   }
 
   std::string allocated_expected = R"(1->0
@@ -250,11 +296,11 @@ BB %28
   UnorderedMap<int, std::vector<LiveInterval*>> loc_interval_map;
   UnorderedMap<const Operand*, std::vector<LiveInterval*>> vreg_location_map;
   for (auto& alloc : lsallocator.intervalList()) {
-    if (!opnd_id_map.contains(alloc->operand)) {
+    if (!opnd_id_map.contains(alloc->operand())) {
       continue;
     }
-    loc_interval_map[alloc->allocated_loc.loc].push_back(alloc.get());
-    vreg_location_map[alloc->operand].push_back(alloc.get());
+    loc_interval_map[alloc->allocatedLoc().loc].push_back(alloc.get());
+    vreg_location_map[alloc->operand()].push_back(alloc.get());
   }
 
   // check if the intervals allocated to the same location do not overlop
@@ -295,20 +341,201 @@ BB %28
   }
 }
 
+TEST_F(LinearScanAllocatorTest, RewriteSpilledMoveInputAsLoad) {
+  auto function = std::make_unique<Function>();
+  BasicBlock* block = function->allocateBasicBlock();
+  Instruction* source =
+      block->allocateInstr(Opcode::kMove, nullptr, OutVReg{}, Imm{0});
+  Instruction* move = block->allocateInstr(
+      Opcode::kMove,
+      nullptr,
+      OutPhyReg{codegen::arch::reg_general_return_loc},
+      VReg{source});
+
+  LiveInterval interval{source->output()};
+  interval.allocateTo(PhyLocation{-kPointerSize});
+  UnorderedMap<const Operand*, const LiveInterval*> mapping{
+      {source->output(), &interval}};
+
+  LinearScanAllocator allocator{function.get()};
+  allocator.rewriteInstrOneInput(move, 0, mapping, nullptr);
+
+  EXPECT_TRUE(move->isLoad());
+  EXPECT_TRUE(move->getInput(0)->isStack());
+}
+
+TEST_F(LinearScanAllocatorTest, FullRunHandlesCriticalEdgePhiSlots) {
+  Parser parser;
+  auto function = parser.parse(criticalEdgePhiLIR());
+  Instruction* phi = parser.getOutputInstrMap().at(6);
+
+  LinearScanAllocator allocator{function.get()};
+  allocator.run();
+
+  ASSERT_EQ(phi->numPhiInputs(), 2);
+  for (size_t slot = 0; slot < phi->numPhiInputs(); ++slot) {
+    const Operand* value = phi->phiInput(slot);
+    EXPECT_FALSE(value->isLinked());
+    EXPECT_TRUE(value->isReg() || value->isStack());
+    EXPECT_EQ(value->instr(), phi);
+  }
+}
+
+TEST_F(LinearScanAllocatorTest, FullRunHandlesDuplicateEdgePhiSlots) {
+  Parser parser;
+  auto function = parser.parse(duplicateEdgePhiLIR());
+  BasicBlock* source = function->basicBlocks().front();
+  Instruction* phi = parser.getOutputInstrMap().at(4);
+  BasicBlock* phi_block = phi->basicBlock();
+
+  LinearScanAllocator allocator{function.get()};
+  allocator.run();
+
+  ASSERT_EQ(source->successors().size(), 2);
+  EXPECT_NE(source->successors()[0], source->successors()[1]);
+  size_t trampoline_count = 0;
+  for (BasicBlock* successor : source->successors()) {
+    if (successor == phi_block) {
+      continue;
+    }
+    ++trampoline_count;
+    EXPECT_EQ(successor->successors(), (std::vector<BasicBlock*>{phi_block}));
+    EXPECT_GT(successor->getNumInstrs(), 0) << *function;
+  }
+  EXPECT_GT(trampoline_count, 0);
+
+  ASSERT_EQ(phi->numPhiInputs(), 2);
+  for (size_t slot = 0; slot < phi->numPhiInputs(); ++slot) {
+    const Operand* value = phi->phiInput(slot);
+    EXPECT_FALSE(value->isLinked());
+    EXPECT_TRUE(value->isReg() || value->isStack());
+    EXPECT_EQ(value->instr(), phi);
+  }
+}
+
+TEST_F(LinearScanAllocatorTest, FullRunHandlesLoopPhiSlots) {
+  const char* lir_source = R"(Function:
+BB %0 - succs: %2
+  %1 = Move 0
+BB %2 - succs: %2 %5
+  %3 = Phi (BB%2, %4), (BB%0, %1)
+  %4 = Add %3, 1
+  CondBranch %4, BB%2, BB%5
+BB %5 - succs: %8
+  Return %3
+BB %8
+
+)";
+
+  Parser parser;
+  auto function = parser.parse(lir_source);
+  Instruction* phi = parser.getOutputInstrMap().at(3);
+
+  LinearScanAllocator allocator{function.get()};
+  allocator.run();
+
+  ASSERT_EQ(phi->numPhiInputs(), 2);
+  for (size_t slot = 0; slot < phi->numPhiInputs(); ++slot) {
+    const Operand* value = phi->phiInput(slot);
+    EXPECT_FALSE(value->isLinked());
+    EXPECT_TRUE(value->isReg() || value->isStack());
+    EXPECT_EQ(value->instr(), phi);
+  }
+}
+
+TEST_F(LinearScanAllocatorTest, SpillAllocatorHandlesCriticalEdgePhiSlots) {
+  auto function = Parser().parse(criticalEdgePhiLIR());
+  BasicBlock* phi_block = function->basicBlocks().at(2);
+  ASSERT_EQ(phi_block->numPredecessors(), 2);
+  const std::vector<BasicBlock*> predecessors = phi_block->predecessors();
+
+  SpillAllocator allocator{function.get()};
+  allocator.run();
+
+  for (BasicBlock* block : function->basicBlocks()) {
+    for (auto& instruction : block->instructions()) {
+      EXPECT_FALSE(instruction->isPhi());
+    }
+  }
+
+  auto last_stack_store = [](const BasicBlock* block) {
+    for (auto it = block->instructions().rbegin();
+         it != block->instructions().rend();
+         ++it) {
+      const Instruction* instruction = it->get();
+      if (instruction->isStore() && instruction->output()->isStack()) {
+        return instruction;
+      }
+    }
+    return static_cast<const Instruction*>(nullptr);
+  };
+  const Instruction* first_copy = last_stack_store(predecessors[0]);
+  const Instruction* second_copy = last_stack_store(predecessors[1]);
+  ASSERT_NE(first_copy, nullptr);
+  ASSERT_NE(second_copy, nullptr);
+  EXPECT_EQ(
+      first_copy->output()->getStackSlot(),
+      second_copy->output()->getStackSlot());
+}
+
+TEST_F(
+    LinearScanAllocatorTest,
+    ArbitraryExecutionCallReservesAllRegistersInFreeThreadedBuild) {
+  hir::Function hir_func;
+  hir::Register* dst = hir_func.env.allocateRegister();
+  std::unique_ptr<hir::Instr> origin(
+      hir::CallInd::create(0, dst, "call_ind", hir::TObject));
+
+  auto lir_func = std::make_unique<Function>();
+  BasicBlock* block = lir_func->allocateBasicBlock();
+  block->allocateInstr(Opcode::kCall, origin.get(), OutVReg());
+  BasicBlock* epilogue = lir_func->allocateBasicBlock();
+  block->addSuccessor(epilogue);
+
+  LinearScanAllocator allocator(lir_func.get());
+  lir_func->sortBasicBlocks();
+  allocator.calculateLiveIntervals();
+
+  codegen::PhyRegisterSet expected = codegen::CALLER_SAVE_REGS;
+  if constexpr (kFreeThreadedBuild) {
+    expected = codegen::INIT_REGISTERS;
+  }
+  EXPECT_EQ(fixedRegisterIntervals(allocator), expected);
+}
+
+TEST_F(LinearScanAllocatorTest, DeoptExitReservesVectorRegisters) {
+  auto lir_func = std::make_unique<Function>();
+  BasicBlock* block = lir_func->allocateBasicBlock();
+  block->allocateInstr(Opcode::kGuard, nullptr);
+  BasicBlock* epilogue = lir_func->allocateBasicBlock();
+  block->addSuccessor(epilogue);
+
+  LinearScanAllocator allocator(lir_func.get());
+  lir_func->sortBasicBlocks();
+  allocator.calculateLiveIntervals();
+
+  // The deopt trampoline only spills general-purpose registers, so no live
+  // value may be in a vector register at a deopt exit.
+  EXPECT_EQ(fixedRegisterIntervals(allocator), codegen::ALL_VECD_REGISTERS);
+}
+
 TEST_F(LinearScanAllocatorTest, InoutRegTest) {
   // OptimizeMoveSequence should not set reg operands that are also output
   auto lirfunc = std::make_unique<Function>();
   auto bb = lirfunc->allocateBasicBlock();
 
-  auto a =
-      bb->allocateInstr(Instruction::kMove, nullptr, lir::OutVReg(), Imm(0));
-  auto b =
-      bb->allocateInstr(Instruction::kMove, nullptr, lir::OutVReg(), Imm(0));
+  auto a = bb->allocateInstr(Opcode::kMove, nullptr, lir::OutVReg(), Imm(0));
+  auto b = bb->allocateInstr(Opcode::kMove, nullptr, lir::OutVReg(), Imm(0));
 
   auto add = bb->allocateInstr(
-      Instruction::kAdd, nullptr, lir::OutVReg(), lir::VReg(a), lir::VReg(b));
+      Opcode::kAdd, nullptr, lir::OutVReg(), lir::VReg(a), lir::VReg(b));
 
-  bb->allocateInstr(Instruction::kReturn, nullptr, lir::VReg(add));
+  bb->allocateInstr(
+      Opcode::kMove,
+      nullptr,
+      lir::OutPhyReg{codegen::arch::reg_general_return_loc},
+      lir::VReg(add));
+  bb->allocateInstr(Opcode::kReturn, nullptr);
 
   auto epilogue = lirfunc->allocateBasicBlock();
   bb->addSuccessor(epilogue);
@@ -326,20 +553,24 @@ TEST_F(LinearScanAllocatorTest, CallWithSideEffectTest) {
   auto lirfunc = std::make_unique<Function>();
   auto bb = lirfunc->allocateBasicBlock();
 
-  auto a = bb->allocateInstr(Instruction::kCall, nullptr, lir::OutVReg());
+  auto a = bb->allocateInstr(Opcode::kCall, nullptr, lir::OutVReg());
 
-  auto b =
-      bb->allocateInstr(Instruction::kMove, nullptr, lir::OutVReg(), Imm(0));
+  auto b = bb->allocateInstr(Opcode::kMove, nullptr, lir::OutVReg(), Imm(0));
 
-  bb->allocateInstr(Instruction::kReturn, nullptr, lir::VReg(b));
+  bb->allocateInstr(
+      Opcode::kMove,
+      nullptr,
+      lir::OutPhyReg{codegen::arch::reg_general_return_loc},
+      lir::VReg(b));
+  bb->allocateInstr(Opcode::kReturn, nullptr);
 
   auto epilogue = lirfunc->allocateBasicBlock();
   bb->addSuccessor(epilogue);
-  ASSERT_TRUE(a->opcode() == Instruction::kCall);
+  ASSERT_TRUE(a->opcode() == Opcode::kCall);
   ASSERT_TRUE(a->output()->type() == lir::Operand::kVreg);
   runAllocator(lirfunc.get());
-  ASSERT_TRUE(a->opcode() == Instruction::kCall);
+  ASSERT_TRUE(a->opcode() == Opcode::kCall);
   ASSERT_TRUE(a->output()->type() == lir::Operand::kNone);
 }
 
-} // namespace jit::lir
+} // namespace cinderx::jit::lir

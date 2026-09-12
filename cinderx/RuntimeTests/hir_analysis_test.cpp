@@ -11,23 +11,62 @@
 
 #include <memory>
 
-class LivenessAnalysisTest : public RuntimeTest {};
+namespace cinderx {
 
-using namespace jit::hir;
+class LivenessAnalysisTest : public RuntimeTest {};
+class CollectDataUsesTest : public RuntimeTest {};
+
+using namespace cinderx::jit::hir;
+
+TEST_F(CollectDataUsesTest, SeparatesDataUsesFromRestoreOnlyUses) {
+  Function func;
+  auto block = func.cfg.allocateBlock();
+  func.cfg.entry_block = block;
+
+  auto operand = func.env.allocateRegister();
+  auto frame_only = func.env.allocateRegister();
+  auto guilty_only = func.env.allocateRegister();
+  auto unused = func.env.allocateRegister();
+
+  block->append<LoadConst>(operand, TNoneType);
+  block->append<LoadConst>(frame_only, TNoneType);
+  block->append<LoadConst>(guilty_only, TNoneType);
+  block->append<LoadConst>(unused, TNoneType);
+
+  // Only referenced by deopt frame state and by a type assertion, neither of
+  // which consumes the value.
+  FrameState frame_state;
+  frame_state.stack.push(frame_only);
+  block->append<Snapshot>(frame_state);
+  block->append<UseType>(frame_only, TNoneType);
+
+  // Only referenced as a patchpoint's guilty register, which is a real use
+  // even though DeoptPatchpoint has no operands.
+  auto patchpoint = block->append<DeoptPatchpoint>(nullptr);
+  patchpoint->setGuiltyReg(guilty_only);
+
+  block->append<Return>(operand);
+
+  RegisterSet uses = collectDataUses(func);
+  EXPECT_TRUE(uses.contains(operand));
+  EXPECT_TRUE(uses.contains(guilty_only));
+  EXPECT_FALSE(uses.contains(frame_only));
+  EXPECT_FALSE(uses.contains(unused));
+}
 
 TEST_F(LivenessAnalysisTest, SingleBlockHasNoLiveInOut) {
   Function func;
-  auto block = func.cfg.AllocateBlock();
+  auto block = func.cfg.allocateBlock();
   func.cfg.entry_block = block;
-  auto v0 = func.env.AllocateRegister();
+  auto v0 = func.env.allocateRegister();
   block->append<LoadConst>(v0, TNoneType);
   block->append<Return>(v0);
 
   LivenessAnalysis liveness(func);
-  liveness.Run();
+  liveness.run();
 
-  EXPECT_FALSE(liveness.IsLiveIn(block, v0));
-  EXPECT_FALSE(liveness.IsLiveOut(block, v0));
+  EXPECT_FALSE(liveness.isLiveIn(block, v0));
+  EXPECT_FALSE(liveness.isLiveOut(block, v0));
 }
 
 TEST_F(LivenessAnalysisTest, UninitializedVariableUseIsLiveIn) {
@@ -49,55 +88,55 @@ TEST_F(LivenessAnalysisTest, UninitializedVariableUseIsLiveIn) {
   //   }
   // }
   Function func;
-  auto entry = func.cfg.AllocateBlock();
+  auto entry = func.cfg.allocateBlock();
   func.cfg.entry_block = entry;
-  auto v0 = func.env.AllocateRegister();
+  auto v0 = func.env.allocateRegister();
   entry->append<LoadArg>(v0, 0);
 
-  auto t_block = func.cfg.AllocateBlock();
-  auto f_block = func.cfg.AllocateBlock();
+  auto t_block = func.cfg.allocateBlock();
+  auto f_block = func.cfg.allocateBlock();
   entry->append<CondBranch>(v0, t_block, f_block);
 
-  auto v1 = func.env.AllocateRegister();
+  auto v1 = func.env.allocateRegister();
   t_block->append<LoadConst>(v1, TNoneType);
   t_block->append<Branch>(f_block);
 
   f_block->append<Return>(v1);
 
   LivenessAnalysis liveness(func);
-  liveness.Run();
+  liveness.run();
 
   // Arguments are killed by the LoadArg pseudo instructions
-  EXPECT_FALSE(liveness.IsLiveIn(entry, v0));
-  EXPECT_FALSE(liveness.IsLiveOut(entry, v0));
+  EXPECT_FALSE(liveness.isLiveIn(entry, v0));
+  EXPECT_FALSE(liveness.isLiveOut(entry, v0));
   // v1 is potentially undefined so it should show up as live-in on entry
-  EXPECT_TRUE(liveness.IsLiveIn(entry, v1));
-  EXPECT_TRUE(liveness.IsLiveOut(entry, v1));
+  EXPECT_TRUE(liveness.isLiveIn(entry, v1));
+  EXPECT_TRUE(liveness.isLiveOut(entry, v1));
 
   // True block assigns v1, which is used by the return block
-  EXPECT_FALSE(liveness.IsLiveIn(t_block, v0));
-  EXPECT_FALSE(liveness.IsLiveOut(t_block, v0));
-  EXPECT_FALSE(liveness.IsLiveIn(t_block, v1));
-  EXPECT_TRUE(liveness.IsLiveOut(t_block, v1));
+  EXPECT_FALSE(liveness.isLiveIn(t_block, v0));
+  EXPECT_FALSE(liveness.isLiveOut(t_block, v0));
+  EXPECT_FALSE(liveness.isLiveIn(t_block, v1));
+  EXPECT_TRUE(liveness.isLiveOut(t_block, v1));
 
   // Use of v1 in false block is potentially uninitialized
   // No vars should be live out on exit block
-  EXPECT_FALSE(liveness.IsLiveIn(f_block, v0));
-  EXPECT_FALSE(liveness.IsLiveOut(f_block, v0));
-  EXPECT_TRUE(liveness.IsLiveIn(f_block, v1));
-  EXPECT_FALSE(liveness.IsLiveOut(f_block, v1));
+  EXPECT_FALSE(liveness.isLiveIn(f_block, v0));
+  EXPECT_FALSE(liveness.isLiveOut(f_block, v0));
+  EXPECT_TRUE(liveness.isLiveIn(f_block, v1));
+  EXPECT_FALSE(liveness.isLiveOut(f_block, v1));
 }
 
 TEST_F(LivenessAnalysisTest, PhiUses) {
   Function func;
-  auto b0 = func.cfg.entry_block = func.cfg.AllocateBlock();
-  auto b1 = func.cfg.AllocateBlock();
-  auto b2 = func.cfg.AllocateBlock();
+  auto b0 = func.cfg.entry_block = func.cfg.allocateBlock();
+  auto b1 = func.cfg.allocateBlock();
+  auto b2 = func.cfg.allocateBlock();
 
-  auto v0 = func.env.AllocateRegister();
-  auto v1 = func.env.AllocateRegister();
-  auto v2 = func.env.AllocateRegister();
-  auto v3 = func.env.AllocateRegister();
+  auto v0 = func.env.allocateRegister();
+  auto v1 = func.env.allocateRegister();
+  auto v2 = func.env.allocateRegister();
+  auto v3 = func.env.allocateRegister();
 
   b0->append<LoadArg>(v0, 0);
   b0->append<LoadArg>(v1, 1);
@@ -113,33 +152,33 @@ TEST_F(LivenessAnalysisTest, PhiUses) {
   ASSERT_TRUE(checkFunc(func, std::cout));
 
   LivenessAnalysis liveness{func};
-  liveness.Run();
+  liveness.run();
 
-  EXPECT_FALSE(liveness.IsLiveOut(b0, v0));
-  EXPECT_TRUE(liveness.IsLiveOut(b0, v1));
-  EXPECT_TRUE(liveness.IsLiveOut(b0, v2));
+  EXPECT_FALSE(liveness.isLiveOut(b0, v0));
+  EXPECT_TRUE(liveness.isLiveOut(b0, v1));
+  EXPECT_TRUE(liveness.isLiveOut(b0, v2));
 
-  EXPECT_TRUE(liveness.IsLiveIn(b1, v1));
-  EXPECT_TRUE(liveness.IsLiveIn(b1, v2));
-  EXPECT_FALSE(liveness.IsLiveOut(b1, v1));
-  EXPECT_TRUE(liveness.IsLiveOut(b1, v2));
+  EXPECT_TRUE(liveness.isLiveIn(b1, v1));
+  EXPECT_TRUE(liveness.isLiveIn(b1, v2));
+  EXPECT_FALSE(liveness.isLiveOut(b1, v1));
+  EXPECT_TRUE(liveness.isLiveOut(b1, v2));
 
-  EXPECT_FALSE(liveness.IsLiveIn(b2, v0));
-  EXPECT_FALSE(liveness.IsLiveIn(b2, v1));
-  EXPECT_TRUE(liveness.IsLiveIn(b2, v2));
+  EXPECT_FALSE(liveness.isLiveIn(b2, v0));
+  EXPECT_FALSE(liveness.isLiveIn(b2, v1));
+  EXPECT_TRUE(liveness.isLiveIn(b2, v2));
 }
 
 TEST_F(LivenessAnalysisTest, LastUses) {
   Function func;
-  auto b0 = func.cfg.entry_block = func.cfg.AllocateBlock();
-  auto b1 = func.cfg.AllocateBlock();
-  auto b2 = func.cfg.AllocateBlock();
-  auto b3 = func.cfg.AllocateBlock();
+  auto b0 = func.cfg.entry_block = func.cfg.allocateBlock();
+  auto b1 = func.cfg.allocateBlock();
+  auto b2 = func.cfg.allocateBlock();
+  auto b3 = func.cfg.allocateBlock();
 
-  auto v0 = func.env.AllocateRegister();
-  auto v1 = func.env.AllocateRegister();
-  auto v2 = func.env.AllocateRegister();
-  auto v3 = func.env.AllocateRegister();
+  auto v0 = func.env.allocateRegister();
+  auto v1 = func.env.allocateRegister();
+  auto v2 = func.env.allocateRegister();
+  auto v3 = func.env.allocateRegister();
 
   FrameState frame;
   b0->append<MakeDict>(v0, 0, frame);
@@ -160,8 +199,8 @@ TEST_F(LivenessAnalysisTest, LastUses) {
   ASSERT_TRUE(checkFunc(func, std::cout));
 
   LivenessAnalysis liveness{func};
-  liveness.Run();
-  auto last_uses = liveness.GetLastUses();
+  liveness.run();
+  auto last_uses = liveness.getLastUses();
   LivenessAnalysis::LastUses expected_last_uses{
       {b1_inc, {v1}},
       {b2_inc, {v1}},
@@ -176,17 +215,17 @@ class DefiniteAssignmentAnalysisTest : public RuntimeTest {};
 
 TEST_F(DefiniteAssignmentAnalysisTest, ArgumentsAlwaysAssigned) {
   Function func;
-  auto block = func.cfg.AllocateBlock();
+  auto block = func.cfg.allocateBlock();
   func.cfg.entry_block = block;
-  auto v0 = func.env.AllocateRegister();
+  auto v0 = func.env.allocateRegister();
   block->append<LoadArg>(v0, 0);
   block->append<Return>(v0);
 
   AssignmentAnalysis def_assign(func, true);
-  def_assign.Run();
+  def_assign.run();
 
-  EXPECT_FALSE(def_assign.IsAssignedIn(block, v0));
-  EXPECT_TRUE(def_assign.IsAssignedOut(block, v0));
+  EXPECT_FALSE(def_assign.isAssignedIn(block, v0));
+  EXPECT_TRUE(def_assign.isAssignedOut(block, v0));
 }
 
 TEST_F(
@@ -213,41 +252,41 @@ TEST_F(
   //   }
   // }
   Function func;
-  auto entry = func.cfg.AllocateBlock();
+  auto entry = func.cfg.allocateBlock();
   func.cfg.entry_block = entry;
-  auto v0 = func.env.AllocateRegister();
+  auto v0 = func.env.allocateRegister();
   entry->append<LoadArg>(v0, 0);
 
-  auto t_block = func.cfg.AllocateBlock();
-  auto f_block = func.cfg.AllocateBlock();
+  auto t_block = func.cfg.allocateBlock();
+  auto f_block = func.cfg.allocateBlock();
   entry->append<CondBranch>(v0, t_block, f_block);
 
-  auto v1 = func.env.AllocateRegister();
+  auto v1 = func.env.allocateRegister();
   t_block->append<LoadConst>(v1, TNoneType);
   t_block->append<Branch>(f_block);
 
   f_block->append<Return>(v1);
 
   AssignmentAnalysis def_assign(func, true);
-  def_assign.Run();
+  def_assign.run();
 
-  EXPECT_FALSE(def_assign.IsAssignedIn(entry, v0));
-  EXPECT_TRUE(def_assign.IsAssignedOut(entry, v0));
-  EXPECT_FALSE(def_assign.IsAssignedIn(entry, v1));
-  EXPECT_FALSE(def_assign.IsAssignedOut(entry, v1));
+  EXPECT_FALSE(def_assign.isAssignedIn(entry, v0));
+  EXPECT_TRUE(def_assign.isAssignedOut(entry, v0));
+  EXPECT_FALSE(def_assign.isAssignedIn(entry, v1));
+  EXPECT_FALSE(def_assign.isAssignedOut(entry, v1));
 
   // True block assigns y
-  EXPECT_TRUE(def_assign.IsAssignedIn(t_block, v0));
-  EXPECT_TRUE(def_assign.IsAssignedOut(t_block, v0));
-  EXPECT_FALSE(def_assign.IsAssignedIn(t_block, v1));
-  EXPECT_TRUE(def_assign.IsAssignedOut(t_block, v1));
+  EXPECT_TRUE(def_assign.isAssignedIn(t_block, v0));
+  EXPECT_TRUE(def_assign.isAssignedOut(t_block, v0));
+  EXPECT_FALSE(def_assign.isAssignedIn(t_block, v1));
+  EXPECT_TRUE(def_assign.isAssignedOut(t_block, v1));
 
   // Since y is only assigned in the true block it should not be assigned on
   // entry to the false block
-  EXPECT_TRUE(def_assign.IsAssignedIn(f_block, v0));
-  EXPECT_TRUE(def_assign.IsAssignedOut(f_block, v0));
-  EXPECT_FALSE(def_assign.IsAssignedIn(f_block, v1));
-  EXPECT_FALSE(def_assign.IsAssignedOut(f_block, v1));
+  EXPECT_TRUE(def_assign.isAssignedIn(f_block, v0));
+  EXPECT_TRUE(def_assign.isAssignedOut(f_block, v0));
+  EXPECT_FALSE(def_assign.isAssignedIn(f_block, v1));
+  EXPECT_FALSE(def_assign.isAssignedOut(f_block, v1));
 }
 
 TEST_F(DefiniteAssignmentAnalysisTest, CondInitOnAllBranchesAreDefAssigned) {
@@ -275,17 +314,17 @@ TEST_F(DefiniteAssignmentAnalysisTest, CondInitOnAllBranchesAreDefAssigned) {
   //   }
   // }
   Function func;
-  auto entry = func.cfg.AllocateBlock();
+  auto entry = func.cfg.allocateBlock();
   func.cfg.entry_block = entry;
-  auto v0 = func.env.AllocateRegister();
+  auto v0 = func.env.allocateRegister();
   entry->append<LoadArg>(v0, 0);
 
-  auto t_block = func.cfg.AllocateBlock();
-  auto f_block = func.cfg.AllocateBlock();
+  auto t_block = func.cfg.allocateBlock();
+  auto f_block = func.cfg.allocateBlock();
   entry->append<CondBranch>(v0, t_block, f_block);
 
-  auto exit_block = func.cfg.AllocateBlock();
-  auto v1 = func.env.AllocateRegister();
+  auto exit_block = func.cfg.allocateBlock();
+  auto v1 = func.env.allocateRegister();
   t_block->append<LoadConst>(v1, TNoneType);
   t_block->append<Branch>(exit_block);
   f_block->append<LoadConst>(v1, TNoneType);
@@ -294,31 +333,31 @@ TEST_F(DefiniteAssignmentAnalysisTest, CondInitOnAllBranchesAreDefAssigned) {
   exit_block->append<Return>(v1);
 
   AssignmentAnalysis def_assign(func, true);
-  def_assign.Run();
+  def_assign.run();
 
-  EXPECT_FALSE(def_assign.IsAssignedIn(entry, v0));
-  EXPECT_TRUE(def_assign.IsAssignedOut(entry, v0));
-  EXPECT_FALSE(def_assign.IsAssignedIn(entry, v1));
-  EXPECT_FALSE(def_assign.IsAssignedOut(entry, v1));
+  EXPECT_FALSE(def_assign.isAssignedIn(entry, v0));
+  EXPECT_TRUE(def_assign.isAssignedOut(entry, v0));
+  EXPECT_FALSE(def_assign.isAssignedIn(entry, v1));
+  EXPECT_FALSE(def_assign.isAssignedOut(entry, v1));
 
   // True block assigns v1
-  EXPECT_TRUE(def_assign.IsAssignedIn(t_block, v0));
-  EXPECT_TRUE(def_assign.IsAssignedOut(t_block, v0));
-  EXPECT_FALSE(def_assign.IsAssignedIn(t_block, v1));
-  EXPECT_TRUE(def_assign.IsAssignedOut(t_block, v1));
+  EXPECT_TRUE(def_assign.isAssignedIn(t_block, v0));
+  EXPECT_TRUE(def_assign.isAssignedOut(t_block, v0));
+  EXPECT_FALSE(def_assign.isAssignedIn(t_block, v1));
+  EXPECT_TRUE(def_assign.isAssignedOut(t_block, v1));
 
   // False block assigns y
-  EXPECT_TRUE(def_assign.IsAssignedIn(f_block, v0));
-  EXPECT_TRUE(def_assign.IsAssignedOut(f_block, v0));
-  EXPECT_FALSE(def_assign.IsAssignedIn(f_block, v1));
-  EXPECT_TRUE(def_assign.IsAssignedOut(f_block, v1));
+  EXPECT_TRUE(def_assign.isAssignedIn(f_block, v0));
+  EXPECT_TRUE(def_assign.isAssignedOut(f_block, v0));
+  EXPECT_FALSE(def_assign.isAssignedIn(f_block, v1));
+  EXPECT_TRUE(def_assign.isAssignedOut(f_block, v1));
 
   // y is assigned in both arms of the conditional, so should be marked as
   // definitely assigned on entry to the last block
-  EXPECT_TRUE(def_assign.IsAssignedIn(exit_block, v0));
-  EXPECT_TRUE(def_assign.IsAssignedOut(exit_block, v0));
-  EXPECT_TRUE(def_assign.IsAssignedIn(exit_block, v1));
-  EXPECT_TRUE(def_assign.IsAssignedOut(exit_block, v1));
+  EXPECT_TRUE(def_assign.isAssignedIn(exit_block, v0));
+  EXPECT_TRUE(def_assign.isAssignedOut(exit_block, v0));
+  EXPECT_TRUE(def_assign.isAssignedIn(exit_block, v1));
+  EXPECT_TRUE(def_assign.isAssignedOut(exit_block, v1));
 }
 
 TEST_F(DefiniteAssignmentAnalysisTest, AssignmentDominatesLoop) {
@@ -348,195 +387,50 @@ TEST_F(DefiniteAssignmentAnalysisTest, AssignmentDominatesLoop) {
   // }
 
   Function func;
-  auto b0 = func.cfg.AllocateBlock();
-  auto b1 = func.cfg.AllocateBlock();
-  auto b2 = func.cfg.AllocateBlock();
-  auto b3 = func.cfg.AllocateBlock();
-  auto b4 = func.cfg.AllocateBlock();
+  auto b0 = func.cfg.allocateBlock();
+  auto b1 = func.cfg.allocateBlock();
+  auto b2 = func.cfg.allocateBlock();
+  auto b3 = func.cfg.allocateBlock();
+  auto b4 = func.cfg.allocateBlock();
 
   func.cfg.entry_block = b0;
-  auto v0 = func.env.AllocateRegister();
+  auto v0 = func.env.allocateRegister();
   b0->append<LoadConst>(v0, TNoneType);
   b0->append<Branch>(b1);
   b1->append<CondBranch>(v0, b2, b3);
   b2->append<Branch>(b4);
-  auto v1 = func.env.AllocateRegister();
+  auto v1 = func.env.allocateRegister();
   b3->append<LoadConst>(v1, TNoneType);
   b3->append<CondBranch>(v1, b1, b4);
   b4->append<Return>(v0);
 
   AssignmentAnalysis assign(func, true);
-  assign.Run();
+  assign.run();
 
-  EXPECT_FALSE(assign.IsAssignedIn(b0, v0));
-  EXPECT_FALSE(assign.IsAssignedIn(b0, v1));
-  EXPECT_TRUE(assign.IsAssignedOut(b0, v0));
-  EXPECT_FALSE(assign.IsAssignedOut(b0, v1));
+  EXPECT_FALSE(assign.isAssignedIn(b0, v0));
+  EXPECT_FALSE(assign.isAssignedIn(b0, v1));
+  EXPECT_TRUE(assign.isAssignedOut(b0, v0));
+  EXPECT_FALSE(assign.isAssignedOut(b0, v1));
 
-  EXPECT_TRUE(assign.IsAssignedIn(b1, v0));
-  EXPECT_FALSE(assign.IsAssignedIn(b1, v1));
-  EXPECT_TRUE(assign.IsAssignedOut(b1, v0));
-  EXPECT_FALSE(assign.IsAssignedOut(b1, v1));
+  EXPECT_TRUE(assign.isAssignedIn(b1, v0));
+  EXPECT_FALSE(assign.isAssignedIn(b1, v1));
+  EXPECT_TRUE(assign.isAssignedOut(b1, v0));
+  EXPECT_FALSE(assign.isAssignedOut(b1, v1));
 
-  EXPECT_TRUE(assign.IsAssignedIn(b2, v0));
-  EXPECT_FALSE(assign.IsAssignedIn(b2, v1));
-  EXPECT_TRUE(assign.IsAssignedOut(b2, v0));
-  EXPECT_FALSE(assign.IsAssignedOut(b2, v1));
+  EXPECT_TRUE(assign.isAssignedIn(b2, v0));
+  EXPECT_FALSE(assign.isAssignedIn(b2, v1));
+  EXPECT_TRUE(assign.isAssignedOut(b2, v0));
+  EXPECT_FALSE(assign.isAssignedOut(b2, v1));
 
-  EXPECT_TRUE(assign.IsAssignedIn(b3, v0));
-  EXPECT_FALSE(assign.IsAssignedIn(b3, v1));
-  EXPECT_TRUE(assign.IsAssignedOut(b3, v0));
-  EXPECT_TRUE(assign.IsAssignedOut(b3, v1));
+  EXPECT_TRUE(assign.isAssignedIn(b3, v0));
+  EXPECT_FALSE(assign.isAssignedIn(b3, v1));
+  EXPECT_TRUE(assign.isAssignedOut(b3, v0));
+  EXPECT_TRUE(assign.isAssignedOut(b3, v1));
 
-  EXPECT_TRUE(assign.IsAssignedIn(b4, v0));
-  EXPECT_FALSE(assign.IsAssignedIn(b4, v1));
-  EXPECT_TRUE(assign.IsAssignedOut(b4, v0));
-  EXPECT_FALSE(assign.IsAssignedOut(b4, v1));
-}
-
-class DominatorAnalysisTest : public RuntimeTest {};
-
-TEST_F(DominatorAnalysisTest, CorrectlyComputesDiamondCFG) {
-  const char* src = R"(
-fun dominators {
-   bb 0 {
-     v0 = LoadArg<0>
-     CondBranch<1, 2> v0
-   }
-
-   bb 1 {
-     Branch<3>
-   }
-
-   bb 2 {
-     Branch<3>
-   }
-
-   bb 3 {
-     Return v0
-   }
- }
-)";
-  std::unique_ptr<Function> func = HIRParser().ParseHIR(src);
-
-  auto bb0 = func->cfg.getBlockById(0);
-  auto bb1 = func->cfg.getBlockById(1);
-  auto bb2 = func->cfg.getBlockById(2);
-  auto bb3 = func->cfg.getBlockById(3);
-
-  DominatorAnalysis doms(*func);
-
-  EXPECT_EQ(doms.immediateDominator(bb0), nullptr);
-  EXPECT_EQ(doms.immediateDominator(bb1), bb0);
-  EXPECT_EQ(doms.immediateDominator(bb2), bb0);
-  EXPECT_EQ(doms.immediateDominator(bb3), bb0);
-}
-
-TEST_F(DominatorAnalysisTest, CorrectlyComputesComplexCFG) {
-  const char* src = R"(
-fun dominators {
-   bb 0 {
-     v0 = LoadArg<0>
-     Branch<1>
-   }
-
-   bb 1 {
-     CondBranch<2, 4> v0
-   }
-
-   bb 2 {
-     Branch<3>
-   }
-
-   bb 3 {
-     CondBranch<5, 7> v0
-   }
-
-   bb 4 {
-     Branch<5>
-   }
-
-   bb 5 {
-     Branch<6>
-   }
-
-   bb 6 {
-     Branch<7>
-   }
-
-   bb 7 {
-     Return v0
-   }
- }
-)";
-  std::unique_ptr<Function> func = HIRParser().ParseHIR(src);
-
-  auto bb0 = func->cfg.getBlockById(0);
-  auto bb1 = func->cfg.getBlockById(1);
-  auto bb2 = func->cfg.getBlockById(2);
-  auto bb3 = func->cfg.getBlockById(3);
-  auto bb4 = func->cfg.getBlockById(4);
-  auto bb5 = func->cfg.getBlockById(5);
-  auto bb6 = func->cfg.getBlockById(6);
-  auto bb7 = func->cfg.getBlockById(7);
-
-  DominatorAnalysis doms(*func);
-
-  EXPECT_EQ(doms.immediateDominator(bb0), nullptr);
-  EXPECT_EQ(doms.immediateDominator(bb1), bb0);
-  EXPECT_EQ(doms.immediateDominator(bb2), bb1);
-  EXPECT_EQ(doms.immediateDominator(bb3), bb2);
-  EXPECT_EQ(doms.immediateDominator(bb4), bb1);
-  EXPECT_EQ(doms.immediateDominator(bb5), bb1);
-  EXPECT_EQ(doms.immediateDominator(bb6), bb5);
-  EXPECT_EQ(doms.immediateDominator(bb7), bb1);
-
-  std::unordered_set<const BasicBlock*> dommed = doms.getBlocksDominatedBy(bb7);
-  EXPECT_EQ(dommed.size(), 1);
-  EXPECT_TRUE(dommed.contains(bb7));
-
-  dommed = doms.getBlocksDominatedBy(bb6);
-  EXPECT_EQ(dommed.size(), 1);
-  EXPECT_TRUE(dommed.contains(bb6));
-
-  dommed = doms.getBlocksDominatedBy(bb5);
-  EXPECT_EQ(dommed.size(), 2);
-  EXPECT_TRUE(dommed.contains(bb5));
-  EXPECT_TRUE(dommed.contains(bb6));
-
-  dommed = doms.getBlocksDominatedBy(bb4);
-  EXPECT_EQ(dommed.size(), 1);
-  EXPECT_TRUE(dommed.contains(bb4));
-
-  dommed = doms.getBlocksDominatedBy(bb3);
-  EXPECT_EQ(dommed.size(), 1);
-  EXPECT_TRUE(dommed.contains(bb3));
-
-  dommed = doms.getBlocksDominatedBy(bb2);
-  EXPECT_EQ(dommed.size(), 2);
-  EXPECT_TRUE(dommed.contains(bb2));
-  EXPECT_TRUE(dommed.contains(bb3));
-
-  dommed = doms.getBlocksDominatedBy(bb1);
-  EXPECT_EQ(dommed.size(), 7);
-  EXPECT_TRUE(dommed.contains(bb1));
-  EXPECT_TRUE(dommed.contains(bb2));
-  EXPECT_TRUE(dommed.contains(bb3));
-  EXPECT_TRUE(dommed.contains(bb4));
-  EXPECT_TRUE(dommed.contains(bb5));
-  EXPECT_TRUE(dommed.contains(bb6));
-  EXPECT_TRUE(dommed.contains(bb7));
-
-  dommed = doms.getBlocksDominatedBy(bb0);
-  EXPECT_EQ(dommed.size(), 8);
-  EXPECT_TRUE(dommed.contains(bb0));
-  EXPECT_TRUE(dommed.contains(bb1));
-  EXPECT_TRUE(dommed.contains(bb2));
-  EXPECT_TRUE(dommed.contains(bb3));
-  EXPECT_TRUE(dommed.contains(bb4));
-  EXPECT_TRUE(dommed.contains(bb5));
-  EXPECT_TRUE(dommed.contains(bb6));
-  EXPECT_TRUE(dommed.contains(bb7));
+  EXPECT_TRUE(assign.isAssignedIn(b4, v0));
+  EXPECT_FALSE(assign.isAssignedIn(b4, v1));
+  EXPECT_TRUE(assign.isAssignedOut(b4, v0));
+  EXPECT_FALSE(assign.isAssignedOut(b4, v1));
 }
 
 class RegisterTypeHintsTest : public RuntimeTest {};
@@ -583,7 +477,7 @@ fun type_hints {
    }
  }
 )";
-  std::unique_ptr<Function> func = HIRParser().ParseHIR(src);
+  std::unique_ptr<Function> func = HIRParser().parseHIR(src);
 
   auto bb0 = func->cfg.getBlockById(0);
   const Instr& v0_load = bb0->front();
@@ -634,3 +528,5 @@ fun type_hints {
 
   EXPECT_EQ(seen.dominatingTypeHint(v1, bb4), nullptr);
 }
+
+} // namespace cinderx

@@ -2,15 +2,16 @@
 
 # pyre-strict
 
+import contextlib
 import dis
 import sys
 import unittest
 from types import ModuleType
-from typing import Callable, TypeVar
+from typing import Callable, Iterator, TypeVar
 
 import cinderx
 import cinderx.jit
-from cinderx.test_support import passIf
+from cinderx.test_support import passIf, passUnless
 
 
 TCallableRet = TypeVar("TCallableRet")
@@ -32,7 +33,7 @@ if hasattr(dis, "_specialized_instructions"):
 # because we compare this output against a specific instruction name to ensure
 # it no longer contains the original.
 def opnames(func: Callable[..., TCallableRet]) -> list[str]:
-    bytecode = dis.Bytecode(func, adaptive=True)  # pyre-ignore
+    bytecode = dis.Bytecode(func, adaptive=True)
     return [_all_opnames[insn.opcode] for insn in bytecode]
 
 
@@ -51,8 +52,32 @@ def specialize(
     cinderx.jit.force_compile(func)
 
 
+# The specialized opcodes under test only run in CinderX's eval loop, which
+# needs the frame evaluator installed.
+@contextlib.contextmanager
+def frame_evaluator() -> Iterator[None]:
+    if cinderx.is_frame_evaluator_installed():
+        yield
+        return
+
+    cinderx.install_frame_evaluator()
+    try:
+        yield
+    finally:
+        cinderx.remove_frame_evaluator()
+
+
+# Like specialize(), but stays interpreted so the interpreter's guards run.
+def specialize_interpreted(
+    func: Callable[..., TCallableRet], callable: Callable[[], TCallableRet]
+) -> None:
+    cinderx.jit.jit_suppress(func)
+
+    for _ in range(5):
+        callable()
+
+
 @passIf(not cinderx.jit.is_enabled(), "Tests functionality on the JIT")
-@passIf(sys.version_info < (3, 12), "Requires the specializing interpreter")
 class SpecializationTests(unittest.TestCase):
     def setUp(self) -> None:
         cinderx.jit.enable_specialized_opcodes()
@@ -158,6 +183,21 @@ class SpecializationTests(unittest.TestCase):
             self.assertIn("BINARY_SUBSCR_LIST_INT", opnames(f))
         self.assertEqual(f(["c", "d"], 0), "c")
 
+    def test_store_subscr_list_int_bounds(self) -> None:
+        def f(a: list[str], b: int, value: str) -> None:
+            a[b] = value
+
+        specialize(f, lambda: f(["a", "b", "c"], 0, "x"))
+
+        self.assertNotIn("STORE_SUBSCR", opnames(f))
+        self.assertIn("STORE_SUBSCR_LIST_INT", opnames(f))
+
+        seq = ["a", "b", "c"]
+        f(seq, -len(seq), "x")
+        self.assertEqual(seq, ["x", "b", "c"])
+        with self.assertRaises(IndexError):
+            f(seq, -len(seq) - 1, "x")
+
     def test_binary_subscr_tuple_int(self) -> None:
         def f(a: tuple[str, str], b: int) -> str:
             return a[b]
@@ -170,7 +210,11 @@ class SpecializationTests(unittest.TestCase):
         else:
             self.assertNotIn("BINARY_SUBSCR", opnames(f))
             self.assertIn("BINARY_SUBSCR_TUPLE_INT", opnames(f))
-        self.assertEqual(f(("c", "d"), 0), "c")
+        seq = ("c", "d")
+        self.assertEqual(f(seq, 0), "c")
+        self.assertEqual(f(seq, -len(seq)), "c")
+        with self.assertRaises(IndexError):
+            f(seq, -len(seq) - 1)
 
     def test_compare_op_float(self) -> None:
         def f(a: float, b: float) -> bool:
@@ -181,6 +225,71 @@ class SpecializationTests(unittest.TestCase):
         self.assertNotIn("COMPARE_OP", opnames(f))
         self.assertIn("COMPARE_OP_FLOAT", opnames(f))
         self.assertEqual(f(2.5, 3.5), True)
+
+    def test_compare_op_float_comparisons(self) -> None:
+        import operator
+
+        nan = float("nan")
+        # Ordered, equal, and NaN inputs. Every ordering comparison involving a
+        # NaN must be False, `nan == nan` must be False, and `nan != nan` must be
+        # True, matching CPython.
+        cases = [
+            (2.5, 3.5),
+            (3.5, 2.5),
+            (2.5, 2.5),
+            (-1.0, 1.0),
+            (nan, 2.5),
+            (2.5, nan),
+            (nan, nan),
+        ]
+
+        entries = [
+            ("<", operator.lt, lambda a, b: a < b),
+            ("<=", operator.le, lambda a, b: a <= b),
+            (">", operator.gt, lambda a, b: a > b),
+            (">=", operator.ge, lambda a, b: a >= b),
+            ("==", operator.eq, lambda a, b: a == b),
+            ("!=", operator.ne, lambda a, b: a != b),
+        ]
+        for opname, ref, f in entries:
+            specialize(f, lambda: f(1.5, 2.5))
+            self.assertIn("COMPARE_OP_FLOAT", opnames(f), opname)
+            for a, b in cases:
+                self.assertEqual(f(a, b), ref(a, b), f"{a} {opname} {b}")
+
+    def test_compare_op_float_branch(self) -> None:
+        import operator
+
+        nan = float("nan")
+        # Same as test_compare_op_float_comparisons, but the comparison feeds an
+        # `if` so the backend may fuse it into a conditional branch. The fused
+        # branch picks its condition from the comparison opcode, so it must stay
+        # NaN-correct and agree with the standalone comparison.
+        cases = [
+            (2.5, 3.5),
+            (3.5, 2.5),
+            (2.5, 2.5),
+            (-1.0, 1.0),
+            (nan, 2.5),
+            (2.5, nan),
+            (nan, nan),
+        ]
+
+        entries = [
+            ("<", operator.lt, lambda a, b: True if a < b else False),
+            ("<=", operator.le, lambda a, b: True if a <= b else False),
+            (">", operator.gt, lambda a, b: True if a > b else False),
+            (">=", operator.ge, lambda a, b: True if a >= b else False),
+            ("==", operator.eq, lambda a, b: True if a == b else False),
+            ("!=", operator.ne, lambda a, b: True if a != b else False),
+        ]
+        for opname, ref, f in entries:
+            specialize(f, lambda: f(1.5, 2.5))
+            self.assertIn("COMPARE_OP_FLOAT", opnames(f), opname)
+            # Testing COMPARE_OP -> POP_JUMP_IF_FALSE control flow.
+            self.assertIn("POP_JUMP_IF_FALSE", opnames(f), opname)
+            for a, b in cases:
+                self.assertEqual(f(a, b), ref(a, b), f"{a} {opname} {b}")
 
     def test_compare_op_int(self) -> None:
         def f(a: int, b: int) -> bool:
@@ -214,6 +323,45 @@ class SpecializationTests(unittest.TestCase):
         self.assertNotIn("LOAD_ATTR", opnames(f))
         self.assertIn("LOAD_ATTR_MODULE", opnames(f))
         self.assertEqual(f(), sys.argv[0])
+
+    @passUnless(sys.version_info >= (3, 14), "3.12 only builds against Meta Python")
+    def test_load_attr_nondescriptor_with_values(self) -> None:
+        class C:
+            attr: object = "class-attr"
+
+        def f(o: C) -> object:
+            return o.attr
+
+        with frame_evaluator():
+            specialize_interpreted(f, lambda: f(C()))
+
+            self.assertNotIn("LOAD_ATTR", opnames(f))
+            self.assertIn("LOAD_ATTR_NONDESCRIPTOR_WITH_VALUES", opnames(f))
+
+            # Setting the attribute on an instance bumps the shared keys, so the
+            # load must deopt instead of returning the cached class attribute.
+            o = C()
+            o.attr = "instance-attr"
+            self.assertEqual(f(o), "instance-attr")
+
+    @passUnless(sys.version_info >= (3, 14), "3.12 only builds against Meta Python")
+    def test_load_attr_method_with_values(self) -> None:
+        class C:
+            def m(self) -> str:
+                return "class-method"
+
+        def f(o: C) -> str:
+            return o.m()
+
+        with frame_evaluator():
+            specialize_interpreted(f, lambda: f(C()))
+
+            self.assertNotIn("LOAD_ATTR", opnames(f))
+            self.assertIn("LOAD_ATTR_METHOD_WITH_VALUES", opnames(f))
+
+            o = C()
+            setattr(o, "m", lambda: "instance-attr")
+            self.assertEqual(f(o), "instance-attr")
 
     def test_store_subscr_dict(self) -> None:
         def f(a: dict[str, str], b: str, c: str) -> None:
@@ -249,6 +397,82 @@ class SpecializationTests(unittest.TestCase):
         self.assertNotIn("UNPACK_SEQUENCE", opnames(f))
         self.assertIn("UNPACK_SEQUENCE_TUPLE", opnames(f))
         self.assertEqual(f(("c", "d", "e")), "c")
+
+    @passUnless(sys.version_info >= (3, 14), "TO_BOOL was added in Python 3.13")
+    def test_to_bool_bool(self) -> None:
+        def f(a: bool) -> str:
+            return "y" if a else "n"
+
+        specialize(f, lambda: f(True))
+
+        self.assertNotIn("TO_BOOL", opnames(f))
+        self.assertIn("TO_BOOL_BOOL", opnames(f))
+        self.assertEqual(f(True), "y")
+        self.assertEqual(f(False), "n")
+
+    @passUnless(sys.version_info >= (3, 14), "TO_BOOL was added in Python 3.13")
+    def test_to_bool_bool_deopt(self) -> None:
+        def f(a: object) -> str:
+            return "y" if a else "n"
+
+        specialize(f, lambda: f(True))
+
+        self.assertNotIn("TO_BOOL", opnames(f))
+        self.assertIn("TO_BOOL_BOOL", opnames(f))
+
+        # TO_BOOL_BOOL keeps its operand as the result, so the guard is the
+        # only thing stopping a non-bool from being compared against Py_True.
+        self.assertEqual(f((1, 2)), "y")
+        self.assertEqual(f(()), "n")
+        self.assertEqual(f(5), "y")
+        self.assertEqual(f(""), "n")
+
+    @passUnless(sys.version_info >= (3, 14), "TO_BOOL was added in Python 3.13")
+    def test_to_bool_int(self) -> None:
+        def f(a: int) -> str:
+            return "y" if a else "n"
+
+        specialize(f, lambda: f(5))
+
+        self.assertNotIn("TO_BOOL", opnames(f))
+        self.assertIn("TO_BOOL_INT", opnames(f))
+        self.assertEqual(f(5), "y")
+        self.assertEqual(f(0), "n")
+
+    @passUnless(sys.version_info >= (3, 14), "TO_BOOL was added in Python 3.13")
+    def test_to_bool_list(self) -> None:
+        def f(a: list[int]) -> str:
+            return "y" if a else "n"
+
+        specialize(f, lambda: f([1]))
+
+        self.assertNotIn("TO_BOOL", opnames(f))
+        self.assertIn("TO_BOOL_LIST", opnames(f))
+        self.assertEqual(f([1]), "y")
+        self.assertEqual(f([]), "n")
+
+    @passUnless(sys.version_info >= (3, 14), "TO_BOOL was added in Python 3.13")
+    def test_to_bool_none(self) -> None:
+        def f(a: object) -> str:
+            return "y" if a else "n"
+
+        specialize(f, lambda: f(None))
+
+        self.assertNotIn("TO_BOOL", opnames(f))
+        self.assertIn("TO_BOOL_NONE", opnames(f))
+        self.assertEqual(f(None), "n")
+
+    @passUnless(sys.version_info >= (3, 14), "TO_BOOL was added in Python 3.13")
+    def test_to_bool_str(self) -> None:
+        def f(a: str) -> str:
+            return "y" if a else "n"
+
+        specialize(f, lambda: f("x"))
+
+        self.assertNotIn("TO_BOOL", opnames(f))
+        self.assertIn("TO_BOOL_STR", opnames(f))
+        self.assertEqual(f("x"), "y")
+        self.assertEqual(f(""), "n")
 
     def test_unpack_sequence_two_tuple(self) -> None:
         def f(li: tuple[str, str]) -> str:

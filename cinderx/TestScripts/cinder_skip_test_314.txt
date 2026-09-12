@@ -4,8 +4,15 @@ test.test_perf_profiler.TestPerfTrampoline.test_trampoline_works
 # This test hits a deprecation warning about forking in a multi-threaded process
 test.test_threading.ThreadTests.test_native_id_after_fork
 
-# This is currently intermittently failing (T243385914)
-test_cinderx.test_parallel_gc.*
-
 # T249123927
 test.test_generators.GeneratorTest.test_close_clears_frame
+
+# When run with JIT there's an extra heap object which causes this test to fail.
+test.test_gc.GCTests.test_heap_size
+
+# These appear to be broken upstream without CinderX
+test.test_urllib.urlopen_HttpTests.test_url_host_with_control_char_rejected
+test.test_urllib.urlopen_HttpTests.test_url_host_with_newline_header_injection_rejected
+
+# AI thinks this is broken upstream but fixed in 3.15+
+test.test_zipimport.CompressedZipImportTestCase.testPackageExplicitDirectories

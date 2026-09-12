@@ -1,6 +1,6 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# Functionality shared between 3.10 and 3.12 versions of cinder_test_runner*.py
+# Functionality shared between versions of cinder_test_runner*.py
 
 import ctypes
 import io
@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from cinderx.test_support import is_asan_build
+from cinderx.test_support import is_sanitizer_build
 
 
 MAX_WORKERS = 64
@@ -120,7 +120,8 @@ class TestLog:
         self.pid = pid
         self.test_order: List[str] = []
         if path is None:
-            self.path = tempfile.NamedTemporaryFile(delete=False).name
+            fd, self.path = tempfile.mkstemp()
+            os.close(fd)
         else:
             self.path = path
             self._deserialize()
@@ -195,7 +196,7 @@ class ASANLogManipulator:
         self._log_path_base = None
         self._base_asan_options = None
 
-        if not is_asan_build():
+        if not is_sanitizer_build():
             return
 
         asan_options = os.environ.get("ASAN_OPTIONS", "")

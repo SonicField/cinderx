@@ -4,9 +4,10 @@
 
 #include "cinderx/python.h"
 
+#include "cinderx/Common/containers.h"
+#include "cinderx/Common/hugepages.h"
 #include "cinderx/Common/watchers.h"
 #include "cinderx/Jit/code_allocator_iface.h"
-#include "cinderx/Jit/containers.h"
 #include "cinderx/Jit/context_iface.h"
 #include "cinderx/Jit/generators_mm_iface.h"
 #include "cinderx/Jit/global_cache_iface.h"
@@ -14,216 +15,193 @@
 #include "cinderx/Jit/symbolizer_iface.h"
 #include "cinderx/async_lazy_value_iface.h"
 
+#include <atomic>
+#include <functional>
 #include <memory>
+#include <thread>
 #include <unordered_map>
+#include <vector>
 
 namespace cinderx {
 
-class ModuleState {
- public:
-  // Implements CPython's traverse functionality for tracing through to GC
-  // references
+struct ModuleState;
+
+extern ModuleState* s_cinderx_state;
+
+// State for the entire CinderX module.
+//
+// Prefer stashing data here instead of in global variables whenever possible.
+// Especially for Python objects as this state is traversed and cleared by the
+// Python GC.
+struct ModuleState {
+  // Implement CPython's traverse functionality for tracing through to GC
+  // references.
   int traverse(visitproc visit, void* arg);
 
-  // Implements CPython's clear functionality for dropping GC references
+  // Implement CPython's clear functionality for dropping GC references.
   int clear();
 
-  jit::IGlobalCacheManager* cacheManager() const {
-    return cache_manager_.get();
-  }
+  // Return the HugePageArena shared by all live SlabArenas, creating it on
+  // demand. The arena (and every 2MB chunk it owns) stays alive as long as at
+  // least one holder exists, and is freed once the last one is destroyed. A
+  // subsequent call after that creates a fresh arena.
+  std::shared_ptr<HugePageArena> getSharedHugePageArena();
 
-  void setCacheManager(jit::IGlobalCacheManager* cache_manager) {
-    cache_manager_ = std::unique_ptr<jit::IGlobalCacheManager>(cache_manager);
-  }
+  void afterForkChild();
 
-  jit::ICodeAllocator* codeAllocator() const {
-    return code_allocator_.get();
-  }
+  // pthread_atfork() handlers for this state's own lock and the shared
+  // HugePageArena behind it.  These are the innermost of the JIT's fork
+  // handlers, matching the order SlabArena::allocate() takes them in.
+  void atForkPrepare();
+  void atForkParent();
+  void atForkChild();
 
-  void setCodeAllocator(jit::ICodeAllocator* code_allocator) {
-    code_allocator_.reset(code_allocator);
-  }
+  // Wait for any background multi-threaded compile worker threads to finish
+  // and drop them.  Safe to call when no compile is in progress (no-op).
+  void joinCompileWorkers();
 
-  jit::IJitContext* jitContext() const {
-    return jit_context_.get();
-  }
+  // State for dict/type/code/func watchers registered with CPython.
+  WatcherState watcher_state;
 
-  void setJitContext(jit::IJitContext* context) {
-    jit_context_ = std::unique_ptr<jit::IJitContext>(context);
-  }
+  // Assorted JIT state.
+  std::unique_ptr<jit::IGlobalCacheManager> cache_manager;
+  std::unique_ptr<jit::ICodeAllocator> code_allocator;
+  std::unique_ptr<jit::ISymbolizer> symbolizer;
+  std::unique_ptr<jit::IJitContext> jit_context;
+  std::unique_ptr<jit::IJITList> jit_list;
+  std::unique_ptr<jit::IJitGenFreeList> jit_gen_free_list;
 
-  jit::IJITList* jitList() const {
-    return jit_list_.get();
-  }
+  std::unique_ptr<IAsyncLazyValueState> async_lazy_value;
 
-  void setJitList(std::unique_ptr<jit::IJITList> jit_list) {
-    jit_list_ = std::move(jit_list);
-  }
+  // CinderX's own coroutine and generator types used by the JIT.
+  Ref<PyTypeObject> coro_type;
+  Ref<PyTypeObject> gen_type;
 
-  jit::ISymbolizer* symbolizer() const {
-    return symbolizer_.get();
-  }
+  // Type for the custom awaitable returned by CinderX's anext() replacement.
+  Ref<PyTypeObject> anext_awaitable_type;
 
-  void setSymbolizer(jit::ISymbolizer* symbolizer) {
-    symbolizer_ = std::unique_ptr<jit::ISymbolizer>(symbolizer);
-  }
+  // Types for JIT-compiled functions and their detached data.  Created lazily
+  // when the JIT is initialized.
+  Ref<PyTypeObject> compiled_function_type;
+  Ref<PyTypeObject> compiled_function_data_type;
 
-  IAsyncLazyValueState* asyncLazyValueState() {
-    return async_lazy_value_.get();
-  }
+  // Type for the awaitable wrapper used by the Static Python classloader.
+  Ref<PyTypeObject> awaitable_wrapper_type;
 
-  void setAsyncLazyValueState(IAsyncLazyValueState* state) {
-    async_lazy_value_ = std::unique_ptr<IAsyncLazyValueState>(state);
-  }
+  // The cinderx.StaticTypeError exception type.
+  Ref<PyTypeObject> static_type_error;
 
-  void setCoroType(BorrowedRef<PyTypeObject> coro_type) {
-    coro_type_ = Ref<PyTypeObject>::create(coro_type);
-  }
+  // Cache for generic type instantiations (e.g. list[int]).
+  Ref<PyDictObject> genericinst_cache;
 
-  BorrowedRef<PyTypeObject> coroType() const {
-    return coro_type_;
-  }
+  // Cache for the Static Python class loader.
+  Ref<PyDictObject> classloader_cache;
 
-  void setGenType(BorrowedRef<PyTypeObject> gen_type) {
-    gen_type_ = Ref<PyTypeObject>::create(gen_type);
-  }
+  // Mapping from module name to classloader cache keys for that module.
+  Ref<PyDictObject> classloader_cache_module_to_keys;
 
-  BorrowedRef<PyTypeObject> genType() const {
-    return gen_type_;
-  }
+  // Cache for Static Python primitive values (int/float/etc.) by type.
+  Ref<PyListObject> value_cache;
 
-  // Sets the value of sys._clear_type_caches when CinderX was initialized.
-  // We then replace it with a function which forwards to the original.
-  void setSysClearCaches(BorrowedRef<> clear_caches) {
-    sys_clear_caches_ = Ref<>::create(clear_caches);
-  }
+  // Mapping from Static Python value types to their indices.
+  Ref<PyDictObject> value_indices;
 
-#if PY_VERSION_HEX < 0x030E0000
-  void setFrameReifier(BorrowedRef<> frame_reifier) {
-    frame_reifier_ = Ref<>::create(frame_reifier);
-  }
+  // Running offset for assigning type indices to Static Python types.
+  int32_t type_index_offset{0};
 
-  BorrowedRef<> frameReifier() const {
-    return frame_reifier_;
-  }
-#endif
+  // Cache of dlopen'd shared library handles for invoke_native.
+  Ref<PyDictObject> dlopen_cache;
 
-  // Gets the value of sys._clear_type_caches when CinderX was initialized.
-  BorrowedRef<> sysClearCaches() const {
-    return sys_clear_caches_;
-  }
+  // Cache of dlsym'd function pointers for invoke_native.
+  Ref<PyDictObject> dlsym_cache;
 
-  BorrowedRef<> getOriginalSysMonitoringRegisterCallback() const {
-    return orig_sys_monitoring_register_callback_;
-  }
+  // Python helper function used by the invoke_native implementation.
+  Ref<PyFunctionObject> invoke_native_helper;
 
-  void setOriginalSysMonitoringRegisterCallback(BorrowedRef<> func) {
-    orig_sys_monitoring_register_callback_ = Ref<>::create(func);
-  }
+  // A callable that simply returns None, used by Static Python coroutines.
+  Ref<PyFunctionObject> return_none;
 
-  BorrowedRef<> getOriginalSysSetProfile() const {
-    return orig_sys_setprofile_;
-  }
+  // Weak reference callback for Static Python type cleanup.
+  Ref<PyCFunctionObject> weakref_callback;
 
-  void setOriginalSysSetProfile(BorrowedRef<> func) {
-    orig_sys_setprofile_ = Ref<>::create(func);
-  }
+  // Cached IndexError message for Static Python checked list access.
+  Ref<PyUnicodeObject> indexerr;
 
-  BorrowedRef<> getOriginalSysSetTrace() const {
-    return orig_sys_settrace_;
-  }
+  // object.__getattribute__
+  Ref<> object_getattribute;
 
-  void setOriginalSysSetTrace(BorrowedRef<> func) {
-    orig_sys_settrace_ = Ref<>::create(func);
-  }
+  // Sentinel function object placed in JIT frames to identify them.
+  Ref<> frame_reifier;
 
-  void setAnextAwaitableType(BorrowedRef<PyTypeObject> type) {
-    anext_awaitable_type_ = Ref<PyTypeObject>::create(type);
-  }
+  // Original sys._clear_type_cache, forwarded to by our replacement.
+  Ref<> sys_clear_caches;
 
-  BorrowedRef<PyTypeObject> anextAwaitableType() const {
-    return anext_awaitable_type_;
-  }
+  // Reference to builtins.next so the JIT can recognize and inline calls to it.
+  Ref<> builtin_next;
 
-  void setBuiltinNext(BorrowedRef<> builtin_next) {
-    builtin_next_ = Ref<>::create(builtin_next);
-  }
-
-  BorrowedRef<> builtinNext() const {
-    return builtin_next_;
-  }
-
-  jit::UnorderedSet<BorrowedRef<PyFunctionObject>>& perfTrampolineWorklist() {
-    return perf_trampoline_worklist_;
-  }
-
-  void setModule(BorrowedRef<> module) {
-    cinderx_module_ = module;
-  }
-
-  // Returns the PyModule instance for the CinderX module. This can be useful if
-  // we have live data backed by the module, in which case we can increase the
-  // refcount of the module to prevent it from being freed prematurely.
-  BorrowedRef<> module() const {
-    return cinderx_module_;
-  }
-
-  jit::IJitGenFreeList* jitGenFreeList() const {
-    return jit_gen_free_list_.get();
-  }
-
-  void setJitGenFreeList(jit::IJitGenFreeList* jit_gen_free_list) {
-    jit_gen_free_list_ =
-        std::unique_ptr<jit::IJitGenFreeList>(jit_gen_free_list);
-  }
-
-  // Returns a dictionary of type->dict[name, members] for standard builtin
-  // types.
-  std::unordered_map<PyTypeObject*, Ref<>>& builtinMembers() {
-    return builtin_members_;
-  }
-
-  bool initBuiltinMembers();
-
-  WatcherState& watcherState();
-
-  jit::UnorderedSet<BorrowedRef<>>& registeredCompilationUnits();
-
- private:
-  WatcherState watcher_state_;
-
-  std::unique_ptr<jit::IGlobalCacheManager> cache_manager_;
-  std::unique_ptr<jit::ICodeAllocator> code_allocator_;
-  std::unique_ptr<jit::ISymbolizer> symbolizer_;
-  std::unique_ptr<jit::IJitContext> jit_context_;
-  std::unique_ptr<jit::IJITList> jit_list_;
-  std::unique_ptr<IAsyncLazyValueState> async_lazy_value_;
-  std::unique_ptr<jit::IJitGenFreeList> jit_gen_free_list_;
-  Ref<PyTypeObject> coro_type_, gen_type_, anext_awaitable_type_;
-  std::unordered_map<PyTypeObject*, Ref<>> builtin_members_;
-#if PY_VERSION_HEX < 0x030E0000
-  Ref<> frame_reifier_;
-#endif
-  Ref<> sys_clear_caches_, builtin_next_;
-  Ref<> orig_sys_monitoring_register_callback_;
-  Ref<> orig_sys_setprofile_;
-  Ref<> orig_sys_settrace_;
-
-  // Function and code objects ("units") registered for compilation.
-  jit::UnorderedSet<BorrowedRef<>> registered_compilation_units;
+  // Original references to instrumentation functions that CinderX patches over.
+  Ref<> orig_sys_monitoring_register_callback;
+  Ref<> orig_sys_monitoring_free_tool_id;
+  Ref<> orig_sys_setprofile;
+  Ref<> orig_sys_settrace;
 
   // Function objects registered for pre-fork perf-trampoline compilation.
-  jit::UnorderedSet<BorrowedRef<PyFunctionObject>> perf_trampoline_worklist_;
+  UnorderedSet<BorrowedRef<PyFunctionObject>> perf_trampoline_worklist;
 
-  BorrowedRef<> cinderx_module_;
+  // The CinderX PyModule instance itself.  Stored so that code with data backed
+  // by the module (e.g. the generator free-list) can prevent premature cleanup
+  // by holding a reference to it.
+  BorrowedRef<> cinderx_module;
+
+  // Counters for multithreaded compilation diagnostics.
+  std::atomic<int> compile_workers_attempted{0};
+  std::atomic<int> compile_workers_retries{0};
+
+  // Background worker threads spawned for the current multi-threaded compile.
+  // Tracked here so the runtime can wait for them to finish before finalizing
+  // JIT state they depend on.
+  std::vector<std::thread> compile_worker_threads;
+
+  // Callback invoked when a compilation unit is deleted during preloading.
+  std::function<void(BorrowedRef<>)> unit_deleted_during_preload;
+
+  // Index for the extra data that CinderX saves on code objects with
+  // PyUnstable_Code_SetExtra, and loads with PyUnstable_Code_GetExtra.
+  Py_ssize_t code_extra_index{-1};
+
+  // Whether the Static Python audit hook has been installed.
+  bool sp_audit_hook_installed{false};
+
+  // The vectorcall entry point for Static Python functions executed in the
+  // interpreter.  Set when the interpreter feature is enabled, otherwise
+  // nullptr which causes getInterpretedVectorcall to fall back to
+  // Ci_PyFunction_Vectorcall.
+  std::atomic<vectorcallfunc> static_function_vectorcall{nullptr};
+
+  // Whether runtime modification of Strict Module types is allowed.
+  bool enable_patching{false};
+
+  // Whether this module state was fully initialized. False for subinterpreters
+  // where _cinderx does not support loading.
+  bool fully_initialized{false};
+
+  bool tstate_offset_inited{false};
+  int32_t tstate_offset{-1};
+
+ private:
+  std::mutex mutex_;
+  std::weak_ptr<HugePageArena> huge_page_arena_;
 };
 
-// Get the global ModuleState singleton.
-ModuleState* getModuleState();
+// Get the ModuleState from the CinderX module object.
+inline ModuleState* getModuleState() {
+  return s_cinderx_state;
+}
 
 // Get the ModuleState from the CinderX module object.
 //
-// Prefer this to using the global singleton when possible.
+// Prefer this to using the global singleton when possible (unless
+// it's in a very hot part of code).
 ModuleState* getModuleState(BorrowedRef<> mod);
 
 // Set the global ModuleState singleton, using the CinderX module object.
@@ -235,3 +213,11 @@ void setModuleState(BorrowedRef<> mod);
 void removeModuleState();
 
 } // namespace cinderx
+
+// Common constants array (Python 3.14+).
+#if PY_VERSION_HEX >= 0x030E0000
+extern "C" {
+#include "pycore_opcode_utils.h" // NUM_COMMON_CONSTANTS
+extern PyObject* Ci_common_consts[NUM_COMMON_CONSTANTS];
+}
+#endif

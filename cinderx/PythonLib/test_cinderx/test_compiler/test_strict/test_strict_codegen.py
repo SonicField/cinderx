@@ -154,6 +154,7 @@ class StrictBuiltinCompilationTests(StrictTestWithCheckerBase):
                 return x
         """
         mod = self.compile_and_run(code)
+        # pyrefly: ignore [missing-attribute]
         mod.x = 42
 
     def test_deleted(self) -> None:
@@ -600,9 +601,8 @@ class StrictCheckedCompilationTests(StrictTestWithCheckerBase):
     def test_strictmod_cached_property(self) -> None:
         codestr = """
         import __strict__
-        from __strict__ import strict_slots, _mark_cached_property, mutable
+        from __strict__ import strict_slots, mutable
         def dec(x):
-            _mark_cached_property(x, False, dec)
             class C:
                 def __get__(self, inst, ctx):
                     return x(inst)

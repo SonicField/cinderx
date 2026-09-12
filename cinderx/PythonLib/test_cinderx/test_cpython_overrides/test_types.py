@@ -4,26 +4,21 @@
 import gc
 import sys
 import typing
-import unittest.mock
+import unittest
 
-# pyre-ignore[21]: can't find test.support
-from test.support import cpython_only
-
+from cinderx.test_support import passUnless
 
 T = typing.TypeVar("T")
 
 
 class CinderX_UnionTests(unittest.TestCase):
-    @cpython_only
+    @passUnless(hasattr(sys, "gettotalrefcount"), "Uses sys.gettotalrefcount")
     def test_or_type_operator_reference_cycle(self) -> None:
-        if not hasattr(sys, "gettotalrefcount"):
-            self.skipTest("Cannot get total reference count.")
         gc.collect()
         before = sys.gettotalrefcount()
         # CinderX: This is changed from 30 to 1000
         for _ in range(1000):
             T = typing.TypeVar("T")
-            # pyre-ignore[16]: list has no attr __getitem__
             U = int | list[T]
             # pyre-ignore[16]: TypeVar doesn't have blah
             T.blah = U

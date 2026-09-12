@@ -147,9 +147,6 @@ BIN_OPS: dict[type[ast.AST], tuple[str, int]] = {
 def _format_binaryop(node: ast.BinOp, level: int) -> str:
     tgt_level = PR_FACTOR
 
-    # pyre-fixme[6]: For 1st argument expected `Type[Union[Add, BitAnd, BitOr,
-    #  BitXor, Div, FloorDiv, LShift, MatMult, Mod, Mult, Pow, RShift, Sub]]` but got
-    #  `Type[operator]`.
     op, tgt_level = BIN_OPS[type(node.op)]
     rassoc = 0
     if isinstance(node.op, ast.Pow):
@@ -230,13 +227,14 @@ def _format_boolop(node: ast.BoolOp, level: int) -> str:
 
 def _format_arguments(node: ast.arguments) -> str:
     res = []
+    first_default = len(node.args) - len(node.defaults)
     for i, arg in enumerate(node.args):
         if i:
             res.append(", ")
         res.append(arg.arg)
-        if i < len(node.defaults):
+        if i >= first_default:
             res.append("=")
-            res.append(to_expr(node.defaults[i]))
+            res.append(to_expr(node.defaults[i - first_default]))
 
     if node.vararg or node.kwonlyargs:
         if node.args:
@@ -307,6 +305,7 @@ def _format_gen_exp(node: ast.GeneratorExp, level: int) -> str:
 
 def format_fstring_elt(res: list[str], elt: ast.expr, is_format_spec: bool) -> None:
     if isinstance(elt, ast.Constant):
+        # pyrefly: ignore [bad-argument-type]
         res.append(elt.value)
     elif isinstance(elt, ast.JoinedStr):
         res.append(format_joinedstr(elt, PR_TEST, is_format_spec))
@@ -365,33 +364,58 @@ def _format_constant(node: ast.Constant, level: int) -> str:
 with warnings.catch_warnings():
     warnings.simplefilter("ignore", category=DeprecationWarning)
 
-    # pyre-ignore[9]: Pyre tries to union all the keys and values into concrete types.
     _FORMATTERS: dict[type[ast.AST], Callable[[ast.AST, int], str]] = {
+        # pyrefly: ignore [bad-assignment]
         ast.Attribute: _format_attribute,
+        # pyrefly: ignore [bad-assignment]
         ast.Await: _format_await,
+        # pyrefly: ignore [bad-assignment]
         ast.BinOp: _format_binaryop,
+        # pyrefly: ignore [bad-assignment]
         ast.BoolOp: _format_boolop,
+        # pyrefly: ignore [bad-assignment]
         ast.Call: _format_call,
+        # pyrefly: ignore [bad-assignment]
         ast.Compare: _format_compare,
+        # pyrefly: ignore [bad-assignment]
         ast.Constant: _format_constant,
+        # pyrefly: ignore [bad-assignment]
         ast.Dict: _format_dict,
+        # pyrefly: ignore [bad-assignment]
         ast.DictComp: _format_dict_comp,
+        # pyrefly: ignore [bad-assignment]
         ast.FormattedValue: None,
+        # pyrefly: ignore [bad-assignment]
         ast.GeneratorExp: _format_gen_exp,
+        # pyrefly: ignore [bad-assignment]
         ast.IfExp: _format_if_exp,
+        # pyrefly: ignore [bad-assignment]
         ast.JoinedStr: format_joinedstr,
+        # pyrefly: ignore [bad-assignment]
         ast.Lambda: _format_lambda,
+        # pyrefly: ignore [bad-assignment]
         ast.List: _format_list,
+        # pyrefly: ignore [bad-assignment]
         ast.ListComp: _format_list_comp,
+        # pyrefly: ignore [bad-assignment]
         ast.Name: _format_name,
+        # pyrefly: ignore [bad-assignment]
         ast.Set: _format_set,
+        # pyrefly: ignore [bad-assignment]
         ast.SetComp: _format_set_comp,
+        # pyrefly: ignore [bad-assignment]
         ast.Slice: _format_slice,
+        # pyrefly: ignore [bad-assignment]
         ast.Starred: _format_starred,
+        # pyrefly: ignore [bad-assignment]
         ast.Subscript: _format_subscript,
+        # pyrefly: ignore [bad-assignment]
         ast.Tuple: _format_tuple,
+        # pyrefly: ignore [bad-assignment]
         ast.UnaryOp: _format_unaryop,
+        # pyrefly: ignore [bad-assignment]
         ast.Yield: _format_yield,
+        # pyrefly: ignore [bad-assignment]
         ast.YieldFrom: _format_yield_from,
         **(
             {

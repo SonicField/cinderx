@@ -2,20 +2,20 @@
 
 #include "cinderx/Jit/lir/inliner.h"
 
-#include "cinderx/Jit/containers.h"
+#include "cinderx/Common/containers.h"
 #include "cinderx/Jit/lir/c_helper_translations.h"
 #include "cinderx/Jit/lir/parser.h"
 
 #include <shared_mutex>
 #include <string_view>
 
-using namespace jit::codegen;
+using namespace cinderx::jit::codegen;
 
-namespace jit::lir {
+namespace cinderx::jit::lir {
 
 bool LIRInliner::inlineCalls(Function* func) {
   bool changed = false;
-  std::vector<BasicBlock*>& blocks = func->basicblocks();
+  std::vector<BasicBlock*>& blocks = func->basicBlocks();
 
   // Do not convert to a range-based for loop because 'blocks' is updated
   // inside the loop.
@@ -55,7 +55,7 @@ bool LIRInliner::inlineCall() {
   }
 
   // Split basic blocks of caller.
-  BasicBlock* block1 = call_instr_->basicblock();
+  BasicBlock* block1 = call_instr_->basicBlock();
   BasicBlock* block2 = block1->splitBefore(call_instr_);
 
   // Copy callee into caller.
@@ -87,7 +87,7 @@ bool LIRInliner::isInlineable(const Function* callee) {
 }
 
 bool LIRInliner::checkEntryExitReturn(const Function* callee) {
-  if (callee->basicblocks().empty()) {
+  if (callee->basicBlocks().empty()) {
     JIT_DLOG("Callee has no basic block.");
     return false;
   }
@@ -96,12 +96,12 @@ bool LIRInliner::checkEntryExitReturn(const Function* callee) {
     JIT_DLOG("Expect entry block to have no predecessors.");
     return false;
   }
-  BasicBlock* exit_block = callee->basicblocks().back();
+  BasicBlock* exit_block = callee->basicBlocks().back();
   if (!exit_block->successors().empty()) {
     JIT_DLOG("Expect exit block to have no successors.");
     return false;
   }
-  for (BasicBlock* bb : callee->basicblocks()) {
+  for (BasicBlock* bb : callee->basicBlocks()) {
     if (bb->predecessors().empty() && bb != entry_block) {
       JIT_DLOG("Expect callee to have only 1 entry block.");
       return false;
@@ -148,7 +148,7 @@ bool LIRInliner::checkLoadArg(const Function* callee) {
   size_t numInputs = call_instr_->getNumInputs() - 1;
   // Use check_load_arg to track if we are still in LoadArg instructions.
   bool check_load_arg = true;
-  for (auto bb : callee->basicblocks()) {
+  for (auto bb : callee->basicBlocks()) {
     for (auto& instr : bb->instructions()) {
       if (check_load_arg) {
         if (instr->isLoadArg()) {
@@ -183,7 +183,7 @@ lir::Function* LIRInliner::findCalleeFunction() {
   if (call_instr_->getNumInputs() < 1) {
     return nullptr;
   }
-  OperandBase* dest_operand = call_instr_->getInput(0);
+  Operand* dest_operand = call_instr_->getInput(0);
   if (!dest_operand->isImm()) {
     return nullptr;
   }
@@ -240,8 +240,8 @@ lir::Function* LIRInliner::parseFunction(uint64_t addr) {
 
 bool LIRInliner::resolveArguments() {
   // Remove load arg instructions and update virtual registers.
-  UnorderedMap<OperandBase*, LinkedOperand*> vreg_map;
-  auto const& caller_blocks = caller_->basicblocks();
+  UnorderedMap<Operand*, Operand*> vreg_map;
+  auto const& caller_blocks = caller_->basicBlocks();
   for (int i = callee_start_; i < callee_end_; i++) {
     auto bb = caller_blocks.at(i);
     auto it = bb->instructions().begin();
@@ -261,7 +261,7 @@ bool LIRInliner::resolveArguments() {
 }
 
 void LIRInliner::resolveLoadArg(
-    UnorderedMap<OperandBase*, LinkedOperand*>& vreg_map,
+    UnorderedMap<Operand*, Operand*>& vreg_map,
     BasicBlock* bb,
     instr_iter_t& instr_it) {
   auto instr = instr_it->get();
@@ -276,9 +276,8 @@ void LIRInliner::resolveLoadArg(
   // Based on the parameter type, resolve the kLoadArg.
   if (param->isImm()) {
     // For immediate values, change kLoadArg to kMove.
-    instr->setOpcode(Instruction::kMove);
-    auto param_copy =
-        std::make_unique<Operand>(instr, static_cast<Operand*>(param));
+    instr->setOpcode(Opcode::kMove);
+    auto param_copy = std::make_unique<Operand>(instr, param);
     param_copy->setConstant(param->getConstant());
     instr->setInput(0, std::move(param_copy));
     ++instr_it;
@@ -287,19 +286,18 @@ void LIRInliner::resolveLoadArg(
         param->isLinked(), "Inlined arguments must be immediate or linked.");
     // Otherwise, output of kLoadArg should be a virtual register.
     // For virtual registers, delete kLoadArg and replace uses.
-    vreg_map.emplace(instr->output(), static_cast<LinkedOperand*>(param));
+    vreg_map.emplace(instr->output(), param);
     instr_it = bb->instructions().erase(instr_it);
   }
 }
 
 void LIRInliner::resolveLinkedArgumentsUses(
-    UnorderedMap<OperandBase*, LinkedOperand*>& vreg_map,
+    UnorderedMap<Operand*, Operand*>& vreg_map,
     std::list<std::unique_ptr<Instruction>>::iterator& instr_it) {
-  auto setLinkedOperand = [&](OperandBase* opnd) {
-    auto new_def = map_get(vreg_map, opnd->getDefine(), nullptr);
+  auto setLinkedOperand = [&](Operand* opnd) {
+    Operand* new_def = map_get(vreg_map, opnd->getDefine(), nullptr);
     if (new_def != nullptr) {
-      auto opnd_linked = static_cast<LinkedOperand*>(opnd);
-      opnd_linked->setLinkedInstr(new_def->getLinkedOperand()->instr());
+      opnd->setLinkedInstr(new_def->getLinkedInstr());
     }
   };
   auto instr = instr_it->get();
@@ -324,32 +322,44 @@ void LIRInliner::resolveLinkedArgumentsUses(
 }
 
 void LIRInliner::resolveReturnValue() {
-  auto epilogue = caller_->basicblocks().at(callee_end_ - 1);
+  auto epilogue = caller_->basicBlocks().at(callee_end_ - 1);
 
   // Create phi instruction.
-  auto phi_instr =
-      epilogue->allocateInstr(Instruction::kPhi, nullptr, OutVReg());
+  auto phi_instr = epilogue->allocateInstr(Opcode::kPhi, nullptr, OutVReg());
+  bool has_return_value = false;
 
   // Find return instructions from predecessor of epilogue.
-  for (auto pred : epilogue->predecessors()) {
+  for (size_t index = 0; index < epilogue->numPredecessors(); ++index) {
+    IncomingEdge incoming_edge = epilogue->incomingEdge(index);
+    BasicBlock* pred = incoming_edge.predecessor();
     auto lastInstr = pred->getLastInstr();
     if (lastInstr != nullptr && lastInstr->isReturn()) {
-      phi_instr->allocateLabelInput(pred);
+      auto retIter = pred->getLastInstrIter();
       JIT_CHECK(
-          lastInstr->getNumInputs() > 0,
-          "Return instruction should have at least 1 input operand.");
-      phi_instr->appendInput(lastInstr->releaseInput(0));
-      pred->removeInstr(pred->getLastInstrIter());
+          retIter != pred->instructions().begin(),
+          "Expected a Move before Return");
+      auto moveIter = std::prev(retIter);
+      auto* moveInstr = moveIter->get();
+      JIT_CHECK(
+          moveInstr->isMove(),
+          "Expected Move before Return, got {}",
+          *moveInstr);
+
+      phi_instr->addPhiInput(incoming_edge, moveInstr->releaseInput(0));
+      has_return_value = true;
+
+      pred->removeInstr(retIter);
+      pred->removeInstr(moveIter);
     }
   }
 
-  if (phi_instr->getNumInputs() == 0) {
+  if (!has_return_value) {
     // Callee has no return statements.
     // Remove phi instruction.
     epilogue->removeInstr(epilogue->getLastInstrIter());
-    call_instr_->setOpcode(Instruction::kNop);
+    call_instr_->setOpcode(Opcode::kNop);
   } else {
-    call_instr_->setOpcode(Instruction::kMove);
+    call_instr_->setOpcode(Opcode::kMove);
     // Remove all inputs.
     while (call_instr_->getNumInputs() > 0) {
       call_instr_->removeInput(call_instr_->getNumInputs() - 1);
@@ -365,4 +375,4 @@ std::string_view LIRInliner::callerName() {
   return "<unnamed LIR function>";
 }
 
-} // namespace jit::lir
+} // namespace cinderx::jit::lir

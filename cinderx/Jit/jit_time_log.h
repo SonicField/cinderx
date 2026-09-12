@@ -10,7 +10,7 @@
 #include <string_view>
 #include <vector>
 
-namespace jit {
+namespace cinderx::jit {
 
 using Clock = std::chrono::steady_clock;
 using time_point = Clock::time_point;
@@ -29,10 +29,10 @@ using time_point = Clock::time_point;
 // expected to be captured for such that a breakdown may be presented
 // the individual functions are comma separated and may contain wildcards
 // wildcards will be glob processed (not treated as regex)
-// e.g. -X jit-time=*
-//      -X jit-time=__main__:*
-//      -X jit-time=__main__:foo
-//      -X jit-time=__main__:foo, __main__:bar
+// e.g. -X cinderx-jit-time=*
+//      -X cinderx-jit-time=__main__:*
+//      -X cinderx-jit-time=__main__:foo
+//      -X cinderx-jit-time=__main__:foo, __main__:bar
 void parseAndSetFuncList(const std::string& flag_value);
 
 // check to see if a function_name_ matches any of the specified function
@@ -56,13 +56,13 @@ class SubPhaseTimer {
   explicit SubPhaseTimer(std::string_view sub_phase_name)
       : sub_phase_name{sub_phase_name} {}
 
+  SubPhaseTimer(const SubPhaseTimer&) = delete;
+  SubPhaseTimer& operator=(const SubPhaseTimer&) = delete;
+
   std::string sub_phase_name;
   std::vector<std::unique_ptr<SubPhaseTimer>> children;
   time_point start;
   time_point end;
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(SubPhaseTimer);
 };
 
 class CompilationPhaseTimer {
@@ -83,8 +83,10 @@ class CompilationPhaseTimer {
   // log
   void end();
 
+  CompilationPhaseTimer(const CompilationPhaseTimer&) = delete;
+  CompilationPhaseTimer& operator=(const CompilationPhaseTimer&) = delete;
+
  private:
-  DISALLOW_COPY_AND_ASSIGN(CompilationPhaseTimer);
   std::vector<SubPhaseTimer*> current_phase_stack_;
   std::string function_name_;
   std::function<time_point()> time_provider_;
@@ -107,4 +109,4 @@ class CompilationPhaseTimer {
   void dumpPhaseTimingsAndTidy();
 };
 
-} // namespace jit
+} // namespace cinderx::jit

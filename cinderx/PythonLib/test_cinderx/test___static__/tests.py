@@ -145,9 +145,7 @@ class StaticTests(unittest.TestCase):
             cast(Union[int, str], int)
 
     def test_rand(self) -> None:
-        # pyre-ignore[16]: no attribute RAND_MAX
         self.assertEqual(type(RAND_MAX), int)
-        # pyre-ignore[16]: no attribute RAND_MAX
         self.assertLessEqual(rand(), RAND_MAX)
         self.assertGreaterEqual(rand(), 0)
 

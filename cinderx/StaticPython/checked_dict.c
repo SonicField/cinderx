@@ -9,17 +9,15 @@
 #endif
 
 #include "internal/pycore_bitutils.h" // _Py_bit_length
+#include "internal/pycore_call.h" // _PyObject_CallNoArgs()
 #include "internal/pycore_gc.h" // _PyObject_GC_IS_TRACKED()
 #include "internal/pycore_object.h" // PyObject_GC_Track()
 #include "internal/pycore_pystate.h" // _Py_InterpreterState_GET
 
+#include "cinderx/Common/py-portability.h"
 #include "cinderx/Common/string.h"
 #include "cinderx/StaticPython/generic_type.h"
 #include "cinderx/StaticPython/typed_method_def.h"
-
-#if PY_VERSION_HEX >= 0x030C0000
-#include "internal/pycore_call.h" // _PyObject_CallNoArgs()
-#endif
 
 typedef struct _dictkeysobject ChkDictKeysObject;
 typedef struct _dictkeyentry ChkDictKeyEntry;
@@ -133,30 +131,29 @@ struct _dictkeysobject {
  * Python code.  Statically Typed Python code will be able to call versions
  * of most functionality in a way that elides the type checks */
 
-extern PyTypeObject Ci_CheckedDictKeys_Type;
-extern PyTypeObject Ci_CheckedDictValues_Type;
-extern PyTypeObject Ci_CheckedDictItems_Type;
+extern PyTypeObject* Ci_CheckedDictKeys_Type;
+extern PyTypeObject* Ci_CheckedDictValues_Type;
+extern PyTypeObject* Ci_CheckedDictItems_Type;
 
 #define Ci_CheckedDictKeys_Check(op) \
-  PyObject_TypeCheck(op, &Ci_CheckedDictKeys_Type)
+  PyObject_TypeCheck(op, Ci_CheckedDictKeys_Type)
 #define Ci_CheckedDictValues_Check(op) \
-  PyObject_TypeCheck(op, &Ci_CheckedDictValues_Type)
+  PyObject_TypeCheck(op, Ci_CheckedDictValues_Type)
 #define Ci_CheckedDictItems_Check(op) \
-  PyObject_TypeCheck(op, &Ci_CheckedDictItems_Type)
+  PyObject_TypeCheck(op, Ci_CheckedDictItems_Type)
 /* This excludes Values, since they are not sets. */
 #define Ci_CheckedDictViewSet_Check(op) \
   (Ci_CheckedDictKeys_Check(op) || Ci_CheckedDictItems_Check(op))
 
-extern PyTypeObject Ci_CheckedDictIterKey_Type;
-extern PyTypeObject Ci_CheckedDictIterValue_Type;
-extern PyTypeObject Ci_CheckedDictIterItem_Type;
+extern PyTypeObject* Ci_CheckedDictIterKey_Type;
+extern PyTypeObject* Ci_CheckedDictIterValue_Type;
+extern PyTypeObject* Ci_CheckedDictIterItem_Type;
 
-extern PyTypeObject Ci_CheckedDictRevIterKey_Type;
-extern PyTypeObject Ci_CheckedDictRevIterItem_Type;
-PyTypeObject Ci_CheckedDictRevIterValue_Type;
+extern PyTypeObject* Ci_CheckedDictRevIterKey_Type;
+extern PyTypeObject* Ci_CheckedDictRevIterItem_Type;
+extern PyTypeObject* Ci_CheckedDictRevIterValue_Type;
 
-inline int
-Ci_DictOrChecked_SetItem(PyObject* op, PyObject* key, PyObject* value) {
+int Ci_DictOrChecked_SetItem(PyObject* op, PyObject* key, PyObject* value) {
   if (PyDict_Check(op)) {
     return PyDict_SetItem(op, key, value);
   } else if (Ci_CheckedDict_Check(op)) {
@@ -1239,8 +1236,7 @@ static int dictresize(CiChkDictObject* mp, Py_ssize_t newsize) {
   return 0;
 }
 
-inline int
-Ci_CheckedDict_SetItem(PyObject* op, PyObject* key, PyObject* value) {
+int Ci_CheckedDict_SetItem(PyObject* op, PyObject* key, PyObject* value) {
   CiChkDictObject* mp;
   Py_hash_t hash;
   if (!Ci_CheckedDict_Check(op)) {
@@ -1932,7 +1928,6 @@ dict_get_impl(CiChkDictObject* self, PyObject* key, PyObject* default_value) {
   return val;
 }
 
-#if PY_VERSION_HEX >= 0x030C0000
 static PyObject*
 dict_get(CiChkDictObject* self, PyObject* const* args, Py_ssize_t nargs) {
   PyObject* key;
@@ -1957,7 +1952,6 @@ dict_get(CiChkDictObject* self, PyObject* const* args, Py_ssize_t nargs) {
 skip_optional:
   return dict_get_impl(self, key, default_value);
 }
-#endif
 
 PyObject*
 Ci_CheckedDict_SetDefault(PyObject* d, PyObject* key, PyObject* defaultobj) {
@@ -2028,18 +2022,6 @@ Ci_CheckedDict_SetDefault(PyObject* d, PyObject* key, PyObject* defaultobj) {
   return value;
 }
 
-#if PY_VERSION_HEX < 0x030C0000
-static PyObject* dict_setdefault_impl(
-    CiChkDictObject* self,
-    PyObject* key,
-    PyObject* default_value) {
-  PyObject* val;
-
-  val = Ci_CheckedDict_SetDefault((PyObject*)self, key, default_value);
-  Py_XINCREF(val);
-  return val;
-}
-#else
 PyObject*
 dict_setdefault_impl(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
   PyObject* return_value = NULL;
@@ -2068,7 +2050,6 @@ skip_optional:
 exit:
   return return_value;
 }
-#endif
 
 static PyObject* dict_clear(CiChkDictObject* mp, PyObject* Py_UNUSED(ignored)) {
   Ci_CheckedDict_Clear((PyObject*)mp);
@@ -2272,7 +2253,7 @@ static int dict_tp_clear(PyObject* op) {
 static PyObject* dictiter_new(CiChkDictObject*, PyTypeObject*);
 
 static PyObject* dict_iter(CiChkDictObject* dict) {
-  return dictiter_new(dict, &Ci_CheckedDictIterKey_Type);
+  return dictiter_new(dict, Ci_CheckedDictIterKey_Type);
 }
 
 PyDoc_STRVAR(
@@ -2880,12 +2861,6 @@ Ci_PyTypedMethodDef chkdict_get_def = {
     dict_get_impl,
     chkdict_sig,
     Ci_Py_SIG_TYPE_PARAM_OPT(1)};
-#if PY_VERSION_HEX < 0x030C0000
-Ci_PyTypedMethodDef chkdict_setdefault_def = {
-    dict_setdefault_impl,
-    chkdict_sig,
-    Ci_Py_SIG_TYPE_PARAM_OPT(1)};
-#endif
 
 const Ci_Py_SigElement* const getitem_sig[] = {&Ci_Py_Sig_T0, NULL};
 Ci_PyTypedMethodDef chkdict_getitem_def = {
@@ -2903,40 +2878,20 @@ Ci_PyTypedMethodDef chkdict_setitem_def = {
     Ci_Py_SIG_ERROR};
 
 static PyMethodDef chkmapp_methods[] = {
-#if PY_VERSION_HEX < 0x030C0000
-    DICT___CONTAINS___METHODDEF{
-        "__getitem__",
-        (PyCFunction)&chkdict_getitem_def,
-        Ci_METH_TYPED | METH_COEXIST,
-        getitem__doc__},
-    {"__setitem__",
-     (PyCFunction)&chkdict_setitem_def,
-     Ci_METH_TYPED | METH_COEXIST,
-     "Set self[key] to value."},
-#else
     DICT___CONTAINS___METHODDEF{
         "__getitem__",
         (PyCFunction)&dict_subscript,
         METH_O | METH_COEXIST,
         getitem__doc__},
-#endif
     {"__sizeof__",
      (PyCFunction)(void (*)(void))dict_sizeof,
      METH_NOARGS,
      sizeof__doc__},
-#if PY_VERSION_HEX < 0x030C0000
-    {"get", (PyCFunction)&chkdict_get_def, Ci_METH_TYPED, dict_get__doc__},
-    {"setdefault",
-     (PyCFunction)&chkdict_setdefault_def,
-     Ci_METH_TYPED,
-     dict_setdefault__doc__},
-#else
     {"get", (PyCFunction)&dict_get, METH_FASTCALL, dict_get__doc__},
     {"setdefault",
      (PyCFunction)&dict_setdefault_impl,
      METH_FASTCALL,
      dict_setdefault__doc__},
-#endif
     DICT_POP_METHODDEF
         DICT_POPITEM_METHODDEF{"keys", dictkeys_new, METH_NOARGS, keys__doc__},
     {"items", dictitems_new, METH_NOARGS, items__doc__},
@@ -3058,9 +3013,9 @@ static PyObject* dictiter_new(CiChkDictObject* dict, PyTypeObject* itertype) {
   di->di_dict = dict;
   di->di_used = dict->ma_used;
   di->len = dict->ma_used;
-  if (itertype == &Ci_CheckedDictRevIterKey_Type ||
-      itertype == &Ci_CheckedDictRevIterItem_Type ||
-      itertype == &Ci_CheckedDictRevIterValue_Type) {
+  if (itertype == Ci_CheckedDictRevIterKey_Type ||
+      itertype == Ci_CheckedDictRevIterItem_Type ||
+      itertype == Ci_CheckedDictRevIterValue_Type) {
     if (dict->ma_values) {
       di->di_pos = dict->ma_used - 1;
     } else {
@@ -3069,8 +3024,8 @@ static PyObject* dictiter_new(CiChkDictObject* dict, PyTypeObject* itertype) {
   } else {
     di->di_pos = 0;
   }
-  if (itertype == &Ci_CheckedDictIterItem_Type ||
-      itertype == &Ci_CheckedDictRevIterItem_Type) {
+  if (itertype == Ci_CheckedDictIterItem_Type ||
+      itertype == Ci_CheckedDictRevIterItem_Type) {
     di->di_result = PyTuple_Pack(2, Py_None, Py_None);
     if (di->di_result == NULL) {
       Py_DECREF(di);
@@ -3084,11 +3039,13 @@ static PyObject* dictiter_new(CiChkDictObject* dict, PyTypeObject* itertype) {
 }
 
 static void dictiter_dealloc(dictiterobject* di) {
+  PyTypeObject* type = Py_TYPE(di);
   /* bpo-31095: UnTrack is needed before calling any callbacks */
   _PyObject_GC_UNTRACK(di);
   Py_XDECREF(di->di_dict);
   Py_XDECREF(di->di_result);
   PyObject_GC_Del(di);
+  Py_DECREF(type);
 }
 
 static int dictiter_traverse(dictiterobject* di, visitproc visit, void* arg) {
@@ -3185,36 +3142,23 @@ fail:
   return NULL;
 }
 
-PyTypeObject Ci_CheckedDictIterKey_Type = {
-    PyVarObject_HEAD_INIT(NULL, 0) "dict_keyiterator", /* tp_name */
-    sizeof(dictiterobject), /* tp_basicsize */
-    0, /* tp_itemsize */
-    /* methods */
-    (destructor)dictiter_dealloc, /* tp_dealloc */
-    0, /* tp_vectorcall_offset */
-    0, /* tp_getattr */
-    0, /* tp_setattr */
-    0, /* tp_as_async */
-    0, /* tp_repr */
-    0, /* tp_as_number */
-    0, /* tp_as_sequence */
-    0, /* tp_as_mapping */
-    0, /* tp_hash */
-    0, /* tp_call */
-    0, /* tp_str */
-    PyObject_GenericGetAttr, /* tp_getattro */
-    0, /* tp_setattro */
-    0, /* tp_as_buffer */
-    Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC, /* tp_flags */
-    0, /* tp_doc */
-    (traverseproc)dictiter_traverse, /* tp_traverse */
-    0, /* tp_clear */
-    0, /* tp_richcompare */
-    0, /* tp_weaklistoffset */
-    PyObject_SelfIter, /* tp_iter */
-    (iternextfunc)dictiter_iternextkey, /* tp_iternext */
-    dictiter_methods, /* tp_methods */
-    0,
+PyTypeObject* Ci_CheckedDictIterKey_Type;
+
+static PyType_Slot Ci_CheckedDictIterKey_Slots[] = {
+    {Py_tp_dealloc, (void*)dictiter_dealloc},
+    {Py_tp_traverse, (void*)dictiter_traverse},
+    {Py_tp_iter, (void*)PyObject_SelfIter},
+    {Py_tp_iternext, (void*)dictiter_iternextkey},
+    {Py_tp_methods, (void*)dictiter_methods},
+    {0, NULL},
+};
+
+PyType_Spec Ci_CheckedDictIterKey_Spec = {
+    .name = "_static.dict_keyiterator",
+    .basicsize = sizeof(dictiterobject),
+    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC |
+        Py_TPFLAGS_DISALLOW_INSTANTIATION | Py_TPFLAGS_IMMUTABLETYPE,
+    .slots = Ci_CheckedDictIterKey_Slots,
 };
 
 static PyObject* dictiter_iternextvalue(dictiterobject* di) {
@@ -3278,36 +3222,23 @@ fail:
   return NULL;
 }
 
-PyTypeObject Ci_CheckedDictIterValue_Type = {
-    PyVarObject_HEAD_INIT(NULL, 0) "dict_valueiterator", /* tp_name */
-    sizeof(dictiterobject), /* tp_basicsize */
-    0, /* tp_itemsize */
-    /* methods */
-    (destructor)dictiter_dealloc, /* tp_dealloc */
-    0, /* tp_vectorcall_offset */
-    0, /* tp_getattr */
-    0, /* tp_setattr */
-    0, /* tp_as_async */
-    0, /* tp_repr */
-    0, /* tp_as_number */
-    0, /* tp_as_sequence */
-    0, /* tp_as_mapping */
-    0, /* tp_hash */
-    0, /* tp_call */
-    0, /* tp_str */
-    PyObject_GenericGetAttr, /* tp_getattro */
-    0, /* tp_setattro */
-    0, /* tp_as_buffer */
-    Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC, /* tp_flags */
-    0, /* tp_doc */
-    (traverseproc)dictiter_traverse, /* tp_traverse */
-    0, /* tp_clear */
-    0, /* tp_richcompare */
-    0, /* tp_weaklistoffset */
-    PyObject_SelfIter, /* tp_iter */
-    (iternextfunc)dictiter_iternextvalue, /* tp_iternext */
-    dictiter_methods, /* tp_methods */
-    0,
+PyTypeObject* Ci_CheckedDictIterValue_Type;
+
+static PyType_Slot Ci_CheckedDictIterValue_Slots[] = {
+    {Py_tp_dealloc, (void*)dictiter_dealloc},
+    {Py_tp_traverse, (void*)dictiter_traverse},
+    {Py_tp_iter, (void*)PyObject_SelfIter},
+    {Py_tp_iternext, (void*)dictiter_iternextvalue},
+    {Py_tp_methods, (void*)dictiter_methods},
+    {0, NULL},
+};
+
+PyType_Spec Ci_CheckedDictIterValue_Spec = {
+    .name = "_static.dict_valueiterator",
+    .basicsize = sizeof(dictiterobject),
+    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC |
+        Py_TPFLAGS_DISALLOW_INSTANTIATION | Py_TPFLAGS_IMMUTABLETYPE,
+    .slots = Ci_CheckedDictIterValue_Slots,
 };
 
 static PyObject* dictiter_iternextitem(dictiterobject* di) {
@@ -3396,36 +3327,23 @@ fail:
   return NULL;
 }
 
-PyTypeObject Ci_CheckedDictIterItem_Type = {
-    PyVarObject_HEAD_INIT(NULL, 0) "dict_itemiterator", /* tp_name */
-    sizeof(dictiterobject), /* tp_basicsize */
-    0, /* tp_itemsize */
-    /* methods */
-    (destructor)dictiter_dealloc, /* tp_dealloc */
-    0, /* tp_vectorcall_offset */
-    0, /* tp_getattr */
-    0, /* tp_setattr */
-    0, /* tp_as_async */
-    0, /* tp_repr */
-    0, /* tp_as_number */
-    0, /* tp_as_sequence */
-    0, /* tp_as_mapping */
-    0, /* tp_hash */
-    0, /* tp_call */
-    0, /* tp_str */
-    PyObject_GenericGetAttr, /* tp_getattro */
-    0, /* tp_setattro */
-    0, /* tp_as_buffer */
-    Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC, /* tp_flags */
-    0, /* tp_doc */
-    (traverseproc)dictiter_traverse, /* tp_traverse */
-    0, /* tp_clear */
-    0, /* tp_richcompare */
-    0, /* tp_weaklistoffset */
-    PyObject_SelfIter, /* tp_iter */
-    (iternextfunc)dictiter_iternextitem, /* tp_iternext */
-    dictiter_methods, /* tp_methods */
-    0,
+PyTypeObject* Ci_CheckedDictIterItem_Type;
+
+static PyType_Slot Ci_CheckedDictIterItem_Slots[] = {
+    {Py_tp_dealloc, (void*)dictiter_dealloc},
+    {Py_tp_traverse, (void*)dictiter_traverse},
+    {Py_tp_iter, (void*)PyObject_SelfIter},
+    {Py_tp_iternext, (void*)dictiter_iternextitem},
+    {Py_tp_methods, (void*)dictiter_methods},
+    {0, NULL},
+};
+
+PyType_Spec Ci_CheckedDictIterItem_Spec = {
+    .name = "_static.dict_itemiterator",
+    .basicsize = sizeof(dictiterobject),
+    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC |
+        Py_TPFLAGS_DISALLOW_INSTANTIATION | Py_TPFLAGS_IMMUTABLETYPE,
+    .slots = Ci_CheckedDictIterItem_Slots,
 };
 
 /* dictreviter */
@@ -3477,13 +3395,13 @@ static PyObject* dictreviter_iternext(dictiterobject* di) {
   di->di_pos = i - 1;
   di->len--;
 
-  if (Py_IS_TYPE(di, &Ci_CheckedDictRevIterKey_Type)) {
+  if (Py_IS_TYPE(di, Ci_CheckedDictRevIterKey_Type)) {
     Py_DECREF(value);
     return key;
-  } else if (Py_IS_TYPE(di, &Ci_CheckedDictRevIterValue_Type)) {
+  } else if (Py_IS_TYPE(di, Ci_CheckedDictRevIterValue_Type)) {
     Py_DECREF(key);
     return value;
-  } else if (Py_IS_TYPE(di, &Ci_CheckedDictRevIterItem_Type)) {
+  } else if (Py_IS_TYPE(di, Ci_CheckedDictRevIterItem_Type)) {
     result = di->di_result;
     if (Py_REFCNT(result) == 1) {
       PyObject* oldkey = PyTuple_GET_ITEM(result, 0);
@@ -3519,19 +3437,28 @@ fail:
   return NULL;
 }
 
-PyTypeObject Ci_CheckedDictRevIterKey_Type = {
-    PyVarObject_HEAD_INIT(NULL, 0) "dict_reversekeyiterator",
-    sizeof(dictiterobject),
-    .tp_dealloc = (destructor)dictiter_dealloc,
-    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
-    .tp_traverse = (traverseproc)dictiter_traverse,
-    .tp_iter = PyObject_SelfIter,
-    .tp_iternext = (iternextfunc)dictreviter_iternext,
-    .tp_methods = dictiter_methods};
+static PyType_Slot dictreviter_slots[] = {
+    {Py_tp_dealloc, (void*)dictiter_dealloc},
+    {Py_tp_traverse, (void*)dictiter_traverse},
+    {Py_tp_iter, (void*)PyObject_SelfIter},
+    {Py_tp_iternext, (void*)dictreviter_iternext},
+    {Py_tp_methods, (void*)dictiter_methods},
+    {0, NULL},
+};
+
+PyTypeObject* Ci_CheckedDictRevIterKey_Type;
+
+PyType_Spec Ci_CheckedDictRevIterKey_Spec = {
+    .name = "_static.dict_reversekeyiterator",
+    .basicsize = sizeof(dictiterobject),
+    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC |
+        Py_TPFLAGS_DISALLOW_INSTANTIATION | Py_TPFLAGS_IMMUTABLETYPE,
+    .slots = dictreviter_slots,
+};
 
 static PyObject* dict___reversed___impl(CiChkDictObject* self) {
   assert(Ci_CheckedDict_Check((PyObject*)self));
-  return dictiter_new(self, &Ci_CheckedDictRevIterKey_Type);
+  return dictiter_new(self, Ci_CheckedDictRevIterKey_Type);
 }
 
 static PyObject* dictiter_reduce(
@@ -3550,25 +3477,25 @@ static PyObject* dictiter_reduce(
   return Py_BuildValue("N(N)", _PyEval_GetBuiltin(s_iter), list);
 }
 
-PyTypeObject Ci_CheckedDictRevIterItem_Type = {
-    PyVarObject_HEAD_INIT(NULL, 0) "dict_reverseitemiterator",
-    sizeof(dictiterobject),
-    .tp_dealloc = (destructor)dictiter_dealloc,
-    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
-    .tp_traverse = (traverseproc)dictiter_traverse,
-    .tp_iter = PyObject_SelfIter,
-    .tp_iternext = (iternextfunc)dictreviter_iternext,
-    .tp_methods = dictiter_methods};
+PyTypeObject* Ci_CheckedDictRevIterItem_Type;
 
-PyTypeObject Ci_CheckedDictRevIterValue_Type = {
-    PyVarObject_HEAD_INIT(NULL, 0) "dict_reversevalueiterator",
-    sizeof(dictiterobject),
-    .tp_dealloc = (destructor)dictiter_dealloc,
-    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
-    .tp_traverse = (traverseproc)dictiter_traverse,
-    .tp_iter = PyObject_SelfIter,
-    .tp_iternext = (iternextfunc)dictreviter_iternext,
-    .tp_methods = dictiter_methods};
+PyType_Spec Ci_CheckedDictRevIterItem_Spec = {
+    .name = "_static.dict_reverseitemiterator",
+    .basicsize = sizeof(dictiterobject),
+    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC |
+        Py_TPFLAGS_DISALLOW_INSTANTIATION | Py_TPFLAGS_IMMUTABLETYPE,
+    .slots = dictreviter_slots,
+};
+
+PyTypeObject* Ci_CheckedDictRevIterValue_Type;
+
+PyType_Spec Ci_CheckedDictRevIterValue_Spec = {
+    .name = "_static.dict_reversevalueiterator",
+    .basicsize = sizeof(dictiterobject),
+    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC |
+        Py_TPFLAGS_DISALLOW_INSTANTIATION | Py_TPFLAGS_IMMUTABLETYPE,
+    .slots = dictreviter_slots,
+};
 
 /***********************************************/
 /* View objects for keys(), items(), values(). */
@@ -3577,14 +3504,17 @@ PyTypeObject Ci_CheckedDictRevIterValue_Type = {
 /* The instance lay-out is the same for all three; but the type differs. */
 
 static void dictview_dealloc(_CiDictViewObject* dv) {
+  PyTypeObject* type = Py_TYPE(dv);
   /* bpo-31095: UnTrack is needed before calling any callbacks */
   _PyObject_GC_UNTRACK(dv);
   Py_XDECREF(dv->dv_dict);
   PyObject_GC_Del(dv);
+  Py_DECREF(type);
 }
 
 static int
 dictview_traverse(_CiDictViewObject* dv, visitproc visit, void* arg) {
+  Py_VISIT(Py_TYPE(dv));
   Py_VISIT(dv->dv_dict);
   return 0;
 }
@@ -3619,7 +3549,7 @@ static PyObject* Ci_CheckedDictView_New(PyObject* dict, PyTypeObject* type) {
   }
   Py_INCREF(dict);
   d = (CiChkDictObject*)dict;
-  if (type == &Ci_CheckedDictItems_Type || type == &Ci_CheckedDictValues_Type) {
+  if (type == Ci_CheckedDictItems_Type || type == Ci_CheckedDictValues_Type) {
   }
   dv->dv_dict = d;
   PyObject_GC_Track(dv);
@@ -3771,7 +3701,7 @@ static PyObject* dictkeys_iter(_CiDictViewObject* dv) {
   if (dv->dv_dict == NULL) {
     Py_RETURN_NONE;
   }
-  return dictiter_new(dv->dv_dict, &Ci_CheckedDictIterKey_Type);
+  return dictiter_new(dv->dv_dict, Ci_CheckedDictIterKey_Type);
 }
 
 static int dictkeys_contains(_CiDictViewObject* dv, PyObject* obj) {
@@ -3780,17 +3710,6 @@ static int dictkeys_contains(_CiDictViewObject* dv, PyObject* obj) {
   }
   return PyDict_Contains((PyObject*)dv->dv_dict, obj);
 }
-
-static PySequenceMethods dictkeys_as_sequence = {
-    (lenfunc)dictview_len, /* sq_length */
-    0, /* sq_concat */
-    0, /* sq_repeat */
-    0, /* sq_item */
-    0, /* sq_slice */
-    0, /* sq_ass_item */
-    0, /* sq_ass_slice */
-    (objobjproc)dictkeys_contains, /* sq_contains */
-};
 
 // Create an set object from dictviews object.
 // Returns a new reference.
@@ -4019,25 +3938,6 @@ static PyObject* dictviews_xor(PyObject* self, PyObject* other) {
   return result;
 }
 
-static PyNumberMethods dictviews_as_number = {
-    0, /*nb_add*/
-    (binaryfunc)dictviews_sub, /*nb_subtract*/
-    0, /*nb_multiply*/
-    0, /*nb_remainder*/
-    0, /*nb_divmod*/
-    0, /*nb_power*/
-    0, /*nb_negative*/
-    0, /*nb_positive*/
-    0, /*nb_absolute*/
-    0, /*nb_bool*/
-    0, /*nb_invert*/
-    0, /*nb_lshift*/
-    0, /*nb_rshift*/
-    (binaryfunc)Ci_CheckedDictView_Intersect, /*nb_and*/
-    (binaryfunc)dictviews_xor, /*nb_xor*/
-    (binaryfunc)dictviews_or, /*nb_or*/
-};
-
 static PyObject* dictviews_isdisjoint(PyObject* self, PyObject* other) {
   PyObject* it;
   PyObject* item = NULL;
@@ -4112,40 +4012,36 @@ static PyMethodDef dictkeys_methods[] = {
     {NULL, NULL} /* sentinel */
 };
 
-PyTypeObject Ci_CheckedDictKeys_Type = {
-    PyVarObject_HEAD_INIT(NULL, 0) "dict_keys", /* tp_name */
-    sizeof(_CiDictViewObject), /* tp_basicsize */
-    0, /* tp_itemsize */
-    /* methods */
-    (destructor)dictview_dealloc, /* tp_dealloc */
-    0, /* tp_vectorcall_offset */
-    0, /* tp_getattr */
-    0, /* tp_setattr */
-    0, /* tp_as_async */
-    (reprfunc)dictview_repr, /* tp_repr */
-    &dictviews_as_number, /* tp_as_number */
-    &dictkeys_as_sequence, /* tp_as_sequence */
-    0, /* tp_as_mapping */
-    0, /* tp_hash */
-    0, /* tp_call */
-    0, /* tp_str */
-    PyObject_GenericGetAttr, /* tp_getattro */
-    0, /* tp_setattro */
-    0, /* tp_as_buffer */
-    Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC, /* tp_flags */
-    0, /* tp_doc */
-    (traverseproc)dictview_traverse, /* tp_traverse */
-    0, /* tp_clear */
-    dictview_richcompare, /* tp_richcompare */
-    0, /* tp_weaklistoffset */
-    (getiterfunc)dictkeys_iter, /* tp_iter */
-    0, /* tp_iternext */
-    dictkeys_methods, /* tp_methods */
-    .tp_getset = dictview_getset,
+PyTypeObject* Ci_CheckedDictKeys_Type;
+
+static PyType_Slot Ci_CheckedDictKeys_Slots[] = {
+    {Py_tp_dealloc, (void*)dictview_dealloc},
+    {Py_tp_repr, (void*)dictview_repr},
+    {Py_nb_subtract, (void*)dictviews_sub},
+    {Py_nb_and, (void*)Ci_CheckedDictView_Intersect},
+    {Py_nb_xor, (void*)dictviews_xor},
+    {Py_nb_or, (void*)dictviews_or},
+    {Py_sq_length, (void*)dictview_len},
+    {Py_sq_contains, (void*)dictkeys_contains},
+    {Py_tp_getattro, (void*)PyObject_GenericGetAttr},
+    {Py_tp_traverse, (void*)dictview_traverse},
+    {Py_tp_richcompare, (void*)dictview_richcompare},
+    {Py_tp_iter, (void*)dictkeys_iter},
+    {Py_tp_methods, (void*)dictkeys_methods},
+    {Py_tp_getset, (void*)dictview_getset},
+    {0, NULL},
+};
+
+PyType_Spec Ci_CheckedDictKeys_Spec = {
+    .name = "_static.dict_keys",
+    .basicsize = sizeof(_CiDictViewObject),
+    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC |
+        Py_TPFLAGS_DISALLOW_INSTANTIATION | Py_TPFLAGS_IMMUTABLETYPE,
+    .slots = Ci_CheckedDictKeys_Slots,
 };
 
 static PyObject* dictkeys_new(PyObject* dict, PyObject* Py_UNUSED(ignored)) {
-  return Ci_CheckedDictView_New(dict, &Ci_CheckedDictKeys_Type);
+  return Ci_CheckedDictView_New(dict, Ci_CheckedDictKeys_Type);
 }
 
 static PyObject* dictkeys_reversed(
@@ -4154,7 +4050,7 @@ static PyObject* dictkeys_reversed(
   if (dv->dv_dict == NULL) {
     Py_RETURN_NONE;
   }
-  return dictiter_new(dv->dv_dict, &Ci_CheckedDictRevIterKey_Type);
+  return dictiter_new(dv->dv_dict, Ci_CheckedDictRevIterKey_Type);
 }
 
 /*** dict_items ***/
@@ -4163,7 +4059,7 @@ static PyObject* dictitems_iter(_CiDictViewObject* dv) {
   if (dv->dv_dict == NULL) {
     Py_RETURN_NONE;
   }
-  return dictiter_new(dv->dv_dict, &Ci_CheckedDictIterItem_Type);
+  return dictiter_new(dv->dv_dict, Ci_CheckedDictIterItem_Type);
 }
 
 static int dictitems_contains(_CiDictViewObject* dv, PyObject* obj) {
@@ -4190,17 +4086,6 @@ static int dictitems_contains(_CiDictViewObject* dv, PyObject* obj) {
   return result;
 }
 
-static PySequenceMethods dictitems_as_sequence = {
-    (lenfunc)dictview_len, /* sq_length */
-    0, /* sq_concat */
-    0, /* sq_repeat */
-    0, /* sq_item */
-    0, /* sq_slice */
-    0, /* sq_ass_item */
-    0, /* sq_ass_slice */
-    (objobjproc)dictitems_contains, /* sq_contains */
-};
-
 static PyObject* dictitems_reversed(
     _CiDictViewObject* dv,
     PyObject* Py_UNUSED(ignored));
@@ -4218,40 +4103,36 @@ static PyMethodDef dictitems_methods[] = {
     {NULL, NULL} /* sentinel */
 };
 
-PyTypeObject Ci_CheckedDictItems_Type = {
-    PyVarObject_HEAD_INIT(NULL, 0) "dict_items", /* tp_name */
-    sizeof(_CiDictViewObject), /* tp_basicsize */
-    0, /* tp_itemsize */
-    /* methods */
-    (destructor)dictview_dealloc, /* tp_dealloc */
-    0, /* tp_vectorcall_offset */
-    0, /* tp_getattr */
-    0, /* tp_setattr */
-    0, /* tp_as_async */
-    (reprfunc)dictview_repr, /* tp_repr */
-    &dictviews_as_number, /* tp_as_number */
-    &dictitems_as_sequence, /* tp_as_sequence */
-    0, /* tp_as_mapping */
-    0, /* tp_hash */
-    0, /* tp_call */
-    0, /* tp_str */
-    PyObject_GenericGetAttr, /* tp_getattro */
-    0, /* tp_setattro */
-    0, /* tp_as_buffer */
-    Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC, /* tp_flags */
-    0, /* tp_doc */
-    (traverseproc)dictview_traverse, /* tp_traverse */
-    0, /* tp_clear */
-    dictview_richcompare, /* tp_richcompare */
-    0, /* tp_weaklistoffset */
-    (getiterfunc)dictitems_iter, /* tp_iter */
-    0, /* tp_iternext */
-    dictitems_methods, /* tp_methods */
-    .tp_getset = dictview_getset,
+PyTypeObject* Ci_CheckedDictItems_Type;
+
+static PyType_Slot Ci_CheckedDictItems_Slots[] = {
+    {Py_tp_dealloc, (void*)dictview_dealloc},
+    {Py_tp_repr, (void*)dictview_repr},
+    {Py_nb_subtract, (void*)dictviews_sub},
+    {Py_nb_and, (void*)Ci_CheckedDictView_Intersect},
+    {Py_nb_xor, (void*)dictviews_xor},
+    {Py_nb_or, (void*)dictviews_or},
+    {Py_sq_length, (void*)dictview_len},
+    {Py_sq_contains, (void*)dictitems_contains},
+    {Py_tp_getattro, (void*)PyObject_GenericGetAttr},
+    {Py_tp_traverse, (void*)dictview_traverse},
+    {Py_tp_richcompare, (void*)dictview_richcompare},
+    {Py_tp_iter, (void*)dictitems_iter},
+    {Py_tp_methods, (void*)dictitems_methods},
+    {Py_tp_getset, (void*)dictview_getset},
+    {0, NULL},
+};
+
+PyType_Spec Ci_CheckedDictItems_Spec = {
+    .name = "_static.dict_items",
+    .basicsize = sizeof(_CiDictViewObject),
+    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC |
+        Py_TPFLAGS_DISALLOW_INSTANTIATION | Py_TPFLAGS_IMMUTABLETYPE,
+    .slots = Ci_CheckedDictItems_Slots,
 };
 
 static PyObject* dictitems_new(PyObject* dict, PyObject* Py_UNUSED(ignored)) {
-  return Ci_CheckedDictView_New(dict, &Ci_CheckedDictItems_Type);
+  return Ci_CheckedDictView_New(dict, Ci_CheckedDictItems_Type);
 }
 
 static PyObject* dictitems_reversed(
@@ -4260,7 +4141,7 @@ static PyObject* dictitems_reversed(
   if (dv->dv_dict == NULL) {
     Py_RETURN_NONE;
   }
-  return dictiter_new(dv->dv_dict, &Ci_CheckedDictRevIterItem_Type);
+  return dictiter_new(dv->dv_dict, Ci_CheckedDictRevIterItem_Type);
 }
 
 /*** dict_values ***/
@@ -4269,19 +4150,8 @@ static PyObject* dictvalues_iter(_CiDictViewObject* dv) {
   if (dv->dv_dict == NULL) {
     Py_RETURN_NONE;
   }
-  return dictiter_new(dv->dv_dict, &Ci_CheckedDictIterValue_Type);
+  return dictiter_new(dv->dv_dict, Ci_CheckedDictIterValue_Type);
 }
-
-static PySequenceMethods dictvalues_as_sequence = {
-    (lenfunc)dictview_len, /* sq_length */
-    0, /* sq_concat */
-    0, /* sq_repeat */
-    0, /* sq_item */
-    0, /* sq_slice */
-    0, /* sq_ass_item */
-    0, /* sq_ass_slice */
-    (objobjproc)0, /* sq_contains */
-};
 
 static PyObject* dictvalues_reversed(
     _CiDictViewObject* dv,
@@ -4299,40 +4169,30 @@ static PyMethodDef dictvalues_methods[] = {
     {NULL, NULL} /* sentinel */
 };
 
-PyTypeObject Ci_CheckedDictValues_Type = {
-    PyVarObject_HEAD_INIT(NULL, 0) "dict_values", /* tp_name */
-    sizeof(_CiDictViewObject), /* tp_basicsize */
-    0, /* tp_itemsize */
-    /* methods */
-    (destructor)dictview_dealloc, /* tp_dealloc */
-    0, /* tp_vectorcall_offset */
-    0, /* tp_getattr */
-    0, /* tp_setattr */
-    0, /* tp_as_async */
-    (reprfunc)dictview_repr, /* tp_repr */
-    0, /* tp_as_number */
-    &dictvalues_as_sequence, /* tp_as_sequence */
-    0, /* tp_as_mapping */
-    0, /* tp_hash */
-    0, /* tp_call */
-    0, /* tp_str */
-    PyObject_GenericGetAttr, /* tp_getattro */
-    0, /* tp_setattro */
-    0, /* tp_as_buffer */
-    Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC, /* tp_flags */
-    0, /* tp_doc */
-    (traverseproc)dictview_traverse, /* tp_traverse */
-    0, /* tp_clear */
-    0, /* tp_richcompare */
-    0, /* tp_weaklistoffset */
-    (getiterfunc)dictvalues_iter, /* tp_iter */
-    0, /* tp_iternext */
-    dictvalues_methods, /* tp_methods */
-    .tp_getset = dictview_getset,
+PyTypeObject* Ci_CheckedDictValues_Type;
+
+static PyType_Slot Ci_CheckedDictValues_Slots[] = {
+    {Py_tp_dealloc, (void*)dictview_dealloc},
+    {Py_tp_repr, (void*)dictview_repr},
+    {Py_sq_length, (void*)dictview_len},
+    {Py_tp_getattro, (void*)PyObject_GenericGetAttr},
+    {Py_tp_traverse, (void*)dictview_traverse},
+    {Py_tp_iter, (void*)dictvalues_iter},
+    {Py_tp_methods, (void*)dictvalues_methods},
+    {Py_tp_getset, (void*)dictview_getset},
+    {0, NULL},
+};
+
+PyType_Spec Ci_CheckedDictValues_Spec = {
+    .name = "_static.dict_values",
+    .basicsize = sizeof(_CiDictViewObject),
+    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC |
+        Py_TPFLAGS_DISALLOW_INSTANTIATION | Py_TPFLAGS_IMMUTABLETYPE,
+    .slots = Ci_CheckedDictValues_Slots,
 };
 
 static PyObject* dictvalues_new(PyObject* dict, PyObject* Py_UNUSED(ignored)) {
-  return Ci_CheckedDictView_New(dict, &Ci_CheckedDictValues_Type);
+  return Ci_CheckedDictView_New(dict, Ci_CheckedDictValues_Type);
 }
 
 static PyObject* dictvalues_reversed(
@@ -4341,7 +4201,7 @@ static PyObject* dictvalues_reversed(
   if (dv->dv_dict == NULL) {
     Py_RETURN_NONE;
   }
-  return dictiter_new(dv->dv_dict, &Ci_CheckedDictRevIterValue_Type);
+  return dictiter_new(dv->dv_dict, Ci_CheckedDictRevIterValue_Type);
 }
 
 /* === End copied from dictobject.c === */

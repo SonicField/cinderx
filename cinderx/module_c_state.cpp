@@ -2,8 +2,20 @@
 
 #include "cinderx/module_c_state.h"
 
+#include "cinderx/Common/extra-py-flags.h"
 #include "cinderx/Common/log.h"
+#include "cinderx/Jit/config.h"
 #include "cinderx/module_state.h"
+
+#include <atomic>
+
+namespace {
+
+// Borrowed specialization code can run without a live CinderX ModuleState, so
+// its evaluator identity needs process-lifetime storage.
+std::atomic<_PyFrameEvalFunction> cinderx_eval_frame{nullptr};
+
+} // namespace
 
 extern "C" {
 
@@ -11,20 +23,212 @@ extern "C" {
 vectorcallfunc Ci_PyFunction_Vectorcall;
 #endif
 
+vectorcallfunc getInterpretedVectorcall(const PyFunctionObject* func) {
+  auto state = cinderx::getModuleState();
+  vectorcallfunc static_function_vectorcall = state != nullptr
+      ? state->static_function_vectorcall.load(std::memory_order_relaxed)
+      : nullptr;
+  if (static_function_vectorcall != nullptr) {
+    const PyCodeObject* code = (const PyCodeObject*)(func->func_code);
+    if (code->co_flags & CI_CO_STATICALLY_COMPILED) {
+      return static_function_vectorcall;
+    }
+  }
+  return Ci_PyFunction_Vectorcall;
+}
+
+void Ci_SetStaticFunctionVectorcall(vectorcallfunc vcall) {
+  auto state = cinderx::getModuleState();
+  if (state != nullptr) {
+    state->static_function_vectorcall.store(vcall, std::memory_order_relaxed);
+  }
+}
+
+_PyFrameEvalFunction Ci_GetEvalFrameFunc(void) {
+  return cinderx_eval_frame.load(std::memory_order_relaxed);
+}
+
+void Ci_SetEvalFrameFunc(_PyFrameEvalFunction eval_frame) {
+  cinderx_eval_frame.store(eval_frame, std::memory_order_relaxed);
+}
+
+PyObject* Ci_GetStaticTypeError(void) {
+  auto state = cinderx::getModuleState();
+  return state != nullptr ? state->static_type_error.getObj() : nullptr;
+}
+
+PyObject* Ci_GetGenericInstCache(void) {
+  auto state = cinderx::getModuleState();
+  return state != nullptr ? state->genericinst_cache.getObj() : nullptr;
+}
+
+void Ci_SetGenericInstCache(PyDictObject* cache) {
+  cinderx::getModuleState()->genericinst_cache =
+      cinderx::Ref<PyDictObject>::create(cache);
+}
+
+void Ci_ClearGenericInstCache(void) {
+  if (auto state = cinderx::getModuleState(); state != nullptr) {
+    state->genericinst_cache.reset();
+  }
+}
+
+PyObject* Ci_GetClassLoaderCache(void) {
+  auto state = cinderx::getModuleState();
+  return state != nullptr ? state->classloader_cache.getObj() : nullptr;
+}
+
+void Ci_SetClassLoaderCache(PyDictObject* cache) {
+  cinderx::getModuleState()->classloader_cache =
+      cinderx::Ref<PyDictObject>::create(cache);
+}
+
+void Ci_ClearClassLoaderCache(void) {
+  if (auto state = cinderx::getModuleState(); state != nullptr) {
+    state->classloader_cache.reset();
+  }
+}
+
+PyObject* Ci_GetClassLoaderCacheModuleToKeys(void) {
+  auto state = cinderx::getModuleState();
+  return state != nullptr ? state->classloader_cache_module_to_keys.getObj()
+                          : nullptr;
+}
+
+void Ci_SetClassLoaderCacheModuleToKeys(PyDictObject* cache) {
+  cinderx::getModuleState()->classloader_cache_module_to_keys =
+      cinderx::Ref<PyDictObject>::create(cache);
+}
+
+void Ci_ClearClassLoaderCacheModuleToKeys(void) {
+  if (auto state = cinderx::getModuleState(); state != nullptr) {
+    state->classloader_cache_module_to_keys.reset();
+  }
+}
+
+PyObject* Ci_GetValueCache(void) {
+  auto state = cinderx::getModuleState();
+  return state != nullptr ? state->value_cache.getObj() : nullptr;
+}
+
+void Ci_SetValueCache(PyListObject* cache) {
+  cinderx::getModuleState()->value_cache =
+      cinderx::Ref<PyListObject>::create(cache);
+}
+
+void Ci_ClearValueCache(void) {
+  if (auto state = cinderx::getModuleState(); state != nullptr) {
+    state->value_cache.reset();
+  }
+}
+
+PyObject* Ci_GetValueIndices(void) {
+  auto state = cinderx::getModuleState();
+  return state != nullptr ? state->value_indices.getObj() : nullptr;
+}
+
+void Ci_SetValueIndices(PyDictObject* indices) {
+  cinderx::getModuleState()->value_indices =
+      cinderx::Ref<PyDictObject>::create(indices);
+}
+
+void Ci_ClearValueIndices(void) {
+  if (auto state = cinderx::getModuleState(); state != nullptr) {
+    state->value_indices.reset();
+  }
+}
+
+int32_t Ci_GetTypeIndexOffset(void) {
+  return cinderx::getModuleState()->type_index_offset;
+}
+
+void Ci_AddTypeIndexOffset(int32_t offset) {
+  cinderx::getModuleState()->type_index_offset += offset;
+}
+
+PyObject* Ci_GetDlopenCache(void) {
+  auto state = cinderx::getModuleState();
+  return state != nullptr ? state->dlopen_cache.getObj() : nullptr;
+}
+
+void Ci_SetDlopenCache(PyDictObject* cache) {
+  cinderx::getModuleState()->dlopen_cache =
+      cinderx::Ref<PyDictObject>::create(cache);
+}
+
+PyObject* Ci_GetDlsymCache(void) {
+  auto state = cinderx::getModuleState();
+  return state != nullptr ? state->dlsym_cache.getObj() : nullptr;
+}
+
+void Ci_SetDlsymCache(PyDictObject* cache) {
+  cinderx::getModuleState()->dlsym_cache =
+      cinderx::Ref<PyDictObject>::create(cache);
+}
+
+PyObject* Ci_GetInvokeNativeHelper(void) {
+  auto state = cinderx::getModuleState();
+  return state != nullptr ? state->invoke_native_helper.getObj() : nullptr;
+}
+
+void Ci_SetInvokeNativeHelper(PyFunctionObject* helper) {
+  cinderx::getModuleState()->invoke_native_helper =
+      cinderx::Ref<PyFunctionObject>::create(helper);
+}
+
+PyObject* Ci_GetReturnNone(void) {
+  auto state = cinderx::getModuleState();
+  return state != nullptr ? state->return_none.getObj() : nullptr;
+}
+
+void Ci_SetReturnNone(PyFunctionObject* obj) {
+  cinderx::getModuleState()->return_none =
+      cinderx::Ref<PyFunctionObject>::create(obj);
+}
+
+PyObject* Ci_GetWeakrefCallback(void) {
+  auto state = cinderx::getModuleState();
+  return state != nullptr ? state->weakref_callback.getObj() : nullptr;
+}
+
+void Ci_SetWeakrefCallback(PyCFunctionObject* cb) {
+  cinderx::getModuleState()->weakref_callback =
+      cinderx::Ref<PyCFunctionObject>::create(cb);
+}
+
+bool Ci_GetSpAuditHookInstalled(void) {
+  auto state = cinderx::getModuleState();
+  return state != nullptr ? state->sp_audit_hook_installed : false;
+}
+
+void Ci_SetSpAuditHookInstalled(bool installed) {
+  cinderx::getModuleState()->sp_audit_hook_installed = installed;
+}
+
+PyObject* Ci_GetIndexErr(void) {
+  auto state = cinderx::getModuleState();
+  return state != nullptr ? state->indexerr.getObj() : nullptr;
+}
+
+void Ci_SetIndexErr(PyUnicodeObject* err) {
+  cinderx::getModuleState()->indexerr =
+      cinderx::Ref<PyUnicodeObject>::create(err);
+}
+
 int Ci_Watchers_WatchDict(PyObject* dict) {
-  return cinderx::getModuleState()->watcherState().watchDict(dict);
+  return cinderx::getModuleState()->watcher_state.watchDict(dict);
 }
 
 int Ci_Watchers_UnwatchDict(PyObject* dict) {
-  return cinderx::getModuleState()->watcherState().unwatchDict(dict);
+  return cinderx::getModuleState()->watcher_state.unwatchDict(dict);
 }
 
 int Ci_Watchers_WatchType(PyTypeObject* type) {
-  return cinderx::getModuleState()->watcherState().watchType(type);
+  return cinderx::getModuleState()->watcher_state.watchType(type);
 }
 
 int Ci_Watchers_UnwatchType(PyTypeObject* type) {
-  return cinderx::getModuleState()->watcherState().unwatchType(type);
+  return cinderx::getModuleState()->watcher_state.unwatchType(type);
 }
 
 PyObject**
@@ -42,7 +246,7 @@ Ci_GetGlobalCache(PyObject* builtins, PyObject* globals, PyObject* key) {
       "Dictionary key should be a string, but is actually a {}",
       Py_TYPE(key)->tp_name);
 
-  return cinderx::getModuleState()->cacheManager()->getGlobalCache(
+  return cinderx::getModuleState()->cache_manager->getGlobalCache(
       builtins, globals, key);
 }
 
@@ -51,8 +255,34 @@ PyObject** Ci_GetDictCache(PyObject* dict, PyObject* key) {
 }
 
 void Ci_free_jit_list_gen(PyGenObject* obj) {
-  cinderx::getModuleState()->jitGenFreeList()->free(
+  cinderx::getModuleState()->jit_gen_free_list->free(
       reinterpret_cast<PyObject*>(obj));
+}
+
+bool Ci_GetDelayAdaptiveCode(void) {
+  return cinderx::jit::getConfig().delay_adaptive_code;
+}
+
+void Ci_SetDelayAdaptiveCode(bool delay) {
+  cinderx::jit::getMutableConfig().delay_adaptive_code = delay;
+}
+
+uint64_t Ci_GetAdaptiveThreshold(void) {
+  return cinderx::jit::getConfig().adaptive_threshold;
+}
+
+void Ci_SetAdaptiveThreshold(uint64_t threshold) {
+  cinderx::jit::getMutableConfig().adaptive_threshold = threshold;
+}
+
+PyTypeObject* Ci_GetAwaitableWrapperType(void) {
+  auto state = cinderx::getModuleState();
+  return state != nullptr ? state->awaitable_wrapper_type.get() : nullptr;
+}
+
+void Ci_SetAwaitableWrapperType(PyTypeObject* type) {
+  cinderx::getModuleState()->awaitable_wrapper_type =
+      cinderx::Ref<PyTypeObject>::create(type);
 }
 
 } // extern "C"

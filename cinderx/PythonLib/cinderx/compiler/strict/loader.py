@@ -15,12 +15,14 @@ try:  # ensure all imports in this module are eager, to avoid cycles
 
     # pyre-ignore[21]: typeshed doesn't know about this
     from importlib import _bootstrap, _pack_uint32
-
-    # pyre-ignore[21]: typeshed doesn't know about this
     from importlib._bootstrap_external import (
+        # pyrefly: ignore [missing-module-attribute]
         _classify_pyc,
+        # pyrefly: ignore [missing-module-attribute]
         _compile_bytecode,
+        # pyrefly: ignore [missing-module-attribute]
         _validate_hash_pyc,
+        # pyrefly: ignore [missing-module-attribute]
         _validate_timestamp_pyc,
     )
     from importlib.abc import Loader
@@ -38,11 +40,7 @@ try:  # ensure all imports in this module are eager, to avoid cycles
     from io import BytesIO
     from os import getenv, makedirs
     from os.path import dirname, isdir
-    from py_compile import (
-        _get_default_invalidation_mode,
-        PycInvalidationMode,
-        PyCompileError,
-    )
+    from py_compile import _get_default_invalidation_mode, PycInvalidationMode
     from types import CodeType, ModuleType
     from typing import Callable, cast, Collection, final, Iterable, Mapping
 
@@ -109,7 +107,7 @@ class StrictModuleTestingPatchProxy:
         object.__setattr__(
             self, "_final_constants", getattr(module, "__final_constants__", ())
         )
-        # pyre-ignore[16]: pyre doesn't understand properties well enough
+        # pyrefly: ignore [bad-argument-type, missing-attribute]
         if not type(module).__patch_enabled__.__get__(module, type(module)):
             raise ValueError(f"strict module {module} does not allow patching")
 
@@ -192,7 +190,6 @@ class StrictBytecodeError(ImportError):
 def classify_strict_pyc(
     data: bytes, name: str, exc_details: dict[str, str]
 ) -> tuple[int, bool]:
-    # pyre-ignore[16]: typeshed doesn't know about this
     flags = _classify_pyc(data[_MAGIC_LEN:], name, exc_details)
     magic = data[:_MAGIC_LEN]
     if magic == _MAGIC_NEITHER_STRICT_NOR_STATIC:
@@ -259,7 +256,6 @@ def get_dependency_data(source_info: SourceInfo, hash_based: bool) -> bytes:
         assert source_info.source is not None
         return importlib.util.source_hash(source_info.source)
     else:
-        # pyre-ignore[16]: typeshed doesn't know about this
         return _pack_uint32(source_info.mtime) + _pack_uint32(source_info.size)
 
 
@@ -277,11 +273,8 @@ def code_to_strict_timestamp_pyc(
         else _MAGIC_NEITHER_STRICT_NOR_STATIC
     )
     data.extend(MAGIC_NUMBER)
-    # pyre-ignore[16]: typeshed doesn't know about this
     data.extend(_pack_uint32(0))
-    # pyre-ignore[16]: typeshed doesn't know about this
     data.extend(_pack_uint32(mtime))
-    # pyre-ignore[16]: typeshed doesn't know about this
     data.extend(_pack_uint32(source_size))
     data.extend(marshal.dumps(get_deps(deps, hash_based=False)))
     data.extend(marshal.dumps(code))
@@ -303,7 +296,6 @@ def code_to_strict_hash_pyc(
     )
     data.extend(MAGIC_NUMBER)
     flags = 0b1 | checked << 1
-    # pyre-ignore[16]: typeshed doesn't know about this
     data.extend(_pack_uint32(flags))
     assert len(source_hash) == 8
     data.extend(source_hash)
@@ -447,7 +439,6 @@ class StrictSourceFileLoader(SourceFileLoader):
                             ):
                                 source_bytes = self.get_data(source_path)
                                 source_hash = importlib.util.source_hash(source_bytes)
-                                # pyre-ignore[16]: typeshed doesn't know about this
                                 _validate_hash_pyc(
                                     data[_MAGIC_LEN:],
                                     source_hash,
@@ -459,7 +450,6 @@ class StrictSourceFileLoader(SourceFileLoader):
                                         self.get_compiler(), deps, hash_based=True
                                     )
                         else:
-                            # pyre-ignore[16]: typeshed doesn't know about this
                             _validate_timestamp_pyc(
                                 data[_MAGIC_LEN:],
                                 source_mtime,
@@ -478,7 +468,6 @@ class StrictSourceFileLoader(SourceFileLoader):
                         _bootstrap._verbose_message(
                             "{} matches {}", bytecode_path, source_path
                         )
-                        # pyre-ignore[16]: typeshed doesn't know about this
                         return _compile_bytecode(
                             memoryview(data)[bytes_data.tell() :],
                             name=fullname,
@@ -527,15 +516,13 @@ class StrictSourceFileLoader(SourceFileLoader):
     def should_force_strict(self) -> bool:
         return False
 
-    # pyre-fixme[14]: `source_to_code` overrides method defined in `InspectLoader`
-    #  inconsistently.
+    # pyrefly: ignore [bad-override]
     def source_to_code(
         self, data: bytes | str, path: str, *, _optimize: int = -1
     ) -> CodeType:
         log_source_load = self.log_source_load
         if log_source_load is not None:
             log_source_load(path, self.bytecode_path, self.bytecode_found)
-        # pyre-ignore[28]: typeshed doesn't know about _optimize arg
         code = super().source_to_code(data, path, _optimize=_optimize)
         force = self.should_force_strict()
         if force or "__strict__" in code.co_names or "__static__" in code.co_names:
@@ -546,7 +533,7 @@ class StrictSourceFileLoader(SourceFileLoader):
             # containing the "__init__.py").
             submodule_search_locations = None
             if path.endswith("__init__.py"):
-                submodule_search_locations = [path[:12]]
+                submodule_search_locations = [os.path.dirname(path)]
             # Usually _optimize will be -1 (which means "default to the value
             # of sys.flags.optimize"). But this default happens very deep in
             # Python's compiler (in PyAST_CompileObject), so if we just pass
@@ -601,6 +588,7 @@ class StrictSourceFileLoader(SourceFileLoader):
             if module.__spec__ is not None:
                 module.__spec__.cached = cached
             if sys.version_info < (3, 15):
+                # pyrefly: ignore [missing-attribute]
                 module.__cached__ = cached
         spec: ModuleSpec | None = module.__spec__
 
@@ -731,7 +719,7 @@ def strict_compile(
             modname = file[len(dir) :]
             break
 
-    modname = modname.replace("/", ".")
+    modname = modname.replace(os.sep, ".").replace("/", ".")
     if modname.endswith("__init__.py"):
         modname = modname[: -len("__init__.py")]
     elif modname.endswith(".py"):
@@ -746,6 +734,7 @@ def strict_compile(
         modname,
         file,
         import_path=sys.path,
+        # pyrefly: ignore [bad-argument-type]
         **loader_options,
     )
     cfile = add_strict_tag(cfile, enable_patching=loader.enable_patching)
@@ -753,14 +742,8 @@ def strict_compile(
     try:
         code = loader.source_to_code(source_bytes, dfile or file, _optimize=optimize)
         deps = loader.get_compiler().get_dependencies(modname)
-    except Exception as err:
+    except Exception:
         raise
-        py_exc = PyCompileError(err.__class__, err, dfile or file)
-        if doraise:
-            raise py_exc
-        else:
-            sys.stderr.write(py_exc.msg + "\n")
-            return
 
     makedirs(dirname(cfile), exist_ok=True)
 

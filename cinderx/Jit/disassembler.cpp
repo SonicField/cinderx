@@ -11,31 +11,26 @@
 #endif
 
 #ifndef ENABLE_DISASSEMBLER
-namespace jit {
+namespace cinderx::jit {
 
-Disassembler::Disassembler(const char* buf, size_t size)
-    : buf_(buf), size_{size} {}
+Disassembler::Disassembler(const char*, size_t) {}
 
-void Disassembler::disassembleOne(std::ostream& os) {}
-void Disassembler::disassembleAll(std::ostream& os) {}
+void Disassembler::disassembleOne(std::ostream&) {}
+void Disassembler::disassembleAll(std::ostream&) {}
 
 const char* Disassembler::cursor() const {
   return nullptr;
 }
 
-void Disassembler::setPrintAddr(bool print) {}
-void Disassembler::setPrintInstBytes(bool print) {}
+void Disassembler::setPrintAddr(bool) {}
+void Disassembler::setPrintInstBytes(bool) {}
 
-size_t Disassembler::disassemblerHandle() {
-  return 0;
-}
-
-void Disassembler::disassemble(std::ostream& os, size_t handle) {}
-
-} // namespace jit
+} // namespace cinderx::jit
 #else
 #pragma GCC diagnostic push
+#ifdef __clang__
 #pragma GCC diagnostic ignored "-Wduplicate-enum"
+#endif
 #include "capstone/capstone.h"
 #pragma GCC diagnostic pop
 
@@ -43,7 +38,7 @@ void Disassembler::disassemble(std::ostream& os, size_t handle) {}
 #include "capstone/arm64.h"
 #endif
 
-namespace jit {
+namespace cinderx::jit {
 
 Disassembler::Disassembler(const char* buf, size_t size)
     : buf_(buf), size_{size} {}
@@ -238,5 +233,5 @@ void Disassembler::disassemble(std::ostream& os, size_t handle) {
   start_ += insn->size;
 }
 
-} // namespace jit
+} // namespace cinderx::jit
 #endif

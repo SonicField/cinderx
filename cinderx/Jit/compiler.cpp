@@ -8,27 +8,55 @@
 #include "cinderx/Jit/hir/analysis.h"
 #include "cinderx/Jit/hir/builder.h"
 #include "cinderx/Jit/hir/builtin_load_method_elimination.h"
+#include "cinderx/Jit/hir/call_site_live_values.h"
 #include "cinderx/Jit/hir/clean_cfg.h"
 #include "cinderx/Jit/hir/dead_code_elimination.h"
 #include "cinderx/Jit/hir/dynamic_comparison_elimination.h"
 #include "cinderx/Jit/hir/guard_removal.h"
-#include "cinderx/Jit/hir/hir_stats.h"
 #include "cinderx/Jit/hir/inliner.h"
 #include "cinderx/Jit/hir/insert_update_prev_instr.h"
+#include "cinderx/Jit/hir/materialize_steals.h"
 #include "cinderx/Jit/hir/phi_elimination.h"
 #include "cinderx/Jit/hir/printer.h"
 #include "cinderx/Jit/hir/refcount_insertion.h"
 #include "cinderx/Jit/hir/simplify.h"
+#include "cinderx/Jit/hir/sink_primitive_box.h"
 #include "cinderx/Jit/hir/ssa.h"
+#include "cinderx/Jit/hir/stats.h"
 #include "cinderx/Jit/jit_time_log.h"
 
 #include <chrono>
 #include <iostream>
 
-namespace jit {
+namespace cinderx::jit {
+
+namespace {
+
+// Raise an exception if an HIR function exceeds a reasonable size.
+void checkHirSize(const hir::Function& func) {
+  auto num_blocks = func.numBlocks();
+  auto max_blocks = getConfig().max_hir_blocks;
+  if (num_blocks > max_blocks) {
+    throw std::runtime_error{fmt::format(
+        "HIR function '{}' has too many basic blocks ({}, max={})",
+        func.fullname,
+        num_blocks,
+        max_blocks)};
+  }
+
+  auto num_instrs = func.numInstrs();
+  auto max_instrs = getConfig().max_hir_instrs;
+  if (num_instrs > max_instrs) {
+    throw std::runtime_error{fmt::format(
+        "HIR function '{}' has too many instructions ({}, max={})",
+        func.fullname,
+        num_instrs,
+        max_instrs)};
+  }
+}
 
 template <typename T>
-static void runPass(T&& pass, hir::Function& func, PostPassFunction callback) {
+void runPass(T&& pass, hir::Function& func, PostPassFunction callback) {
   COMPILE_TIMER(func.compilation_phase_timer,
                 pass.name(),
                 JIT_LOGIF(
@@ -39,7 +67,7 @@ static void runPass(T&& pass, hir::Function& func, PostPassFunction callback) {
                     func);
 
                 Timer timer;
-                pass.Run(func);
+                pass.run(func);
                 std::size_t time_ns = timer.finish().count();
                 callback(func, pass.name(), time_ns);
 
@@ -65,6 +93,8 @@ static void runPass(T&& pass, hir::Function& func, PostPassFunction callback) {
                     func);)
 }
 
+} // namespace
+
 void Compiler::runPasses(jit::hir::Function& irfunc, PassConfig config) {
   PostPassFunction callback =
       [](hir::Function&, std::string_view, std::size_t) {};
@@ -75,6 +105,11 @@ void Compiler::runPasses(
     jit::hir::Function& irfunc,
     PassConfig config,
     PostPassFunction callback) {
+  // Bail out before doing any work if the freshly-built HIR is already too
+  // large to be worth compiling.  Checked once here rather than before every
+  // pass to avoid repeatedly walking the CFG.
+  checkHirSize(irfunc);
+
   // SSAify must come first; nothing but SSAify should ever see non-SSA HIR.
   runPass(jit::hir::SSAify{}, irfunc, callback);
 
@@ -105,10 +140,15 @@ void Compiler::runPasses(
       hir::BuiltinLoadMethodElimination{}, PassConfig::kBuiltinLoadMethodElim);
   runPassIf(hir::Simplify{}, PassConfig::kSimplify);
   runPassIf(hir::CleanCFG{}, PassConfig::kCleanCFG);
+  runPassIf(hir::SinkPrimitiveBox{}, PassConfig::kSinkPrimitiveBox);
   runPassIf(hir::DeadCodeElimination{}, PassConfig::kDeadCodeElim);
   runPassIf(hir::CleanCFG{}, PassConfig::kCleanCFG);
 
   runPass(jit::hir::RefcountInsertion{}, irfunc, callback);
+  if constexpr (kFreeThreadedBuild) {
+    runPass(jit::hir::CallSiteLiveValues{}, irfunc, callback);
+    runPass(jit::hir::MaterializeSteals{}, irfunc, callback);
+  }
 
   if (getConfig().dump_hir_stats) {
     jit::hir::HIRStats stats;
@@ -126,15 +166,15 @@ void Compiler::runPasses(
       irfunc);
 }
 
-std::optional<CompiledFunctionData> Compiler::Compile(
+std::optional<CompiledFunctionData> Compiler::compile(
     BorrowedRef<PyFunctionObject> func) {
   JIT_CHECK(PyFunction_Check(func), "Expected PyFunctionObject");
   JIT_CHECK(
-      !getThreadedCompileContext().compileRunning(),
+      !ThreadedCompileContext::compileRunning(),
       "multi-thread compile must preload first");
   std::unique_ptr<hir::Preloader> preloader =
-      hir::Preloader::makePreloader(func, makeFrameReifier(func->func_code));
-  return preloader ? Compile(*preloader) : std::nullopt;
+      hir::Preloader::make(func, makeFrameReifier(func->func_code));
+  return preloader ? compile(*preloader) : std::nullopt;
 }
 
 PassConfig createConfig() {
@@ -151,18 +191,19 @@ PassConfig createConfig() {
       PassConfig::kBeginInlinedFunctionElim);
   set(hir_opts.builtin_load_method_elim, PassConfig::kBuiltinLoadMethodElim);
   set(hir_opts.clean_cfg, PassConfig::kCleanCFG);
+  set(hir_opts.dead_code_elim, PassConfig::kDeadCodeElim);
   set(hir_opts.dynamic_comparison_elim, PassConfig::kDynamicComparisonElim);
   set(hir_opts.guard_type_removal, PassConfig::kGuardTypeRemoval);
-  // Inliner currently depends on code objects being stable.
-  set(hir_opts.inliner && getConfig().stable_frame, PassConfig::kInliner);
+  set(hir_opts.inliner, PassConfig::kInliner);
   set(hir_opts.insert_update_prev_instr, PassConfig::kInsertUpdatePrevInstr);
   set(hir_opts.phi_elim, PassConfig::kPhiElim);
   set(hir_opts.simplify, PassConfig::kSimplify);
+  set(hir_opts.sink_primitive_box, PassConfig::kSinkPrimitiveBox);
 
   return static_cast<PassConfig>(result);
 }
 
-std::optional<CompiledFunctionData> Compiler::Compile(
+std::optional<CompiledFunctionData> Compiler::compile(
     const jit::hir::Preloader& preloader) {
   const std::string& fullname = preloader.fullname();
   if (!PyDict_CheckExact(preloader.globals())) {
@@ -193,7 +234,7 @@ std::optional<CompiledFunctionData> Compiler::Compile(
 
   Timer timer;
   std::unique_ptr<hir::Function> irfunc(hir::buildHIR(preloader));
-  irfunc->reifier = ThreadedRef<>::create(preloader.reifier());
+
   if (nullptr != compilation_phase_timer) {
     compilation_phase_timer->end();
   }
@@ -229,21 +270,31 @@ std::optional<CompiledFunctionData> Compiler::Compile(
     return std::nullopt;
   }
 
+  // Flush Environ pending references to CodeRuntime so that they are
+  // kept alive during the lifetime of the compiled code.
+  {
+    ThreadedCompileGILHolder guard;
+    ngen->transferReferences();
+    auto code_runtime = ngen->codeRuntime();
+    code_runtime->transferReferences(irfunc->env.stealStrongReferences());
+  }
+
   auto compile_time =
       std::chrono::duration_cast<std::chrono::microseconds>(timer.finish());
 
   JIT_DLOG(
-      "Finished compiling {} in {}, code size: {} bytes",
+      "Finished compiling {} in {}, code size: {} bytes (code: {})",
       fullname,
       compile_time,
-      ngen->getCodeBuffer().size_bytes());
+      ngen->getCodeBuffer().size_bytes(),
+      static_cast<void*>(preloader.code()));
   if (nullptr != irfunc->compilation_phase_timer) {
     irfunc->compilation_phase_timer->end();
     irfunc->setCompilationPhaseTimer(nullptr);
   }
 
-  int stack_size = ngen->GetCompiledFunctionStackSize();
-  int spill_stack_size = ngen->GetCompiledFunctionSpillStackSize();
+  int stack_size = ngen->getCompiledFunctionStackSize();
+  int spill_stack_size = ngen->getCompiledFunctionSpillStackSize();
 
   // Grab some fields off of irfunc and ngen before moving them.
   hir::Function::InlineFunctionStats inline_stats =
@@ -261,11 +312,14 @@ std::optional<CompiledFunctionData> Compiler::Compile(
   compiled_data.runtime = code_runtime;
   compiled_data.compile_time = compile_time;
   compiled_data.code_patchers = std::move(irfunc->code_patchers);
+#ifndef ENABLE_PREFORK_MODEL
+  compiled_data.inline_cache_storage = ngen->takeInlineCacheStorage();
+#endif
   if (getConfig().log.debug) {
     irfunc->setCompilationPhaseTimer(nullptr);
     compiled_data.irfunc = std::move(irfunc);
   }
-  return std::move(compiled_data);
+  return compiled_data;
 }
 
-} // namespace jit
+} // namespace cinderx::jit

@@ -2,7 +2,7 @@
 
 #include "cinderx/Jit/hir/cfg.h"
 
-namespace jit::hir {
+namespace cinderx::jit::hir {
 
 namespace {
 
@@ -14,7 +14,7 @@ void postorder_traverse(
   visited->emplace(block);
 
   // Add successors to be visited
-  Instr* instr = block->GetTerminator();
+  Instr* instr = block->getTerminator();
   switch (instr->opcode()) {
     case Opcode::kCondBranch:
     case Opcode::kCondBranchIterNotDone:
@@ -57,52 +57,52 @@ void postorder_traverse(
 } // namespace
 
 CFG::~CFG() {
-  while (!blocks.IsEmpty()) {
-    BasicBlock* block = &(blocks.ExtractFront());
+  while (!blocks.isEmpty()) {
+    BasicBlock* block = &(blocks.extractFront());
     // This is the one situation where it's not a bug to delete a reachable
     // block, since we're deleting everything. Clear block's incoming edges so
     // its destructor doesn't complain.
-    for (auto it = block->in_edges().begin(); it != block->in_edges().end();) {
+    for (auto it = block->inEdges().begin(); it != block->inEdges().end();) {
       auto edge = *it;
       ++it;
-      const_cast<Edge*>(edge)->set_to(nullptr);
+      const_cast<Edge*>(edge)->setTo(nullptr);
     }
     delete block;
   }
 }
 
-BasicBlock* CFG::AllocateBlock() {
-  auto block = AllocateUnlinkedBlock();
-  blocks.PushBack(*block);
+BasicBlock* CFG::allocateBlock() {
+  auto block = allocateUnlinkedBlock();
+  blocks.pushBack(*block);
   return block;
 }
 
-BasicBlock* CFG::AllocateUnlinkedBlock() {
+BasicBlock* CFG::allocateUnlinkedBlock() {
   int id = next_block_id_;
   auto block = new BasicBlock(id);
   next_block_id_++;
   return block;
 }
 
-void CFG::InsertBlock(BasicBlock* block) {
-  blocks.PushBack(*block);
+void CFG::insertBlock(BasicBlock* block) {
+  blocks.pushBack(*block);
 }
 
-void CFG::RemoveBlock(BasicBlock* block) {
-  block->cfg_node.Unlink();
+void CFG::removeBlock(BasicBlock* block) {
+  blocks.remove(*block);
 }
 
 BasicBlock* CFG::splitAfter(Instr& target) {
   auto block = target.block();
-  auto tail = AllocateBlock();
+  auto tail = allocateBlock();
   for (auto it = std::next(block->iterator_to(target)); it != block->end();) {
     auto& instr = *it;
     ++it;
     instr.unlink();
-    tail->Append(&instr);
+    tail->append(&instr);
   }
 
-  for (auto edge : tail->out_edges()) {
+  for (auto edge : tail->outEdges()) {
     edge->to()->fixupPhis(block, tail);
   }
   return tail;
@@ -114,7 +114,7 @@ void CFG::splitCriticalEdges() {
   // Separately enumerate and process the critical edges to avoid mutating the
   // CFG while iterating it.
   for (auto& block : blocks) {
-    auto term = block.GetTerminator();
+    auto term = block.getTerminator();
     JIT_DCHECK(term != nullptr, "Invalid block");
     auto num_edges = term->numEdges();
     if (num_edges < 2) {
@@ -122,7 +122,7 @@ void CFG::splitCriticalEdges() {
     }
     for (std::size_t i = 0; i < num_edges; ++i) {
       auto edge = term->edge(i);
-      if (edge->to()->in_edges().size() > 1) {
+      if (edge->to()->inEdges().size() > 1) {
         critical_edges.emplace_back(edge);
       }
     }
@@ -131,29 +131,29 @@ void CFG::splitCriticalEdges() {
   for (auto edge : critical_edges) {
     auto from = edge->from();
     auto to = edge->to();
-    auto split_bb = AllocateBlock();
-    auto term = edge->from()->GetTerminator();
+    auto split_bb = allocateBlock();
+    auto term = edge->from()->getTerminator();
     split_bb->appendWithOff<Branch>(term->bytecodeOffset(), to);
-    edge->set_to(split_bb);
+    edge->setTo(split_bb);
     to->fixupPhis(from, split_bb);
   }
 }
 
-std::vector<BasicBlock*> CFG::GetRPOTraversal() const {
-  return GetRPOTraversal(entry_block);
+std::vector<BasicBlock*> CFG::getRPOTraversal() const {
+  return getRPOTraversal(entry_block);
 }
 
-std::vector<BasicBlock*> CFG::GetRPOTraversal(BasicBlock* start) {
-  auto traversal = GetPostOrderTraversal(start);
+std::vector<BasicBlock*> CFG::getRPOTraversal(BasicBlock* start) {
+  auto traversal = getPostOrderTraversal(start);
   std::reverse(traversal.begin(), traversal.end());
   return traversal;
 }
 
-std::vector<BasicBlock*> CFG::GetPostOrderTraversal() const {
-  return GetPostOrderTraversal(entry_block);
+std::vector<BasicBlock*> CFG::getPostOrderTraversal() const {
+  return getPostOrderTraversal(entry_block);
 }
 
-std::vector<BasicBlock*> CFG::GetPostOrderTraversal(BasicBlock* start) {
+std::vector<BasicBlock*> CFG::getPostOrderTraversal(BasicBlock* start) {
   std::vector<BasicBlock*> traversal;
   if (start == nullptr) {
     return traversal;
@@ -172,4 +172,16 @@ const BasicBlock* CFG::getBlockById(int id) const {
   return nullptr;
 }
 
-} // namespace jit::hir
+size_t CFG::numBlocks() const {
+  return blocks.size();
+}
+
+size_t CFG::numInstrs() const {
+  size_t result = 0;
+  for (const auto& block : blocks) {
+    result += block.size();
+  }
+  return result;
+}
+
+} // namespace cinderx::jit::hir

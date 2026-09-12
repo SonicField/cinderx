@@ -4,8 +4,8 @@
 set -e
 
 # Copied from cpython Makefile
-# Point srcdir to the internal copy of cpython 3.12 so we can use the cases_generator
-srcdir='../../../third-party/python/main/patched'
+# Point srcdir to the internal copy of cpython 3.15 so we can use the cases_generator
+srcdir='../../../third-party/python/3.15/patched'
 
 PYTHONPATH=$srcdir/Tools/cases_generator \
 fbpython -- \

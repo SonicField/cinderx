@@ -1,7 +1,6 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 
-#ifndef Py_CACHED_PROPERTIES_H
-#define Py_CACHED_PROPERTIES_H
+#pragma once
 
 #include "cinderx/python.h"
 
@@ -30,11 +29,15 @@ typedef struct {
 } PyAsyncCachedClassPropertyDescrObject;
 /* end fb T82701047 */
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 extern PyTypeObject PyAsyncCachedPropertyWithDescr_Type;
 extern PyType_Spec _PyCachedClassProperty_TypeSpec; /* fb t46346203 */
 extern PyTypeObject PyCachedProperty_Type; /* fb T46346203 */
 extern PyTypeObject PyCachedPropertyWithDescr_Type; /* fb T46346203 */
 extern PyTypeObject PyAsyncCachedProperty_Type; /* fb T82701047 */
 extern PyTypeObject PyAsyncCachedClassProperty_Type; /* fb T82701047 */
-
-#endif /* !Py_CACHED_PROPERTIES_H */
+#ifdef __cplusplus
+}
+#endif

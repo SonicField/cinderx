@@ -4,17 +4,17 @@
 
 #include "cinderx/Jit/hir/pass.h"
 
-namespace jit::hir {
+namespace cinderx::jit::hir {
 
-class DynamicComparisonElimination : public Pass {
+class DynamicComparisonElimination final : public Pass {
  public:
   DynamicComparisonElimination() : Pass("DynamicComparisonElimination") {}
 
-  void Run(Function& irfunc) override;
+  void run(Function& irfunc) override;
 
-  static std::unique_ptr<DynamicComparisonElimination> Factory() {
+  static std::unique_ptr<DynamicComparisonElimination> factory() {
     return std::make_unique<DynamicComparisonElimination>();
   }
 };
 
-} // namespace jit::hir
+} // namespace cinderx::jit::hir

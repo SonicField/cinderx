@@ -6,27 +6,30 @@
 #include "cinderx/Jit/compiler.h"
 #include "cinderx/Jit/context.h"
 #include "cinderx/Jit/hir/builder.h"
+#include "cinderx/Jit/lir/blocksorter.h"
 #include "cinderx/RuntimeTests/fixtures.h"
 
 #include <string>
 #include <utility>
 
+namespace cinderx {
+
 using namespace asmjit;
-using namespace jit;
-using namespace jit::codegen;
-using namespace jit::hir;
+using namespace cinderx::jit;
+using namespace cinderx::jit::codegen;
+using namespace cinderx::jit::hir;
 
 class ASMGeneratorTest : public RuntimeTest {
  public:
-  CompiledFunction* GenerateCode(PyObject* func) {
+  Ref<CompiledFunction> GenerateCode(PyObject* func) {
     auto func_obj = reinterpret_cast<PyFunctionObject*>(func);
 
     CompilationKey key{
         func_obj->func_code, func_obj->func_builtins, func_obj->func_globals};
-    auto jit_ctx = reinterpret_cast<jit::CompilerContext<Compiler>*>(
-        cinderx::getModuleState()->jitContext());
+    auto jit_ctx = reinterpret_cast<CompilerContext<Compiler>*>(
+        cinderx::getModuleState()->jit_context.get());
     std::optional<CompiledFunctionData> compiled_func =
-        jit_ctx->compiler().Compile(func);
+        jit_ctx->compiler().compile(func);
     if (!compiled_func.has_value()) {
       return nullptr;
     }
@@ -52,6 +55,25 @@ def func():
   auto res = Ref<>::steal(compiled->invoke(pyfunc, args, 0));
   ASSERT_NE(res, nullptr);
   ASSERT_EQ(PyLong_AsLong(res), 314159);
+}
+
+TEST_F(ASMGeneratorTest, FunctionWithoutReturnUsesValuelessEpilogue) {
+  const char* pycode = R"(
+def func():
+  raise RuntimeError("expected")
+)";
+
+  Ref<PyObject> pyfunc(compileAndGet(pycode, "func"));
+  ASSERT_NE(pyfunc.get(), nullptr) << "Failed compiling func";
+
+  auto compiled = GenerateCode(pyfunc);
+  ASSERT_NE(compiled, nullptr);
+
+  PyObject* args[] = {};
+  auto result = Ref<>::steal(compiled->invoke(pyfunc, args, 0));
+  EXPECT_EQ(result, nullptr);
+  EXPECT_TRUE(PyErr_ExceptionMatches(PyExc_RuntimeError));
+  PyErr_Clear();
 }
 
 TEST_F(ASMGeneratorTest, Fallthrough) {
@@ -105,6 +127,50 @@ def func2(x):
   ASSERT_EQ(PyObject_IsTrue(res2), 0);
 }
 
+TEST_F(ASMGeneratorTest, SimpleEnumConvertClassKeepsSimpleKeyword) {
+  const char* pycode = R"(
+from enum import Enum, _simple_enum
+
+class Synthetic:
+    A = 1
+
+convert_class = _simple_enum(Enum)
+)";
+
+  runCode(pycode);
+  Ref<PyObject> pyfunc(getGlobal("convert_class"));
+  ASSERT_NE(pyfunc.get(), nullptr) << "Failed loading convert_class";
+  Ref<PyObject> synthetic(getGlobal("Synthetic"));
+  ASSERT_NE(synthetic.get(), nullptr) << "Failed loading Synthetic";
+
+  auto compiled = GenerateCode(pyfunc);
+  ASSERT_NE(compiled, nullptr);
+
+  PyObject* args[] = {synthetic.get()};
+  auto res = Ref<>::steal(compiled->invoke(pyfunc, args, 1));
+  ASSERT_NE(res, nullptr);
+
+  // This compiles and invokes a small decorator function whose body builds an
+  // enum class via a keyword vectorcall.  The key operation inside
+  // convert_class is:
+  //
+  //   type(cls_name, (etype,), body, boundary=boundary, _simple=True)
+  //
+  // On free-threaded builds the JIT strips deferred-RC tag bits from object
+  // operands before entering C.  The `_simple=True` keyword is a tagged
+  // PyObject* call operand, so the JIT must pass the untagged value derived
+  // from `True`.  If register allocation rewrites the strip to read a stale
+  // reused register, EnumType.__new__ does not see `_simple=True` and takes the
+  // normal enum-construction path.  That path expects an enum namespace object,
+  // not the plain dict created by _simple_enum, and raises:
+  //
+  //   AttributeError: 'dict' object has no attribute '_member_names'
+  //
+  // Returning a type here proves the keyword vectorcall received the correct
+  // untagged `True` object after postgen and register allocation.
+  ASSERT_TRUE(PyType_Check(res));
+}
+
 TEST_F(ASMGeneratorTest, UnboundLocalError) {
   const char* pycode = R"(
 def test(x):
@@ -138,20 +204,14 @@ def test(x):
   ASSERT_NE(val.get(), nullptr);
 
   std::string msg;
-  if (PY_VERSION_HEX >= 0x030C0000) {
-    auto sval =
-        Ref<>::steal(PyObject_CallMethod(val, "__str__", nullptr /* format */));
-    ASSERT_TRUE(PyUnicode_Check(sval));
-    msg = PyUnicode_AsUTF8(sval);
-  } else {
-    ASSERT_TRUE(PyUnicode_Check(val));
-    msg = PyUnicode_AsUTF8(val);
-  }
+  auto sval =
+      Ref<>::steal(PyObject_CallMethod(val, "__str__", nullptr /* format */));
+  ASSERT_TRUE(PyUnicode_Check(sval));
+  msg = PyUnicode_AsUTF8(sval);
 
-  const std::string_view kExpected = PY_VERSION_HEX >= 0x030C0000
-      ? "cannot access local variable 'y' where it is not associated with a "
-        "value"
-      : "local variable 'y' referenced before assignment";
+  const std::string_view kExpected =
+      "cannot access local variable 'y' where it is not associated with a "
+      "value";
   ASSERT_EQ(msg, kExpected);
 
   auto tb_frame = Ref<>::steal(PyObject_GetAttrString(tb, "tb_frame"));
@@ -1391,13 +1451,13 @@ TEST_F(ASMGeneratorTest, GetLength) {
 
 class NewASMGeneratorTest : public RuntimeTest {
  public:
-  std::unique_ptr<CompiledFunction> GenerateCode(PyObject* func) {
+  Ref<CompiledFunction> GenerateCode(PyObject* func) {
     std::optional<CompiledFunctionData> compiled_func =
-        Compiler().Compile(func);
+        Compiler().compile(func);
     if (!compiled_func.has_value()) {
       return nullptr;
     }
-    return std::make_unique<CompiledFunction>(std::move(*compiled_func));
+    return CompiledFunction::create(std::move(*compiled_func), false);
   }
 };
 
@@ -1450,8 +1510,8 @@ def func(a, b):
 }
 
 TEST_F(NewASMGeneratorTest, BlockSorter) {
-  jit::lir::Function func;
-  std::vector<jit::lir::BasicBlock*> blocks;
+  lir::Function func;
+  std::vector<lir::BasicBlock*> blocks;
   for (int i = 0; i < 6; i++) {
     blocks.push_back(func.allocateBasicBlock());
   }
@@ -1477,10 +1537,100 @@ TEST_F(NewASMGeneratorTest, BlockSorter) {
   blocks[4]->addSuccessor(blocks[2]);
   blocks[4]->addSuccessor(blocks[5]);
 
+  lir::BasicBlockSorter sorter(blocks, blocks.back());
+  auto result = sorter.sort();
+
+  std::vector<lir::BasicBlock*> expected{
+      blocks[0], blocks[2], blocks[3], blocks[1], blocks[4], blocks[5]};
+  EXPECT_EQ(result.sorted_blocks, expected);
+  EXPECT_TRUE(result.pruned_blocks.empty());
+}
+
+TEST_F(NewASMGeneratorTest, BlockSorterReportsPrunedBlocks) {
+  lir::Function func;
+  lir::BasicBlock* entry = func.allocateBasicBlock();
+  lir::BasicBlock* dead_chain = func.allocateBasicBlock();
+  lir::BasicBlock* dead_cycle_header = func.allocateBasicBlock();
+  lir::BasicBlock* dead_cycle_backedge = func.allocateBasicBlock();
+  lir::BasicBlock* exit = func.allocateBasicBlock();
+
+  dead_chain->addSuccessor(dead_cycle_header);
+  dead_chain->addSuccessor(dead_cycle_backedge);
+  dead_cycle_header->addSuccessor(dead_cycle_backedge);
+  dead_cycle_backedge->addSuccessor(dead_cycle_header);
+  dead_cycle_backedge->addSuccessor(exit);
+
+  lir::BasicBlockSorter sorter(func.basicBlocks(), exit);
+  auto result = sorter.sort();
+
+  ASSERT_EQ(result.sorted_blocks.size(), 2);
+  EXPECT_EQ(result.sorted_blocks[0], entry);
+  EXPECT_EQ(result.sorted_blocks[1], exit);
+  ASSERT_EQ(result.pruned_blocks.size(), 3);
+  EXPECT_TRUE(result.pruned_blocks.contains(dead_chain));
+  EXPECT_TRUE(result.pruned_blocks.contains(dead_cycle_header));
+  EXPECT_TRUE(result.pruned_blocks.contains(dead_cycle_backedge));
+  EXPECT_FALSE(result.pruned_blocks.contains(entry));
+  EXPECT_FALSE(result.pruned_blocks.contains(exit));
+}
+
+TEST_F(NewASMGeneratorTest, BlockSorterRejectsReachableIrreducibleCFG) {
+  lir::Function func;
+  lir::BasicBlock* entry = func.allocateBasicBlock();
+  lir::BasicBlock* first_loop_block = func.allocateBasicBlock();
+  lir::BasicBlock* second_loop_block = func.allocateBasicBlock();
+  lir::BasicBlock* exit = func.allocateBasicBlock();
+
+  entry->addSuccessor(first_loop_block);
+  entry->addSuccessor(second_loop_block);
+  first_loop_block->addSuccessor(second_loop_block);
+  second_loop_block->addSuccessor(first_loop_block);
+  second_loop_block->addSuccessor(exit);
+
+  lir::BasicBlockSorter sorter(func.basicBlocks(), exit);
+  EXPECT_DEATH(sorter.sort(), "Irreducible CFG");
+}
+
+TEST_F(NewASMGeneratorTest, BlockSorterPrunesInactivePhiPredecessors) {
+  lir::Function func;
+  lir::BasicBlock* entry = func.allocateBasicBlock();
+  lir::BasicBlock* first_dead = func.allocateBasicBlock();
+  lir::BasicBlock* second_dead = func.allocateBasicBlock();
+  lir::BasicBlock* exit = func.allocateBasicBlock();
+  auto* live_value = entry->allocateInstr(
+      lir::Opcode::kMove, nullptr, lir::OutVReg{}, lir::Imm{1});
+  auto* first_dead_value = first_dead->allocateInstr(
+      lir::Opcode::kMove, nullptr, lir::OutVReg{}, lir::Imm{2});
+  auto* second_dead_value = second_dead->allocateInstr(
+      lir::Opcode::kMove, nullptr, lir::OutVReg{}, lir::Imm{3});
+  lir::IncomingEdge live_edge = entry->addSuccessor(exit);
+  lir::IncomingEdge first_dead_edge = first_dead->addSuccessor(exit);
+  lir::IncomingEdge second_dead_edge = second_dead->addSuccessor(exit);
+  auto* first_phi =
+      exit->allocateInstr(lir::Opcode::kPhi, nullptr, lir::OutVReg{});
+  first_phi->addPhiInput(live_edge, live_value);
+  first_phi->addPhiInput(first_dead_edge, first_dead_value);
+  first_phi->addPhiInput(second_dead_edge, second_dead_value);
+  auto* second_phi =
+      exit->allocateInstr(lir::Opcode::kPhi, nullptr, lir::OutVReg{});
+  second_phi->addPhiInput(live_edge, live_value);
+  second_phi->addPhiInput(first_dead_edge, first_dead_value);
+  second_phi->addPhiInput(second_dead_edge, second_dead_value);
+  func.setExitBlock(exit);
+
   func.sortBasicBlocks();
 
-  size_t expected[] = {0, 2, 3, 1, 4, 5};
-  for (size_t i = 0; i < 6; i++) {
-    ASSERT_EQ(func.basicblocks()[i], blocks[expected[i]]) << "i = " << i;
-  }
+  ASSERT_EQ(func.basicBlocks().size(), 2);
+  EXPECT_EQ(func.basicBlocks()[0], entry);
+  EXPECT_EQ(func.basicBlocks()[1], exit);
+  ASSERT_EQ(exit->predecessors().size(), 1);
+  EXPECT_EQ(exit->predecessors()[0], entry);
+  EXPECT_TRUE(first_dead->successors().empty());
+  EXPECT_TRUE(second_dead->successors().empty());
+  ASSERT_EQ(first_phi->numPhiInputs(), 1);
+  ASSERT_EQ(second_phi->numPhiInputs(), 1);
+  EXPECT_EQ(first_phi->phiInput(0)->getDefine(), live_value->output());
+  EXPECT_EQ(second_phi->phiInput(0)->getDefine(), live_value->output());
 }
+
+} // namespace cinderx

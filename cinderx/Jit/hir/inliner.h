@@ -4,32 +4,32 @@
 
 #include "cinderx/Jit/hir/pass.h"
 
-namespace jit::hir {
+namespace cinderx::jit::hir {
 
 // Inline function calls and add in BeginInlinedFunction and EndInlinedFunction
 // instructions.
-class InlineFunctionCalls : public Pass {
+class InlineFunctionCalls final : public Pass {
  public:
   InlineFunctionCalls() : Pass("InlineFunctionCalls") {}
 
-  void Run(Function& irfunc) override;
+  void run(Function& irfunc) override;
 
-  static std::unique_ptr<InlineFunctionCalls> Factory() {
+  static std::unique_ptr<InlineFunctionCalls> factory() {
     return std::make_unique<InlineFunctionCalls>();
   }
 };
 
 // Try to elide {Begin,End}InlinedFunction instructions for simple functions
 // that will never need a Python frame.
-class BeginInlinedFunctionElimination : public Pass {
+class BeginInlinedFunctionElimination final : public Pass {
  public:
   BeginInlinedFunctionElimination() : Pass("BeginInlinedFunctionElimination") {}
 
-  void Run(Function& irfunc) override;
+  void run(Function& irfunc) override;
 
-  static std::unique_ptr<BeginInlinedFunctionElimination> Factory() {
+  static std::unique_ptr<BeginInlinedFunctionElimination> factory() {
     return std::make_unique<BeginInlinedFunctionElimination>();
   }
 };
 
-} // namespace jit::hir
+} // namespace cinderx::jit::hir

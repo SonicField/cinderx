@@ -8,24 +8,28 @@
 #include <fcntl.h>
 #ifndef WIN32
 #include <sys/mman.h>
-#include <unistd.h>
-#endif
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <unistd.h>
+#endif
 
 #include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
 
-namespace jit {
+namespace cinderx::jit {
 
 class Symbolizer : public ISymbolizer {
  public:
   Symbolizer(const char* exe_path = "/proc/self/exe");
 
   bool isInitialized() const {
+#ifdef WIN32
+    return false;
+#else
     return file_.isOpen();
+#endif
   }
 
   ~Symbolizer() override {
@@ -41,7 +45,9 @@ class Symbolizer : public ISymbolizer {
       const void* func,
       std::optional<std::string> name);
 
+#ifndef WIN32
   MmapFile file_;
+#endif
 
   // Stored as void* to avoid pulling in ELF structures into this header.  These
   // have type `const ElfW(Shdr)*`.
@@ -60,4 +66,4 @@ std::optional<std::string> demangle(const std::string& mangled_name);
 // Symbolize and demangle the given function.
 std::optional<std::string> symbolize(const void* func);
 
-} // namespace jit
+} // namespace cinderx::jit

@@ -8,7 +8,7 @@
 
 #include <cstring>
 
-namespace jit::hir {
+namespace cinderx::jit::hir {
 
 inline std::size_t Type::hash() const {
   static_assert(sizeof(std::size_t) == sizeof(int_), "Unexpected size_t size");
@@ -25,17 +25,41 @@ inline Type Type::fromCDouble(double_t d) {
   return Type{kCDouble, d};
 }
 
-inline bool Type::CIntFitsType(int64_t i, Type t) {
+inline bool Type::cIntFitsType(int64_t i, Type t) {
   return t == TCInt64 || (t == TCInt32 && i >= INT32_MIN && i <= INT32_MAX) ||
-      (t == TCInt16 && i >= INT64_MIN && i <= INT16_MAX) ||
+      (t == TCInt16 && i >= INT16_MIN && i <= INT16_MAX) ||
       (i >= INT8_MIN && i <= INT8_MAX);
 }
 
 inline Type Type::fromCInt(int64_t i, Type t) {
   JIT_DCHECK(
       t == TCInt64 || t == TCInt32 || t == TCInt16 || t == TCInt8,
-      "expected signed value");
-  JIT_DCHECK(CIntFitsType(i, t), "int value out of range");
+      "Expected signed type, got {}",
+      t);
+  JIT_DCHECK(cIntFitsType(i, t), "int value out of range");
+  return Type{t.bits_, kLifetimeBottom, kSpecInt, i};
+}
+
+inline Type Type::truncatedCInt(int64_t i, Type t) {
+  JIT_DCHECK(
+      t == TCInt64 || t == TCInt32 || t == TCInt16 || t == TCInt8,
+      "Expected signed type, got {}",
+      t);
+  switch (t.sizeInBytes()) {
+    case 1:
+      i = static_cast<int8_t>(i);
+      break;
+    case 2:
+      i = static_cast<int16_t>(i);
+      break;
+    case 4:
+      i = static_cast<int32_t>(i);
+      break;
+    case 8:
+      break;
+    default:
+      JIT_ABORT("Bad byte size in truncatedCInt: {}", t.sizeInBytes());
+  }
   return Type{t.bits_, kLifetimeBottom, kSpecInt, i};
 }
 
@@ -44,7 +68,7 @@ inline Type Type::fromCPtr(void* p) {
       TCPtr.bits_, kLifetimeBottom, kSpecInt, reinterpret_cast<intptr_t>(p)};
 }
 
-inline bool Type::CUIntFitsType(uint64_t i, Type t) {
+inline bool Type::cuIntFitsType(uint64_t i, Type t) {
   return t == TCUInt64 || (t == TCUInt32 && i <= UINT32_MAX) ||
       (t == TCUInt16 && i <= UINT16_MAX) || i <= UINT8_MAX;
 }
@@ -53,7 +77,29 @@ inline Type Type::fromCUInt(uint64_t i, Type t) {
   JIT_DCHECK(
       t == TCUInt64 || t == TCUInt32 || t == TCUInt16 || t == TCUInt8,
       "expected unsigned value");
-  JIT_DCHECK(Type::CUIntFitsType(i, t), "int value out of range");
+  JIT_DCHECK(Type::cuIntFitsType(i, t), "int value out of range");
+  return Type{t.bits_, kLifetimeBottom, kSpecInt, (intptr_t)i};
+}
+
+inline Type Type::truncatedCUInt(uint64_t i, Type t) {
+  JIT_DCHECK(
+      t == TCUInt64 || t == TCUInt32 || t == TCUInt16 || t == TCUInt8,
+      "expected unsigned value");
+  switch (t.sizeInBytes()) {
+    case 1:
+      i = static_cast<uint8_t>(i);
+      break;
+    case 2:
+      i = static_cast<uint16_t>(i);
+      break;
+    case 4:
+      i = static_cast<uint32_t>(i);
+      break;
+    case 8:
+      break;
+    default:
+      JIT_ABORT("Bad byte size in truncatedCUInt: {}", t.sizeInBytes());
+  }
   return Type{t.bits_, kLifetimeBottom, kSpecInt, (intptr_t)i};
 }
 
@@ -133,10 +179,6 @@ inline bool Type::operator==(Type other) const {
   return memcmp(this, &other, sizeof(*this)) == 0;
 }
 
-inline bool Type::operator!=(Type other) const {
-  return !operator==(other);
-}
-
 inline bool Type::operator<(Type other) const {
   return *this != other && *this <= other;
 }
@@ -153,4 +195,4 @@ inline Type& Type::operator-=(Type other) {
   return *this = *this - other;
 }
 
-} // namespace jit::hir
+} // namespace cinderx::jit::hir

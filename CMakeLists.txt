@@ -1,15 +1,6 @@
 # (c) Meta Platforms, Inc. and affiliates.
 
-message("=====================================================================")
-message("=                            WARNING                                =")
-message("=====================================================================")
-message("=                                                                   =")
-message("= This CMake build is not well supported, and is primarily used for =")
-message("= experimentation.  Do not expect this to work on your machine.     =")
-message("=====================================================================")
-message("")
-
-cmake_minimum_required(VERSION 3.12)
+cmake_minimum_required(VERSION 3.18)
 project(_cinderx)
 
 set(PROJECT_SOURCE_DIR ${PROJECT_SOURCE_DIR}/cinderx)
@@ -21,8 +12,15 @@ option(ENABLE_PGO_GENERATE "Build with PGO profile generation" OFF)
 option(ENABLE_PGO_USE "Build with PGO profile use" OFF)
 set(PGO_PROFILE_FILE "" CACHE STRING "Path to PGO profile data")
 
+option(BUILD_RUNTIME_TESTS "Build the cinderx/RuntimeTests C++ GoogleTest binary" OFF)
+option(ENABLE_TSAN "Build with ThreadSanitizer instrumentation" OFF)
+
 if (${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
   set(MACOS 1)
+  set(WINDOWS 0)
+elseif(${CMAKE_SYSTEM_NAME} MATCHES "Windows")
+  set(MACOS 0)
+  set(WINDOWS 1)
 else()
   set(MACOS 0)
 endif()
@@ -34,10 +32,17 @@ endif()
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(SHARED_FLAGS "-DPy_BUILD_CORE -DPy_BUILD_CORE_MODULE -fPIC -Wall -Wextra -Wno-c99-designator -Wno-c++11-narrowing -Wno-cast-function-type-mismatch -Wno-deprecated-declarations -Wno-missing-field-initializers -Wno-null-pointer-subtraction -Wno-sign-compare -Wno-unknown-pragmas -Wno-unused-function -Wno-unused-parameter")
+if (WINDOWS)
+  set(SHARED_FLAGS "-DPy_BUILD_CORE -DPy_BUILD_CORE_MODULE")
+  set(CXX_FLAGS "")
+else()
+  set(SHARED_FLAGS "-DPy_BUILD_CORE -DPy_BUILD_CORE_MODULE -fPIC -fvisibility=hidden -Wall -Wextra -Wno-attributes -Wno-c99-designator -Wno-c++11-narrowing -Wno-cast-function-type -Wno-cast-function-type-mismatch -Wno-comment -Wno-deprecated-declarations -Wno-missing-field-initializers -Wno-null-pointer-subtraction -Wno-parentheses -Wno-sign-compare -Wno-unknown-pragmas -Wno-unused-function -Wno-unused-parameter")
+  set(CXX_FLAGS "-fvisibility-inlines-hidden")
+endif()
 
 macro(set_flag VAR)
-  if (DEFINED ${VAR} AND ${${VAR}})
+  # Undefined feature flags should behave like OFF.
+  if (${VAR})
     set(SHARED_FLAGS "-D${VAR} ${SHARED_FLAGS}")
   endif()
 endmacro()
@@ -46,6 +51,9 @@ set_flag(ENABLE_ADAPTIVE_STATIC_PYTHON)
 set_flag(ENABLE_DISASSEMBLER)
 set_flag(ENABLE_ELF_READER)
 set_flag(ENABLE_EVAL_HOOK)
+if (ENABLE_FREE_THREADING)
+  set(SHARED_FLAGS "-DPy_GIL_DISABLED=1 ${SHARED_FLAGS}")
+endif()
 set_flag(ENABLE_FUNC_EVENT_MODIFY_QUALNAME)
 set_flag(ENABLE_GENERATOR_AWAITER)
 set_flag(ENABLE_INTERPRETER_LOOP)
@@ -56,9 +64,23 @@ set_flag(ENABLE_PEP523_HOOK)
 set_flag(ENABLE_PERF_TRAMPOLINE)
 set_flag(ENABLE_SYMBOLIZER)
 set_flag(ENABLE_USDT)
+set_flag(ENABLE_ZLIB)
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${SHARED_FLAGS}")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${SHARED_FLAGS}")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${CXX_FLAGS} ${SHARED_FLAGS}")
+
+if (ENABLE_TSAN OR "$ENV{ENABLE_TSAN}")
+  if (WINDOWS)
+    message(FATAL_ERROR "ThreadSanitizer is not supported on Windows")
+  endif()
+  message(STATUS "ThreadSanitizer (TSAN): Enabled")
+  set(TSAN_FLAGS "-fsanitize=thread -fno-omit-frame-pointer")
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${TSAN_FLAGS}")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TSAN_FLAGS}")
+  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${TSAN_FLAGS}")
+  set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} ${TSAN_FLAGS}")
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${TSAN_FLAGS}")
+endif()
 
 ##############################################################################
 # Apply LTO (Link-Time Optimization) if enabled
@@ -66,36 +88,63 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${SHARED_FLAGS}")
 option(ENABLE_LTO "Enable Link-Time Optimization (full)" OFF)
 
 if(ENABLE_LTO)
-  # Only support Linux
-  if(MACOS)
-    message(FATAL_ERROR "LTO is only supported on Linux")
-  endif()
-
-  message(STATUS "LTO: Enabled (full LTO)")
+  message(STATUS "LTO: Enabled")
 
   # Detect compiler type
   if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     set(USING_CLANG TRUE)
   elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
     set(USING_GCC TRUE)
+  elseif(MSVC)
+    set(USING_MSVC TRUE)
   else()
-    message(FATAL_ERROR "LTO is only supported with Clang or GCC compilers")
+    message(FATAL_ERROR "LTO is only supported with Clang, GCC, or MSVC compilers")
   endif()
 
-  # For Clang, we need llvm-ar instead of regular ar
+  # For Clang LTO we need an LLVM archiver.  Use llvm-lib on Windows (clang-cl
+  # wants MSVC-style /flags, which llvm-ar rejects), and llvm-ar elsewhere.
+  # Both are optional on macOS since AppleClang may work with the system ar.
   if(USING_CLANG)
-    find_program(LLVM_AR llvm-ar)
-    if(NOT LLVM_AR)
-      message(FATAL_ERROR "llvm-ar is required for LTO with Clang but was not found")
+    if(WINDOWS)
+      find_program(LLVM_LIB llvm-lib)
+      if(LLVM_LIB)
+        set(CMAKE_AR ${LLVM_LIB})
+        message(STATUS "LTO: Using llvm-lib: ${CMAKE_AR}")
+      else()
+        message(STATUS
+          "LTO: Using system lib (llvm-lib not found, Clang-CL may work with"
+          " system lib)")
+      endif()
+    else()
+      find_program(LLVM_AR llvm-ar)
+      if(LLVM_AR)
+        set(CMAKE_AR ${LLVM_AR})
+        message(STATUS "LTO: Using llvm-ar: ${CMAKE_AR}")
+      elseif(MACOS)
+        message(STATUS
+          "LTO: Using system ar (llvm-ar not found,"
+          " AppleClang may work with system ar)")
+      else()
+        message(FATAL_ERROR "llvm-ar is required for LTO with Clang but was not found")
+      endif()
     endif()
-    set(CMAKE_AR ${LLVM_AR})
-    message(STATUS "LTO: Using llvm-ar: ${CMAKE_AR}")
 
-    set(LTO_FLAG "-flto")
-    set(LTO_LINKER_FLAGS "-flto")
+    # Use ThinLTO on macOS for better performance and lower memory usage.
+    if(MACOS)
+      set(LTO_FLAG "-flto=thin")
+      set(LTO_LINKER_FLAGS "-flto=thin")
+    else()
+      set(LTO_FLAG "-flto")
+      set(LTO_LINKER_FLAGS "-flto")
+    endif()
   elseif(USING_GCC)
     set(LTO_FLAG "-flto")
     set(LTO_LINKER_FLAGS "-flto -fuse-linker-plugin -ffat-lto-objects")
+  elseif(USING_MSVC)
+    # MSVC uses /GL for compilation and /LTCG for linking
+    # Alternatively, we can use CMake's INTERPROCEDURAL_OPTIMIZATION
+    set(LTO_FLAG "/GL")
+    set(LTO_LINKER_FLAGS "/LTCG")
   endif()
 
   # Apply flags to all C and C++ compilation
@@ -158,21 +207,24 @@ include(FetchContent)
 
 find_package(Python ${PY_VERSION} EXACT COMPONENTS Interpreter Development.Module REQUIRED)
 
+# RuntimeTests embeds Python, so it needs Python::Python.
+if (BUILD_RUNTIME_TESTS)
+  find_package(Python ${PY_VERSION} EXACT COMPONENTS Development.Embed REQUIRED)
+endif()
+
 # Some of our files are partially generated from CPython source, and they
 # expect to be able to include files relative to Include/internal.
 set(Python_INCLUDE_DIRS ${Python_INCLUDE_DIRS} "${Python_INCLUDE_DIRS}/internal")
 
 ########################################
-# asmjit
+# asmjit (vendored)
 
 set(ASMJIT_STATIC TRUE)
-
-FetchContent_Declare(
-  asmjit
-  GIT_REPOSITORY https://github.com/asmjit/asmjit
-  GIT_TAG cecc73f2979e9704c81a2c2ec79a7475b31c56ac # 2025-May-10
-)
-FetchContent_MakeAvailable(asmjit)
+set(ASMJIT_NO_CUSTOM_FLAGS TRUE)
+add_subdirectory(${PROJECT_SOURCE_DIR}/ThirdParty/asmjit asmjit)
+if (NOT WINDOWS)
+    target_compile_options(asmjit PRIVATE -Wno-class-memaccess)
+endif()
 
 ########################################
 # fmt
@@ -180,7 +232,7 @@ FetchContent_MakeAvailable(asmjit)
 FetchContent_Declare(
   fmt
   GIT_REPOSITORY https://github.com/fmtlib/fmt
-  GIT_TAG 11.2.0 # 2025-May-03
+  GIT_TAG 12.1.0 # 2025-Oct-29
 )
 FetchContent_MakeAvailable(fmt)
 
@@ -212,7 +264,60 @@ file(COPY ${usdt_SOURCE_DIR}/usdt.h DESTINATION ${USDT_DIR})
 ########################################
 # zlib
 
-find_package(ZLIB)
+if (${ENABLE_ZLIB})
+    FetchContent_Declare(
+        zlib
+        GIT_REPOSITORY "https://github.com/madler/zlib.git"
+        FIND_PACKAGE_ARGS NAMES ZLIB
+    )
+    find_package(ZLIB REQUIRED)
+endif()
+
+########################################
+# capstone (optional, for JIT disassembly)
+
+if (${ENABLE_DISASSEMBLER})
+  FetchContent_Declare(
+    capstone
+    GIT_REPOSITORY https://github.com/capstone-engine/capstone
+    GIT_TAG 5.0.7
+  )
+
+  # Skip unsupported architectures.
+  set(CAPSTONE_ARM_SUPPORT OFF CACHE BOOL "" FORCE)
+  set(CAPSTONE_BPF_SUPPORT OFF CACHE BOOL "" FORCE)
+  set(CAPSTONE_BUILD_CSTOOL OFF CACHE BOOL "" FORCE)
+  set(CAPSTONE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+  set(CAPSTONE_EVM_SUPPORT OFF CACHE BOOL "" FORCE)
+  set(CAPSTONE_M680X_SUPPORT OFF CACHE BOOL "" FORCE)
+  set(CAPSTONE_M68K_SUPPORT OFF CACHE BOOL "" FORCE)
+  set(CAPSTONE_MIPS_SUPPORT OFF CACHE BOOL "" FORCE)
+  set(CAPSTONE_MOS65XX_SUPPORT OFF CACHE BOOL "" FORCE)
+  set(CAPSTONE_PPC_SUPPORT OFF CACHE BOOL "" FORCE)
+  set(CAPSTONE_RISCV_SUPPORT OFF CACHE BOOL "" FORCE)
+  set(CAPSTONE_SH_SUPPORT OFF CACHE BOOL "" FORCE)
+  set(CAPSTONE_SPARC_SUPPORT OFF CACHE BOOL "" FORCE)
+  set(CAPSTONE_SYSZ_SUPPORT OFF CACHE BOOL "" FORCE)
+  set(CAPSTONE_TMS320C64X_SUPPORT OFF CACHE BOOL "" FORCE)
+  set(CAPSTONE_TRICORE_SUPPORT OFF CACHE BOOL "" FORCE)
+  set(CAPSTONE_WASM_SUPPORT OFF CACHE BOOL "" FORCE)
+  set(CAPSTONE_XCORE_SUPPORT OFF CACHE BOOL "" FORCE)
+
+  # x86-64 and aarch64 are supported.
+  if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    set(CAPSTONE_X86_SUPPORT ON CACHE BOOL "" FORCE)
+  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+    set(CAPSTONE_AARCH64_SUPPORT ON CACHE BOOL "" FORCE)
+  endif()
+
+  FetchContent_MakeAvailable(capstone)
+  target_compile_options(capstone PRIVATE -w)
+  target_compile_options(capstone_static PRIVATE -w)
+  # CAPSTONE_STATIC suppresses CAPSTONE_EXPORT's visibility("default") annotation,
+  # so capstone symbols remain hidden when we build with -fvisibility=hidden.
+  target_compile_definitions(capstone PRIVATE CAPSTONE_STATIC)
+  target_compile_definitions(capstone_static PRIVATE CAPSTONE_STATIC)
+endif()
 
 ##############################################################################
 # Build cinderx
@@ -228,15 +333,23 @@ include_directories(
 ########################################
 # Common/
 
-file(GLOB_RECURSE COMMON_SOURCES ${PROJECT_SOURCE_DIR}/Common/*.cpp)
+file(GLOB_RECURSE COMMON_SOURCES ${PROJECT_SOURCE_DIR}/Common/*.cpp ${PROJECT_SOURCE_DIR}/Common/*.c)
 add_library(common ${COMMON_SOURCES})
-target_link_libraries(common PRIVATE asmjit::asmjit fmt::fmt ZLIB::ZLIB)
+if (${ENABLE_ZLIB})
+    target_link_libraries(common PRIVATE asmjit::asmjit fmt::fmt ZLIB::ZLIB)
+else()
+    target_link_libraries(common PRIVATE asmjit::asmjit fmt::fmt)
+endif()
 
 ########################################
 # UpstreamBorrow/
 
 if (${PY_VERSION} EQUAL 3.12 OR ${PY_VERSION} EQUAL 3.14 OR ${PY_VERSION} EQUAL 3.15)
-  set(BORROWED_C ${PROJECT_SOURCE_DIR}/UpstreamBorrow/borrowed-${PY_VERSION}.gen_cached.c)
+  if (ENABLE_FREE_THREADING)
+    set(BORROWED_C ${PROJECT_SOURCE_DIR}/UpstreamBorrow/borrowed-${PY_VERSION}.free-threading.gen_cached.c)
+  else()
+    set(BORROWED_C ${PROJECT_SOURCE_DIR}/UpstreamBorrow/borrowed-${PY_VERSION}.gen_cached.c)
+  endif()
 else()
   set(BORROWED_C "${GENERATED_HEADER_DIR}/dummy-borrowed.c")
   file(WRITE ${BORROWED_C} "")
@@ -315,13 +428,13 @@ target_link_libraries(static-python PRIVATE fmt::fmt asmjit::asmjit common borro
 # Jit/
 
 file(GLOB_RECURSE JIT_SOURCES ${PROJECT_SOURCE_DIR}/Jit/*.cpp ${PROJECT_SOURCE_DIR}/Jit/*.c)
-list(FILTER JIT_SOURCES EXCLUDE REGEX ".*\.gen_cached\.c")
-if (${PY_VERSION} EQUAL 3.12 OR ${PY_VERSION} EQUAL 3.14 OR ${PY_VERSION} EQUAL 3.15)
-  list(APPEND JIT_SOURCES "${PROJECT_SOURCE_DIR}/Jit/generators_borrowed_${PY_VERSION}.gen_cached.c")
-endif()
 
 add_library(jit ${JIT_SOURCES})
+target_compile_options(jit PRIVATE -Wno-free-nonheap-object)
 target_link_libraries(jit PRIVATE asmjit::asmjit interpreter fmt::fmt)
+if (${ENABLE_DISASSEMBLER})
+  target_link_libraries(jit PRIVATE capstone_static)
+endif()
 
 ########################################
 # ParallelGC/
@@ -337,9 +450,8 @@ add_library(parallel-gc ${PARALLEL_GC_SOURCES})
 ########################################
 # _cinderx.cpp
 
-set(SOURCES
+set(CINDERX_MODULE_LIB_SOURCES
   # Manually listed out to not accidentally include stuff in .git.
-  ${PROJECT_SOURCE_DIR}/_cinderx.cpp
   ${PROJECT_SOURCE_DIR}/_cinderx-lib.cpp
   ${PROJECT_SOURCE_DIR}/async_lazy_value.cpp
   ${PROJECT_SOURCE_DIR}/module_state.cpp
@@ -347,20 +459,114 @@ set(SOURCES
   ${PROJECT_SOURCE_DIR}/python_runtime.cpp
 )
 
-add_library(${PROJECT_NAME} SHARED ${SOURCES})
-
+add_library(cinderx-lib STATIC ${CINDERX_MODULE_LIB_SOURCES})
 target_link_libraries(
-  ${PROJECT_NAME}
+  cinderx-lib
   PRIVATE
   Python::Module
   borrowed cached-properties common immortalize interpreter jit parallel-gc static-python
   asmjit::asmjit fmt::fmt)
+
+Python_add_library(
+  ${PROJECT_NAME}
+  MODULE
+  WITH_SOABI
+  ${PROJECT_SOURCE_DIR}/_cinderx.cpp
+)
+
+target_link_libraries(
+  ${PROJECT_NAME}
+  PRIVATE
+  cinderx-lib)
 
 # macOS doesn't allow depending on other shared libraries by default.
 if (${MACOS})
   target_link_options(${PROJECT_NAME} PRIVATE -undefined dynamic_lookup)
 endif()
 
-set_target_properties(${PROJECT_NAME} PROPERTIES PREFIX "")
-set_target_properties(${PROJECT_NAME} PROPERTIES SUFFIX "")
-set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "_cinderx.so")
+if (NOT WINDOWS)
+  add_custom_command(
+    TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E rm -f
+      $<TARGET_FILE_DIR:${PROJECT_NAME}>/_cinderx.so
+    COMMAND ${CMAKE_COMMAND} -E create_symlink
+      $<TARGET_FILE_NAME:${PROJECT_NAME}>
+      $<TARGET_FILE_DIR:${PROJECT_NAME}>/_cinderx.so
+    COMMENT "Creating _cinderx.so symlink pointing to $<TARGET_FILE_NAME:${PROJECT_NAME}>"
+  )
+endif()
+
+##############################################################################
+# RuntimeTests/ — opt-in C++ GoogleTest binary.
+
+if (BUILD_RUNTIME_TESTS)
+  enable_testing()
+
+  ########################################
+  # GoogleTest
+
+  FetchContent_Declare(
+    googletest
+    GIT_REPOSITORY https://github.com/google/googletest
+    GIT_TAG v1.17.0 # 2025-Apr-30
+  )
+  FetchContent_MakeAvailable(googletest)
+
+  ########################################
+  # RuntimeTests executable
+
+  file(GLOB RUNTIME_TESTS_SOURCES
+    CONFIGURE_DEPENDS
+    ${PROJECT_SOURCE_DIR}/RuntimeTests/*.cpp
+  )
+
+  if (NOT ENABLE_ELF_READER)
+    list(REMOVE_ITEM RUNTIME_TESTS_SOURCES ${PROJECT_SOURCE_DIR}/RuntimeTests/elf_test.cpp)
+  endif()
+
+  if (NOT ENABLE_SYMBOLIZER)
+    list(REMOVE_ITEM RUNTIME_TESTS_SOURCES ${PROJECT_SOURCE_DIR}/RuntimeTests/util_test.cpp)
+  endif()
+
+  # These tests walk native frame-pointer chains in their own fixture code.
+  if (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+    # clang-cl's driver takes MSVC's spelling of this; the clang one has to be
+    # smuggled past it with /clang: and is not worth the indirection.
+    set(STACK_WALK_TEST_FLAGS /Oy-)
+  elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set(STACK_WALK_TEST_FLAGS -fno-omit-frame-pointer)
+  endif()
+  if (STACK_WALK_TEST_FLAGS)
+    set_source_files_properties(
+      ${PROJECT_SOURCE_DIR}/RuntimeTests/stack_walk_test.cpp
+      PROPERTIES COMPILE_OPTIONS "${STACK_WALK_TEST_FLAGS}"
+    )
+  endif()
+
+  add_executable(RuntimeTests ${RUNTIME_TESTS_SOURCES})
+
+  target_link_libraries(
+    RuntimeTests
+    PRIVATE
+    cinderx-lib
+    asmjit::asmjit fmt::fmt
+    GTest::gtest
+    GTest::gmock
+    Python::Python
+  )
+
+  target_compile_definitions(
+    RuntimeTests
+    PRIVATE
+    CINDERX_RUNTIME_TESTS_STATIC_CINDERX=1
+    # Used by RuntimeTest::SetUp() to import cinderx from PythonLib.
+    CINDERX_RUNTIME_TESTS_PYTHONPATH_PACKAGE=${PROJECT_SOURCE_DIR}/PythonLib
+  )
+
+  add_test(
+    NAME RuntimeTests
+    COMMAND RuntimeTests
+    # RuntimeTests open source-tree test data relative to cwd.
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+  )
+endif()

@@ -3,18 +3,16 @@
 # pyre-unsafe
 
 import gc
+import inspect
 import sys
 import threading
 import unittest
 import weakref
 
-import cinderx.jit
 import cinderx.test_support as cinder_support
-from cinderx.jit import _deopt_gen, is_jit_compiled
+from cinderx.jit import _deopt_gen, get_compiled_spill_stack_size, is_jit_compiled
 
 from .common import with_globals
-
-POST_312 = sys.version_info >= (3, 12)
 
 
 class GeneratorsTest(unittest.TestCase):
@@ -265,6 +263,19 @@ class GeneratorsTest(unittest.TestCase):
             g.send(None)
         self.assertIsInstance(exc.exception.value, X)
 
+    def test_sizeof_reports_the_jit_data_size(self):
+        func = self._f4.__func__
+        g = self._f4(1)
+        next(g)
+        size = g.__sizeof__()
+
+        # A JIT generator carries the GenDataFooter, a pointer to it and the
+        # register spill area on top of what CPython reports.  Only the spill
+        # area varies, and it comes from the compiled function.
+        spill = get_compiled_spill_stack_size(func) if is_jit_compiled(func) else 0
+        self.assertGreater(size, spill)
+        self.assertLess(size - spill, 4096)
+
     @cinder_support.failUnlessJITCompiled
     def _f10(self, X):
         x = X()
@@ -278,13 +289,10 @@ class GeneratorsTest(unittest.TestCase):
         g = self._f10(X)
 
         weak_ref_x = g.send(None)
-        self.assertIn(weak_ref_x(), gc.get_objects())
+        self.assertTrue(any(weak_ref_x() is obj for obj in gc.get_objects()))
         referrers = gc.get_referrers(weak_ref_x())
         self.assertEqual(len(referrers), 1)
-        if POST_312 or cinderx.jit.is_enabled():
-            self.assertIs(referrers[0], g)
-        else:
-            self.assertIs(referrers[0], g.gi_frame)
+        self.assertIs(referrers[0], g)
         with self.assertRaises(StopIteration):
             g.send(None)
 
@@ -307,6 +315,251 @@ class GeneratorsTest(unittest.TestCase):
         self.assertEqual(sys.getrefcount(o), base_count + 1)
         del g
         self.assertEqual(sys.getrefcount(o), base_count)
+
+    @cinder_support.failUnlessJITCompiled
+    def _f11(self, obj):
+        # obj is deliberately never read, so its last use is the top of the
+        # body.  CPython still holds it until the frame is torn down.
+        return
+        yield
+
+    # A generator's locals outlive its frame state: whatever the release of a
+    # local runs must see the generator as closed, not as still executing.
+    def test_frame_is_finished_before_locals_are_released(self):
+        seen = []
+
+        class Probe:
+            def __del__(self):
+                seen.append(inspect.getgeneratorstate(g))
+                seen.append(g.gi_frame)
+                try:
+                    next(g)
+                except StopIteration:
+                    seen.append("StopIteration")
+
+        g = self._f11(Probe())
+        with self.assertRaises(StopIteration):
+            next(g)
+
+        self.assertEqual(seen, [inspect.GEN_CLOSED, None, "StopIteration"])
+
+    def test_closing_from_a_local_release_is_silent(self):
+        seen = []
+
+        class Probe:
+            def __del__(self):
+                seen.append(g.close())
+
+        g = self._f11(Probe())
+        with self.assertRaises(StopIteration):
+            next(g)
+
+        self.assertEqual(seen, [None])
+
+    def test_sending_from_a_local_release_stops_iteration(self):
+        seen = []
+
+        class Probe:
+            def __del__(self):
+                try:
+                    g.send(1)
+                except StopIteration as exc:
+                    seen.append(exc.value)
+
+        g = self._f11(Probe())
+        with self.assertRaises(StopIteration):
+            next(g)
+
+        self.assertEqual(seen, [None])
+
+    def test_throwing_from_a_local_release_propagates_the_exception(self):
+        seen = []
+
+        class Probe:
+            def __del__(self):
+                try:
+                    g.throw(ValueError("thrown"))
+                except ValueError as exc:
+                    seen.append(str(exc))
+
+        g = self._f11(Probe())
+        with self.assertRaises(StopIteration):
+            next(g)
+
+        self.assertEqual(seen, ["thrown"])
+
+    @cinder_support.skip_if_ft_macos(
+        "Releasing a local does not run the finalizer at the same point under "
+        "free-threading on macOS"
+    )
+    def test_deopting_from_a_local_release_is_refused(self):
+        seen = []
+
+        class Probe:
+            def __del__(self):
+                seen.append(_deopt_gen(g))
+
+        g = self._f11(Probe())
+        with self.assertRaises(StopIteration):
+            next(g)
+
+        self.assertEqual(seen, [False])
+
+    def test_resuming_a_coroutine_from_a_local_release_is_an_error(self):
+        @cinder_support.failUnlessJITCompiled
+        async def coro(obj):
+            pass
+
+        seen = []
+
+        class Probe:
+            def __del__(self):
+                try:
+                    c.send(None)
+                except RuntimeError as exc:
+                    seen.append(str(exc))
+
+        c = coro(Probe())
+        with self.assertRaises(StopIteration):
+            c.send(None)
+
+        self.assertEqual(seen, ["cannot reuse already awaited coroutine"])
+
+    def test_throwing_into_a_coroutine_from_a_local_release_is_an_error(self):
+        @cinder_support.failUnlessJITCompiled
+        async def coro(obj):
+            pass
+
+        seen = []
+
+        class Probe:
+            def __del__(self):
+                try:
+                    c.throw(ValueError("thrown"))
+                except RuntimeError as exc:
+                    seen.append(str(exc))
+
+        c = coro(Probe())
+        with self.assertRaises(StopIteration):
+            c.send(None)
+
+        self.assertEqual(seen, ["cannot reuse already awaited coroutine"])
+
+    def test_frame_is_finished_before_locals_are_released_after_a_yield(self):
+        # The generator suspends before it finishes, so the frame state is
+        # written on a resume rather than on the first send.
+        @cinder_support.failUnlessJITCompiled
+        def gen(obj):
+            yield 1
+            yield 2
+
+        seen = []
+
+        class Probe:
+            def __del__(self):
+                seen.append(inspect.getgeneratorstate(g))
+
+        g = gen(Probe())
+        self.assertEqual(list(g), [1, 2])
+
+        self.assertEqual(seen, [inspect.GEN_CLOSED])
+
+    def test_frame_is_finished_before_cells_are_released(self):
+        # obj is captured by inner, so it lives in localsplus as a cell rather
+        # than as a plain local.  The same ordering has to hold for those.
+        @cinder_support.failUnlessJITCompiled
+        def gen(obj):
+            def inner():
+                return obj
+
+            return
+            yield
+
+        seen = []
+
+        class Probe:
+            def __del__(self):
+                seen.append(inspect.getgeneratorstate(g))
+
+        g = gen(Probe())
+        with self.assertRaises(StopIteration):
+            next(g)
+
+        self.assertEqual(seen, [inspect.GEN_CLOSED])
+
+    def test_collecting_from_a_local_release_is_safe(self):
+        # A collection in this window traverses a generator whose frame state
+        # already says cleared while its frame is still populated.
+        seen = []
+
+        class Probe:
+            def __del__(self):
+                gc.collect()
+                seen.append(inspect.getgeneratorstate(g))
+
+        g = self._f11(Probe())
+        with self.assertRaises(StopIteration):
+            next(g)
+
+        self.assertEqual(seen, [inspect.GEN_CLOSED])
+
+    def test_locals_do_not_outlive_the_generator_frame(self):
+        # Holding the locals to the Return must not hold them past it.
+        class Probe:
+            pass
+
+        probe = Probe()
+        ref = weakref.ref(probe)
+        g = self._f11(probe)
+        del probe
+
+        with self.assertRaises(StopIteration):
+            next(g)
+
+        self.assertIsNone(ref())
+
+    def test_weakref_callback_on_discard_before_resume(self):
+        callbacks = []
+        g = self._f1()
+        g_ref = weakref.ref(g, callbacks.append)
+        self.assertIs(g_ref(), g)
+
+        del g
+
+        self.assertIsNone(g_ref())
+        self.assertEqual(callbacks, [g_ref])
+
+    def test_gc_collects_unstarted_generator_cycle(self):
+        class Cycle:
+            pass
+
+        cycle = Cycle()
+        g = self._f9(cycle)
+        cycle.generator = g
+        cycle_ref = weakref.ref(cycle)
+        g_ref = weakref.ref(g)
+
+        del cycle
+        del g
+        gc.collect()
+
+        self.assertIsNone(cycle_ref())
+        self.assertIsNone(g_ref())
+
+    def test_attributes_after_close_before_resume(self):
+        g = self._f1()
+        frame = g.gi_frame
+        code = g.gi_code
+        name = g.__name__
+        qualname = g.__qualname__
+
+        g.close()
+
+        self.assertIsNone(g.gi_frame)
+        self.assertIs(g.gi_code, code)
+        self.assertEqual(g.__name__, name)
+        self.assertEqual(g.__qualname__, qualname)
+        self.assertIsNotNone(frame)
 
     @cinder_support.failUnlessJITCompiled
     def _f12(self, g):
@@ -544,7 +797,7 @@ class GeneratorsTest(unittest.TestCase):
 
     def test_yield_local_and_deopt(self):
         """The JIT must keep a strong reference to a local variable it yields
-        and does not use, even though it could just let ownership be transfered
+        and does not use, even though it could just let ownership be transferred
         to the yield receiver. This is because the interpreter would keep a
         strong reference and we may transfer control to the interpreter if we
         deopt the suspended generator."""

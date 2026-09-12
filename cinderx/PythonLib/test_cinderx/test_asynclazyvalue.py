@@ -1,32 +1,27 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
-# pyre-ignore-all-errors
 
 import asyncio
 import inspect
-import sys
 import unittest
+from typing import Any, Callable, Coroutine
 
 try:
     from _cinderx import AsyncLazyValue
 except ImportError:
+    # pyre-fixme[21]: Could not find a name `AsyncLazyValue` in `_asyncio`.
     from _asyncio import AsyncLazyValue
 
 from functools import wraps
 from time import time
 
-import cinderx.test_support as cinder_support
-from cinderx.test_support import passIf, passUnless
 
-
-if cinder_support.hasCinderX():
-    from cinderx.test_support import get_await_stack
-
-
-def async_test(f):
+def async_test(
+    f: Callable[..., Coroutine[Any, Any, Any]],
+) -> Callable[..., None]:
     assert inspect.iscoroutinefunction(f)
 
     @wraps(f)
-    def impl(*args, **kwargs):
+    def impl(*args: Any, **kwargs: Any) -> None:
         asyncio.run(f(*args, **kwargs))
 
     return impl
@@ -38,22 +33,23 @@ class AsyncLazyValueCoroTest(unittest.TestCase):
         asyncio.set_event_loop(loop)
         self.loop = loop
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         self.loop.close()
-        asyncio.set_event_loop_policy(None)
+        asyncio.set_event_loop(None)
 
     @async_test
     async def test_close_not_started(self) -> None:
-        async def g():
+        async def g() -> None:
             pass
 
         # close non-started asynclazy value is no-op
+        # pyre-fixme[16]: Module `_asyncio` has no attribute `AsyncLazyValue`.
         (AsyncLazyValue(g).__await__()).close()
         pass
 
     @async_test
     async def test_close_normal(self) -> None:
-        async def g(fut):
+        async def g(fut: "asyncio.Future[Any]") -> None:
             await fut
 
         # close non-started asynclazy value is no-op
@@ -74,7 +70,7 @@ class AsyncLazyValueCoroTest(unittest.TestCase):
         class Exc(Exception):
             pass
 
-        async def g(fut):
+        async def g(fut: "asyncio.Future[Any]") -> None:
             try:
                 await fut
             except GeneratorExit:
@@ -102,7 +98,7 @@ class AsyncLazyValueCoroTest(unittest.TestCase):
         class Exc(Exception):
             pass
 
-        async def g():
+        async def g() -> None:
             pass
 
         alv = AsyncLazyValue(g)
@@ -118,11 +114,12 @@ class AsyncLazyValueCoroTest(unittest.TestCase):
         class Exc(Exception):
             pass
 
-        async def g(fut):
+        async def g(fut: "asyncio.Future[Any]") -> int | None:
             try:
                 await fut
             except Exc:
                 return 10
+            return None
 
         alv = AsyncLazyValue(g, asyncio.Future())
         c = alv.__await__()
@@ -144,7 +141,7 @@ class AsyncLazyValueCoroTest(unittest.TestCase):
         class Exc(Exception):
             pass
 
-        async def g(fut):
+        async def g(fut: "asyncio.Future[Any]") -> None:
             try:
                 await fut
             except Exc:
@@ -164,88 +161,16 @@ class AsyncLazyValueCoroTest(unittest.TestCase):
         except IndexError as e:
             self.assertTrue(type(e.__context__) is Exc)
 
-    @passUnless(cinder_support.hasCinderX(), "Tests CinderX features")
-    @passIf(sys.version_info >= (3, 14), "no awaiter support")
-    @async_test
-    async def test_get_awaiter(self) -> None:
-        async def g(f):
-            return await f
-
-        async def h(f):
-            return await AsyncLazyValue(g, f)
-
-        coro = None
-        await_stack = None
-
-        async def f():
-            nonlocal coro, await_stack
-            # Force suspension. Otherwise the entire execution is eager and
-            # awaiter is never set.
-            await asyncio.sleep(0)
-            await_stack = get_await_stack(coro)
-            return 100
-
-        coro = f()
-        h_coro = h(coro)
-        res = await h_coro
-        self.assertEqual(res, 100)
-        # awaiter of f is the coroutine running g. That's created by the
-        # AsyncLazyValue machinery, so we can't check the awaiter's identity
-        # directly, only that it corresponds to g
-        self.assertIs(await_stack[0].cr_code, g.__code__)
-        self.assertIs(await_stack[1], h_coro)
-
-    @passUnless(cinder_support.hasCinderX(), "Tests CinderX features")
-    @passIf(sys.version_info >= (3, 14), "no awaiter support")
-    @async_test
-    async def test_get_awaiter_from_gathered(self) -> None:
-        async def g(f):
-            return await f
-
-        async def h(f):
-            return await AsyncLazyValue(g, f)
-
-        async def gatherer(c0, c1):
-            return await asyncio.gather(c0, c1)
-
-        coros = [None, None]
-        await_stacks = [None, None]
-
-        async def f(idx, res):
-            nonlocal coros, await_stacks
-            # Force suspension. Otherwise the entire execution is eager and
-            # awaiter is never set.
-            await asyncio.sleep(0)
-            await_stacks[idx] = get_await_stack(coros[idx])
-            return res
-
-        coros[0] = f(0, 10)
-        coros[1] = f(1, 20)
-        h0_coro = h(coros[0])
-        h1_coro = h(coros[1])
-        gatherer_coro = gatherer(h0_coro, h1_coro)
-        results = await gatherer_coro
-        self.assertEqual(results[0], 10)
-        self.assertEqual(results[1], 20)
-        # awaiter of f is the coroutine running g. That's created by the
-        # AsyncLazyValue machinery, so we can't check the awaiter's identity
-        # directly, only that it corresponds to g
-        self.assertIs(await_stacks[0][0].cr_code, g.__code__)
-        self.assertIs(await_stacks[0][1], h0_coro)
-        self.assertIs(await_stacks[0][2], gatherer_coro)
-        self.assertIs(await_stacks[1][0].cr_code, g.__code__)
-        self.assertIs(await_stacks[1][1], h1_coro)
-        self.assertIs(await_stacks[1][2], gatherer_coro)
-
     def test_coro_target_is_bound_method(self) -> None:
         class X:
-            def __init__(self):
+            def __init__(self) -> None:
                 self.a = 1
 
-            async def m(self, b, c, d):
+            async def m(self, b: int, c: int, d: int) -> tuple[int, int, int, int]:
                 return self.a, b, c, d
 
         with self.assertRaises(StopIteration) as ctx:
+            # pyre-fixme[16]: Module `_asyncio` has no attribute `AsyncLazyValue`.
             AsyncLazyValue(X().m, 2, 3, 4).__await__().send(None)
 
         self.assertEqual(ctx.exception.value, (1, 2, 3, 4))
@@ -253,7 +178,7 @@ class AsyncLazyValueCoroTest(unittest.TestCase):
 
 class AsyncLazyValueTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.events = []
+        self.events: list[str] = []
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         self.cancelled = asyncio.Event()
@@ -262,7 +187,7 @@ class AsyncLazyValueTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.loop.close()
-        asyncio.set_event_loop_policy(None)
+        asyncio.set_event_loop(None)
 
     def log(self, msg: str) -> None:
         self.events.append(msg)
@@ -306,6 +231,7 @@ class AsyncLazyValueTest(unittest.TestCase):
             await asyncio.sleep(3)
             raise RuntimeError("async_func never got cancelled")
 
+        # pyre-fixme[11]: Annotation `AsyncLazyValue` is not defined as a type.
         async def async_cancel(task: asyncio.Task, alv: AsyncLazyValue) -> None:
             await self.coro_running.wait()
             self.log("cancelling")
@@ -336,6 +262,7 @@ class AsyncLazyValueTest(unittest.TestCase):
 
         async def async_cancel(task: asyncio.Task, alv: AsyncLazyValue) -> None:
             start = time()
+            # pyrefly: ignore [missing-attribute]
             while alv._awaiting_tasks < 1:
                 # Sleep until both tasks are awaiting on the future (one of them
                 # is awaiting on async_func, so we only wait until the count
@@ -354,7 +281,6 @@ class AsyncLazyValueTest(unittest.TestCase):
         alv = AsyncLazyValue(async_func, 1, 2)
         ta = asyncio.ensure_future(alv)
         tb = asyncio.ensure_future(alv)
-        # pyre-fixme[6]: Expected `Task[Any]` for 1st param but got `Future[Any]`.
         tc = asyncio.ensure_future(async_cancel(ta, alv))
 
         ta_result, tb_result, tc_result = await asyncio.gather(
@@ -380,6 +306,7 @@ class AsyncLazyValueTest(unittest.TestCase):
 
         async def async_cancel(task: asyncio.Task, alv: AsyncLazyValue) -> None:
             start = time()
+            # pyrefly: ignore [missing-attribute]
             while alv._awaiting_tasks < 1:
                 # Sleep until both tasks are awaiting on the future (one of them
                 # is awaiting on async_func, so we only wait until the count
@@ -411,16 +338,16 @@ class AsyncLazyValueTest(unittest.TestCase):
 
     @async_test
     async def test_throw_1(self) -> None:
-        async def l0(alv):
+        async def l0(alv: Any) -> Any:
             return await l1(alv)
 
-        async def l1(alv):
+        async def l1(alv: Any) -> Any:
             return await l2(alv)
 
-        async def l2(alv):
+        async def l2(alv: Any) -> Any:
             return await alv
 
-        async def val(f):
+        async def val(f: "asyncio.Future[Any]") -> int:
             try:
                 await f
             except:  # noqa: B001

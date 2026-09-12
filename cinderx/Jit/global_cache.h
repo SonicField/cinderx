@@ -8,12 +8,14 @@
 
 #include "cinderx/Common/ref.h"
 #include "cinderx/Common/slab_arena.h"
+#include "cinderx/Common/util.h"
 #include "cinderx/Jit/global_cache_iface.h"
 
+#include <mutex>
 #include <set>
 #include <unordered_map>
 
-namespace jit {
+namespace cinderx::jit {
 
 // Identifies a cached global Python value.
 struct GlobalCacheKey {
@@ -58,6 +60,10 @@ class GlobalCache {
   // Clear the cache's value.  Unsubscribing from any watched dicts is left to
   // the caller since it can involve complicated dances with iterators.
   void clear();
+
+  // Store a borrowed value, or nullptr, in the cache. The store is atomic in
+  // free-threaded builds.
+  void store(PyObject* value) const;
 
   bool operator<(const GlobalCache& other) const;
 
@@ -150,8 +156,33 @@ class GlobalCacheManager : public IGlobalCacheManager {
   void disableCaches(const std::vector<GlobalCache>& caches);
   void disableCache(GlobalCache cache);
 
+  class [[nodiscard]] LockGuard {
+   public:
+    explicit LockGuard(GlobalCacheManager& mgr) : mgr_(mgr) {
+      if constexpr (kFreeThreadedBuild) {
+        mgr_.mutex_.lock();
+      }
+    }
+    ~LockGuard() {
+      if constexpr (kFreeThreadedBuild) {
+        mgr_.mutex_.unlock();
+      }
+    }
+    LockGuard(const LockGuard&) = delete;
+    LockGuard& operator=(const LockGuard&) = delete;
+    LockGuard(LockGuard&&) = delete;
+    LockGuard& operator=(LockGuard&&) = delete;
+
+   private:
+    GlobalCacheManager& mgr_;
+  };
+
   // Arena where all the global value caches are allocated.
   SlabArena<PyObject*> arena_;
+
+  // Only needed in free-threaded builds; kept unconditional so callers can use
+  // kFreeThreadedBuild instead of #ifdefs.
+  std::recursive_mutex mutex_;
 
   // Map of all global value caches, keyed by (globals, builtins, name).
   GlobalCacheMap map_;
@@ -164,6 +195,6 @@ class GlobalCacheManager : public IGlobalCacheManager {
       watch_map_;
 };
 
-} // namespace jit
+} // namespace cinderx::jit
 
 #endif

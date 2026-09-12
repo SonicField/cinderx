@@ -9,21 +9,23 @@
 #include "cinderx/Jit/hir/ssa.h"
 #include "cinderx/RuntimeTests/fixtures.h"
 
-using namespace jit::hir;
+namespace cinderx {
+
+using namespace cinderx::jit::hir;
 
 using HIROperandTypeTest = RuntimeTest;
 
 TEST_F(HIROperandTypeTest, ReturnOperandTypesReturnInitializedType) {
   Function func;
-  auto ret = func.env.AllocateRegister();
+  auto ret = func.env.allocateRegister();
   std::unique_ptr<Instr> cint32(Return::create(ret, TCInt32));
-  OperandType op_type = cint32->GetOperandType(0);
+  OperandType op_type = cint32->getOperandType(0);
 
   EXPECT_EQ(op_type.type, TCInt32);
   EXPECT_EQ(op_type.kind, Constraint::kType);
 
   std::unique_ptr<Instr> cuint8(Return::create(ret, TCUInt8));
-  op_type = cuint8->GetOperandType(0);
+  op_type = cuint8->getOperandType(0);
 
   EXPECT_EQ(op_type.type, TCUInt8);
   EXPECT_EQ(op_type.kind, Constraint::kType);
@@ -31,10 +33,10 @@ TEST_F(HIROperandTypeTest, ReturnOperandTypesReturnInitializedType) {
 
 TEST_F(HIROperandTypeTest, MakeTupleFromListOperandTypesReturnsList) {
   Function func;
-  auto value = func.env.AllocateRegister();
-  auto dst = func.env.AllocateRegister();
+  auto value = func.env.allocateRegister();
+  auto dst = func.env.allocateRegister();
   std::unique_ptr<Instr> instr(MakeTupleFromList::create(dst, value));
-  OperandType op_type = instr->GetOperandType(0);
+  OperandType op_type = instr->getOperandType(0);
 
   EXPECT_EQ(op_type.type, TList);
   EXPECT_EQ(op_type.kind, Constraint::kType);
@@ -42,84 +44,84 @@ TEST_F(HIROperandTypeTest, MakeTupleFromListOperandTypesReturnsList) {
 
 TEST_F(HIROperandTypeTest, VectorCallHasVariadicOperandTypes) {
   Function func;
-  auto dst = func.env.AllocateRegister();
-  auto f = func.env.AllocateRegister();
-  auto arg1 = func.env.AllocateRegister();
-  auto arg2 = func.env.AllocateRegister();
+  auto dst = func.env.allocateRegister();
+  auto f = func.env.allocateRegister();
+  auto arg1 = func.env.allocateRegister();
+  auto arg2 = func.env.allocateRegister();
   std::unique_ptr<Instr> one_call(VectorCall::create(1, dst, CallFlags::None));
-  one_call->SetOperand(0, f);
-  OperandType op_type = one_call->GetOperandType(0);
+  one_call->setOperand(0, f);
+  OperandType op_type = one_call->getOperandType(0);
 
   EXPECT_EQ(op_type.type, TOptObject);
   EXPECT_EQ(op_type.kind, Constraint::kType);
 
   std::unique_ptr<Instr> three_call(
       VectorCall::create(3, dst, CallFlags::None));
-  three_call->SetOperand(0, f);
-  three_call->SetOperand(1, arg1);
-  three_call->SetOperand(2, arg2);
+  three_call->setOperand(0, f);
+  three_call->setOperand(1, arg1);
+  three_call->setOperand(2, arg2);
 
-  op_type = three_call->GetOperandType(0);
+  op_type = three_call->getOperandType(0);
   EXPECT_EQ(op_type.type, TOptObject);
   EXPECT_EQ(op_type.kind, Constraint::kType);
 
-  op_type = three_call->GetOperandType(1);
+  op_type = three_call->getOperandType(1);
   EXPECT_EQ(op_type.type, TOptObject);
   EXPECT_EQ(op_type.kind, Constraint::kType);
 
-  op_type = three_call->GetOperandType(2);
+  op_type = three_call->getOperandType(2);
   EXPECT_EQ(op_type.type, TOptObject);
   EXPECT_EQ(op_type.kind, Constraint::kType);
 }
 
 TEST_F(HIROperandTypeTest, LoadArrayItemReturnsMultipleTypesForOneOperand) {
   Function func;
-  auto dst = func.env.AllocateRegister();
-  auto arg1 = func.env.AllocateRegister();
-  auto arg2 = func.env.AllocateRegister();
-  auto arg3 = func.env.AllocateRegister();
+  auto dst = func.env.allocateRegister();
+  auto arg1 = func.env.allocateRegister();
+  auto arg2 = func.env.allocateRegister();
+  auto arg3 = func.env.allocateRegister();
   std::unique_ptr<Instr> instr(
       LoadArrayItem::create(dst, arg1, arg2, arg3, 0, TObject));
 
-  OperandType op_type = instr->GetOperandType(0);
+  OperandType op_type = instr->getOperandType(0);
 
   EXPECT_EQ(op_type.kind, Constraint::kTupleExactOrCPtr);
 }
 
 TEST_F(HIROperandTypeTest, LoadMethodSuperReturnsTypesForMultipleOperands) {
   Function func;
-  auto dst = func.env.AllocateRegister();
-  auto arg1 = func.env.AllocateRegister();
-  auto arg2 = func.env.AllocateRegister();
-  auto arg3 = func.env.AllocateRegister();
+  auto dst = func.env.allocateRegister();
+  auto arg1 = func.env.allocateRegister();
+  auto arg2 = func.env.allocateRegister();
+  auto arg3 = func.env.allocateRegister();
   std::unique_ptr<Instr> instr(
       LoadMethodSuper::create(dst, arg1, arg2, arg3, 0, true));
-  OperandType op_type = instr->GetOperandType(0);
+  OperandType op_type = instr->getOperandType(0);
   EXPECT_EQ(op_type.type, TObject);
 
-  op_type = instr->GetOperandType(1);
+  op_type = instr->getOperandType(1);
   EXPECT_EQ(op_type.type, TType);
   EXPECT_EQ(op_type.kind, Constraint::kType);
 
-  op_type = instr->GetOperandType(2);
+  op_type = instr->getOperandType(2);
   EXPECT_EQ(op_type.type, TObject);
   EXPECT_EQ(op_type.kind, Constraint::kType);
 }
 
 TEST_F(HIROperandTypeTest, PrimitiveBoxGetOperandTypeImplReturnsCorrectType) {
   Function func;
-  auto dst = func.env.AllocateRegister();
-  auto val = func.env.AllocateRegister();
+  auto dst = func.env.allocateRegister();
+  auto val = func.env.allocateRegister();
   FrameState frame;
   std::unique_ptr<Instr> instr_TCInt32(
       PrimitiveBox::create(dst, val, TCInt32, frame));
-  OperandType op_type_1 = instr_TCInt32->GetOperandType(0);
+  OperandType op_type_1 = instr_TCInt32->getOperandType(0);
   EXPECT_EQ(op_type_1.type, TCInt32);
 }
 
 static void funcTypeCheckPasses(const char* hir_source) {
   std::ostringstream err;
-  auto func = HIRParser().ParseHIR(hir_source);
+  auto func = HIRParser().parseHIR(hir_source);
   ASSERT_NE(func, nullptr);
   ASSERT_TRUE(checkFunc(*func, std::cerr));
   reflowTypes(*func);
@@ -130,7 +132,7 @@ static void funcTypeCheckFails(
     const char* hir_source,
     const char* expected_err) {
   std::ostringstream err;
-  auto func = HIRParser().ParseHIR(hir_source);
+  auto func = HIRParser().parseHIR(hir_source);
   ASSERT_NE(func, nullptr);
   ASSERT_TRUE(checkFunc(*func, std::cerr));
   reflowTypes(*func);
@@ -249,3 +251,5 @@ fun test {
       "Object to subclass 'Primitive'\n";
   EXPECT_NO_FATAL_FAILURE(funcTypeCheckFails(hir_source, expected_err));
 }
+
+} // namespace cinderx

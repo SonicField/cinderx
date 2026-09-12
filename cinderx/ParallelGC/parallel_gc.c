@@ -37,16 +37,13 @@
 #include "internal/pycore_object.h"
 #include "internal/pycore_pyerrors.h"
 #include "internal/pycore_pystate.h" // _PyThreadState_GET()
+#include "internal/pycore_tuple.h"
 
 #include "cinderx/Common/py-portability.h"
 #include "cinderx/ParallelGC/condvar.h"
 #include "cinderx/ParallelGC/ws_deque.h"
 
 #include <stdatomic.h>
-
-#if PY_VERSION_HEX < 0x030C0000
-#include <cinder/exports.h>
-#endif
 
 #if PY_VERSION_HEX >= 0x030E0000
 // Renamed to private export prefix in Meta Python 3.14.
@@ -113,10 +110,6 @@ static inline void gc_clear_collecting(PyGC_Head* g) {
   g->_gc_prev &= ~PREV_MASK_COLLECTING;
 }
 
-static inline void gc_clear_unreachable(PyGC_Head* g) {
-  g->_gc_next &= ~NEXT_MASK_UNREACHABLE;
-}
-
 static inline Py_ssize_t gc_get_refs(PyGC_Head* g) {
   return (Py_ssize_t)(g->_gc_prev >> _PyGC_PREV_SHIFT);
 }
@@ -144,7 +137,7 @@ static inline void gc_decref(PyGC_Head* g) {
 #define DEBUG_SAVEALL (1 << 5) /* save all garbage in gc.garbage */
 #define DEBUG_LEAK DEBUG_COLLECTABLE | DEBUG_UNCOLLECTABLE | DEBUG_SAVEALL
 
-#if PY_VERSION_HEX >= 0x030E0000
+#ifdef ENABLE_INCREMENTAL_GC
 static struct gc_generation* get_generation(GCState* state, int n) {
   switch (n) {
     case 0:
@@ -222,6 +215,27 @@ NEXT_MASK_UNREACHABLE
     move_legacy_finalizers() will remove this flag from "unreachable" set.
 */
 
+#if !defined(ENABLE_INCREMENTAL_GC) && PY_VERSION_HEX >= 0x030E0000
+#define _PyTuple_MaybeUntrack _CiTuple_MaybeUntrack
+void _PyTuple_MaybeUntrack(PyObject* op) {
+  PyTupleObject* t;
+  Py_ssize_t i, n;
+
+  if (!PyTuple_CheckExact(op) || !_PyObject_GC_IS_TRACKED(op))
+    return;
+  t = (PyTupleObject*)op;
+  n = Py_SIZE(t);
+  for (i = 0; i < n; i++) {
+    PyObject* elt = PyTuple_GET_ITEM(t, i);
+    /* Tuple with NULL elements aren't
+       fully constructed, don't untrack
+       them yet. */
+    if (!elt || _PyObject_GC_MAY_BE_TRACKED(elt))
+      return;
+  }
+  _PyObject_GC_UNTRACK(op);
+}
+#endif
 /*** list functions ***/
 
 static inline void gc_list_init(PyGC_Head* list) {
@@ -304,7 +318,7 @@ static inline void gc_list_clear_collecting(PyGC_Head* collectable) {
   }
 }
 
-#if PY_VERSION_HEX >= 0x030E0000
+#ifdef ENABLE_INCREMENTAL_GC
 static inline void gc_list_clear_oldspace(PyGC_Head* collectable) {
   PyGC_Head* gc;
   for (gc = GC_NEXT(collectable); gc != collectable; gc = GC_NEXT(gc)) {
@@ -364,7 +378,7 @@ static void validate_list(PyGC_Head* head, enum flagstates flags) {
   PyGC_Head* gc = GC_NEXT(head);
   while (gc != head) {
     PyGC_Head* trueprev = GC_PREV(gc);
-#if PY_VERSION_HEX >= 0x030E0000
+#if defined(ENABLE_INCREMENTAL_GC)
     PyGC_Head* truenext = GC_NEXT(gc);
 #else
     PyGC_Head* truenext = (PyGC_Head*)(gc->_gc_next & ~NEXT_MASK_UNREACHABLE);
@@ -1156,19 +1170,159 @@ static void Ci_deduce_unreachable_parallel(
 
 static int Ci_should_use_par_gc(Ci_ParGCState* par_gc, int gen);
 
+#if !defined(ENABLE_INCREMENTAL_GC) && PY_VERSION_HEX >= 0x030E0000
+// GENERATION_AUTO is passed to the GC impl (see _Py_RunGC); the impl must pick
+// the generation to collect. Mirrors gc_select_generation() in CPython's gc.c.
+#define GENERATION_AUTO (-1)
+static int gc_select_generation(GCState* gcstate) {
+  for (int i = NUM_GENERATIONS - 1; i >= 0; i--) {
+    if (get_generation(gcstate, i)->count >
+        get_generation(gcstate, i)->threshold) {
+      // Only do a full collection once enough long-lived objects have built up
+      // since the last one (see issue #4074).
+      if (i == NUM_GENERATIONS - 1 &&
+          gcstate->long_lived_pending < gcstate->long_lived_total / 4) {
+        continue;
+      }
+      return i;
+    }
+  }
+  return -1;
+}
+
+// Notify gc.callbacks that a collection is starting or stopping. Mirrors
+// invoke_gc_callback() in CPython's gc.c, which the parallel GC replaces. 3.15
+// added the "candidates"/"duration" entries to the info dict.
+static void Ci_invoke_gc_callback(
+    PyThreadState* tstate,
+    const char* phase,
+    int generation,
+    Py_ssize_t collected,
+    Py_ssize_t uncollectable,
+    Py_ssize_t candidates,
+    double duration) {
+  assert(!_PyErr_Occurred(tstate));
+#if PY_VERSION_HEX < 0x030F0000
+  (void)candidates;
+  (void)duration;
+#endif
+  GCState* gcstate = &tstate->interp->gc;
+  if (gcstate->callbacks == NULL) {
+    return;
+  }
+  assert(PyList_CheckExact(gcstate->callbacks));
+  PyObject* info = NULL;
+  if (PyList_GET_SIZE(gcstate->callbacks) != 0) {
+#if PY_VERSION_HEX >= 0x030F0000
+    info = Py_BuildValue(
+        "{sisnsnsnsd}",
+        "generation",
+        generation,
+        "collected",
+        collected,
+        "uncollectable",
+        uncollectable,
+        "candidates",
+        candidates,
+        "duration",
+        duration);
+#else
+    info = Py_BuildValue(
+        "{sisnsn}",
+        "generation",
+        generation,
+        "collected",
+        collected,
+        "uncollectable",
+        uncollectable);
+#endif
+    if (info == NULL) {
+      PyErr_FormatUnraisable("Exception ignored on invoking gc callbacks");
+      return;
+    }
+  }
+  PyObject* phase_obj = PyUnicode_FromString(phase);
+  if (phase_obj == NULL) {
+    Py_XDECREF(info);
+    PyErr_FormatUnraisable("Exception ignored on invoking gc callbacks");
+    return;
+  }
+  PyObject* stack[] = {phase_obj, info};
+  for (Py_ssize_t i = 0; i < PyList_GET_SIZE(gcstate->callbacks); i++) {
+    PyObject *r, *cb = PyList_GET_ITEM(gcstate->callbacks, i);
+    Py_INCREF(cb); // make sure cb doesn't go away
+    r = PyObject_Vectorcall(cb, stack, 2, NULL);
+    if (r == NULL) {
+      PyErr_FormatUnraisable(
+          "Exception ignored while calling GC callback %R", cb);
+    } else {
+      Py_DECREF(r);
+    }
+    Py_DECREF(cb);
+  }
+  Py_DECREF(phase_obj);
+  Py_XDECREF(info);
+  assert(!_PyErr_Occurred(tstate));
+}
+#endif
+
+#if !defined(ENABLE_INCREMENTAL_GC) && PY_VERSION_HEX >= 0x030F0000
+// Stats live in a per-generation ring buffer in 3.15. These mirror
+// gc_get_stats()/gc_get_prev_stats()/add_stats() in CPython's gc.c so that
+// gc.get_stats() reflects collections run by the parallel GC.
+static struct gc_generation_stats* Ci_gc_get_stats(GCState* gcstate, int gen) {
+  if (gen == 0) {
+    struct gc_young_stats_buffer* buffer = &gcstate->generation_stats->young;
+    buffer->index = (buffer->index + 1) % GC_YOUNG_STATS_SIZE;
+    return &buffer->items[buffer->index];
+  }
+  struct gc_old_stats_buffer* buffer = &gcstate->generation_stats->old[gen - 1];
+  buffer->index = (buffer->index + 1) % GC_OLD_STATS_SIZE;
+  return &buffer->items[buffer->index];
+}
+
+static struct gc_generation_stats* Ci_gc_get_prev_stats(
+    GCState* gcstate,
+    int gen) {
+  if (gen == 0) {
+    struct gc_young_stats_buffer* buffer = &gcstate->generation_stats->young;
+    return &buffer->items[buffer->index];
+  }
+  struct gc_old_stats_buffer* buffer = &gcstate->generation_stats->old[gen - 1];
+  return &buffer->items[buffer->index];
+}
+
+static void
+Ci_gc_add_stats(GCState* gcstate, int gen, struct gc_generation_stats* stats) {
+  struct gc_generation_stats* prev_stats = Ci_gc_get_prev_stats(gcstate, gen);
+  struct gc_generation_stats* cur_stats = Ci_gc_get_stats(gcstate, gen);
+  memcpy(cur_stats, prev_stats, sizeof(struct gc_generation_stats));
+  cur_stats->ts_start = stats->ts_start;
+  cur_stats->collections += 1;
+  cur_stats->collected += stats->collected;
+  cur_stats->uncollectable += stats->uncollectable;
+  cur_stats->candidates += stats->candidates;
+  cur_stats->duration += stats->duration;
+  cur_stats->heap_size = stats->heap_size;
+  cur_stats->ts_stop = stats->ts_stop;
+}
+#endif
+
 /* This is the main function.  Read this to understand how the
  * collection process works. */
-#if PY_VERSION_HEX < 0x030E0000
-static Py_ssize_t
-#else
+#ifdef ENABLE_INCREMENTAL_GC
 static void
+#else
+static Py_ssize_t
 #endif
 gc_collect_main(
     struct Ci_PyGCImpl* gc_impl,
     PyThreadState* tstate,
     int generation,
-#if PY_VERSION_HEX >= 0x030E0000
-    struct gc_collection_stats* stats) {
+#ifdef ENABLE_INCREMENTAL_GC
+    struct gc_generation_stats* stats) {
+#elif PY_VERSION_HEX >= 0x030E0000
+    _PyGC_Reason reason) {
 #else
     Py_ssize_t* n_collected,
     Py_ssize_t* n_uncollectable,
@@ -1190,6 +1344,34 @@ gc_collect_main(
   // or after _PyGC_Fini()
   assert(gcstate->garbage != NULL);
   assert(!_PyErr_Occurred(tstate));
+
+  // In 3.14+ the default GC impl (which the parallel GC replaces) owns
+  // generation selection, gc.callbacks and gc.get_stats accounting, so the
+  // parallel GC must do them itself.
+#if !defined(ENABLE_INCREMENTAL_GC) && PY_VERSION_HEX >= 0x030F0000
+  gcstate->frame = tstate->current_frame;
+#endif
+#if !defined(ENABLE_INCREMENTAL_GC) && PY_VERSION_HEX >= 0x030E0000
+  if (generation == GENERATION_AUTO) {
+    generation = gc_select_generation(gcstate);
+    if (generation < 0) {
+      // No generation exceeded its threshold; nothing to collect.
+#if PY_VERSION_HEX >= 0x030F0000
+      gcstate->frame = NULL;
+#endif
+      return 0;
+    }
+  }
+  if (reason != _Py_GC_REASON_SHUTDOWN) {
+    Ci_invoke_gc_callback(tstate, "start", generation, 0, 0, 0, 0);
+  }
+#endif
+#if !defined(ENABLE_INCREMENTAL_GC) && PY_VERSION_HEX >= 0x030F0000
+  PyTime_t cb_ts_start = 0;
+  Py_ssize_t cb_candidates = 0;
+  Py_ssize_t cb_heap_size = gcstate->heap_size;
+  (void)PyTime_PerfCounterRaw(&cb_ts_start);
+#endif
 
 #ifdef EXPERIMENTAL_ISOLATED_SUBINTERPRETERS
   if (tstate->interp->config._isolated_interpreter) {
@@ -1229,6 +1411,10 @@ gc_collect_main(
     old = young;
   }
   validate_list(old, collecting_clear_unreachable_clear);
+
+#if !defined(ENABLE_INCREMENTAL_GC) && PY_VERSION_HEX >= 0x030F0000
+  cb_candidates = gc_list_size(young);
+#endif
 
   Ci_ParGCState* par_gc = (Ci_ParGCState*)gc_impl;
   if (Ci_should_use_par_gc(par_gc, generation)) {
@@ -1343,6 +1529,14 @@ gc_collect_main(
       _PyErr_WriteUnraisableMsg("in garbage collection", NULL);
     }
   }
+#elif !defined(ENABLE_INCREMENTAL_GC) && PY_VERSION_HEX >= 0x030E0000
+  if (_PyErr_Occurred(tstate)) {
+    if (reason == _Py_GC_REASON_SHUTDOWN) {
+      _PyErr_Clear(tstate);
+    } else {
+      PyErr_FormatUnraisable("Exception ignored in garbage collection");
+    }
+  }
 #endif
 
 #if PY_VERSION_HEX < 0x030E0000
@@ -1353,25 +1547,53 @@ gc_collect_main(
   if (n_uncollectable) {
     *n_uncollectable = n;
   }
-#else
+#elif defined(ENABLE_INCREMENTAL_GC)
   stats->collected += m;
   stats->uncollectable += n;
 #endif
 
-#if PY_VERSION_HEX < 0x030F0000
-  // core GC code accounts for generation stats in 3.15+
+  // Record per-generation stats for gc.get_stats(). The parallel GC replaces
+  // the default impl (mirroring gc_collect_impl in CPython's gc.c), so it does
+  // this itself on 3.14+. 3.15 switched from a per-generation array to a ring
+  // buffer.
+#if !defined(ENABLE_INCREMENTAL_GC) && PY_VERSION_HEX >= 0x030F0000
+  struct gc_generation_stats cb_stats = {0};
+  cb_stats.collected = m;
+  cb_stats.uncollectable = n;
+  cb_stats.candidates = cb_candidates;
+  cb_stats.heap_size = cb_heap_size;
+  cb_stats.ts_start = cb_ts_start;
+  (void)PyTime_PerfCounterRaw(&cb_stats.ts_stop);
+  cb_stats.duration =
+      PyTime_AsSecondsDouble(cb_stats.ts_stop - cb_stats.ts_start);
+  Ci_gc_add_stats(gcstate, generation, &cb_stats);
+#elif PY_VERSION_HEX < 0x030F0000
   struct gc_generation_stats* genstats = &gcstate->generation_stats[generation];
   genstats->collections++;
   genstats->collected += m;
   genstats->uncollectable += n;
 #endif
 
-  for (int i = 0; i < 3; i++) {
-    validate_list(GEN_HEAD(gcstate, i), collecting_clear_unreachable_clear);
+  // Run the "stop" callback. 3.14+ owns this in the impl; 3.12 fires it from
+  // the GC wrapper instead, so the parallel GC must not duplicate it there.
+#if !defined(ENABLE_INCREMENTAL_GC) && PY_VERSION_HEX >= 0x030F0000
+  if (reason != _Py_GC_REASON_SHUTDOWN) {
+    Ci_invoke_gc_callback(
+        tstate, "stop", generation, m, n, cb_candidates, cb_stats.duration);
+  }
+  gcstate->frame = NULL;
+#elif !defined(ENABLE_INCREMENTAL_GC) && PY_VERSION_HEX >= 0x030E0000
+  if (reason != _Py_GC_REASON_SHUTDOWN) {
+    Ci_invoke_gc_callback(tstate, "stop", generation, m, n, 0, 0);
+  }
+#endif
+
+  for (int gen = 0; gen < 3; gen++) {
+    validate_list(GEN_HEAD(gcstate, gen), collecting_clear_unreachable_clear);
   }
 
   assert(!_PyErr_Occurred(tstate));
-#if PY_VERSION_HEX < 0x030E0000
+#ifndef ENABLE_INCREMENTAL_GC
   return n + m;
 #endif
 }
@@ -1928,7 +2150,7 @@ static void Ci_ParGCWorker_MarkReachable(Ci_ParGCWorker* worker) {
 static void Ci_ParGCWorker_Run(Ci_ParGCWorker* worker) {
   Ci_ParGCState* par_gc = worker->par_gc;
 #if PY_VERSION_HEX >= 0x030E0000
-  Ci_SetTStateForGC(par_gc->tstate);
+  _Ci_PySetTStateForGC(par_gc->tstate);
 #endif
 
   atomic_fetch_add(&par_gc->num_workers_active, 1);
@@ -2071,7 +2293,7 @@ static void Ci_ParGCState_Destroy(Ci_ParGCState* par_gc) {
     Ci_cpu_pause();
   }
 
-#if PY_VERSION_HEX >= 0x030E0000
+#ifdef ENABLE_INCREMENTAL_GC
   PyThreadState* tstate = _PyThreadState_GET();
   struct _gc_runtime_state* gc_state = &tstate->interp->gc;
   // we should have flipped this when GC began
@@ -2366,7 +2588,7 @@ int Cinder_EnableParallelGC(size_t min_gen, size_t num_threads) {
 
   par_gc->old_impl = old_impl;
 
-#if PY_VERSION_HEX >= 0x030E0000
+#ifdef ENABLE_INCREMENTAL_GC
   // Transition from the incremental GC into non-incremental parallel mode. We
   // merge the two old generations that the incrementatal flips between and keep
   // the young generator. We also re-init the low space bit on the young

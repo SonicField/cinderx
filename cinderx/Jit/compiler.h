@@ -16,7 +16,7 @@
 #include <string_view>
 #include <utility>
 
-namespace jit {
+namespace cinderx::jit {
 
 using PostPassFunction = std::function<
     void(hir::Function& func, std::string_view pass_name, std::size_t time_ns)>;
@@ -38,6 +38,7 @@ enum PassConfig : uint64_t {
   kPhiElim = 1 << 7,
   kSimplify = 1 << 8,
   kInsertUpdatePrevInstr = 1 << 9,
+  kSinkPrimitiveBox = 1 << 10,
 
   // Run all the passes.
   kAll = ~uint64_t{0},
@@ -53,11 +54,11 @@ class Compiler {
 
   // Compile the function / code object preloaded by the given Preloader.
   // Returns the compiled function data, or nullptr on failure.
-  std::optional<CompiledFunctionData> Compile(const hir::Preloader& preloader);
+  std::optional<CompiledFunctionData> compile(const hir::Preloader& preloader);
 
   // Convenience wrapper to create and compile a preloader from a
   // PyFunctionObject.
-  std::optional<CompiledFunctionData> Compile(
+  std::optional<CompiledFunctionData> compile(
       BorrowedRef<PyFunctionObject> func);
 
   // Runs all the compiler passes on the HIR function.
@@ -70,9 +71,11 @@ class Compiler {
       PassConfig config,
       PostPassFunction callback);
 
+  Compiler(const Compiler&) = delete;
+  Compiler& operator=(const Compiler&) = delete;
+
  private:
-  DISALLOW_COPY_AND_ASSIGN(Compiler);
   codegen::NativeGeneratorFactory ngen_factory_;
 };
 
-} // namespace jit
+} // namespace cinderx::jit

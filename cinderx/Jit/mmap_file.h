@@ -5,8 +5,9 @@
 #include <cstddef>
 #include <span>
 
-namespace jit {
+namespace cinderx::jit {
 
+#ifndef WIN32
 class MmapFile {
  public:
   constexpr MmapFile() = default;
@@ -24,4 +25,6 @@ class MmapFile {
   size_t size_{0};
 };
 
-} // namespace jit
+#endif
+
+} // namespace cinderx::jit

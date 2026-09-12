@@ -13,6 +13,7 @@ test.test_sqlite3.test_dbapi.RowTests.test_row_is_a_sequence
 test.test_sqlite3.test_factory.RowFactoryTests.test_sqlite_row_as_sequence
 
 # These take excessive time, particularly when combined with ASAN + UBSAN.
+test_cinderx.test_compiler.test_sbs_stdlib.SbsCompileTests*.*
 test.test_audit.*
 test.test_concurrent_futures.*
 test.test_importlib.*
@@ -24,10 +25,27 @@ test_cinderx.test_jit_attr_cache.LoadModuleMethodCacheTests.*
 
 # Mysterious JIT leaks and test failures.
 test_cinderx.test_cinderjit.*
-test_cinderx.test_compiler.test_static.elide_type_checks.*
+test_cinderx.test_compiler.test_static.test_elide_type_checks.*
 test_cinderx.test_jit_generators.*
+test_cinderx.test_jit_inliner.*
+
+# Compile-time stress test: force-compiles many functions as a wall-time
+# benchmark, so it accumulates JIT state by design and is far too slow to rerun
+# under refleak's repeated runs.
+test_cinderx.test_jit_pipeline_stress.*
 
 # This fails because the refleak infra captures all of the ABCs
 # and clears and restores them between runs, but contextvars isn't
 # imported when it captures them when we run in cinder_test_runner.
 test.test_context.ContextTest.test_context_isinstance
+
+# Fails because we put in a JIT CompiledFunction to the dict
+test.test_funcattrs.FunctionDictsTest.test_unassigned_dict
+
+# Leaks one file descriptor per run against the platform's readline 8.0: the
+# test writes a zero-length history file and reads it back, and readline before
+# 8.1 returns from read_history_range() without closing the file when its size
+# is 0.  Fixed in readline 8.1 ("Fixed a bug that left a file descriptor open to
+# the history file if the file size was 0"), so drop this once the platform
+# readline is >= 8.1.
+test.test_readline.TestHistoryManipulation.test_write_read_zero_length_history

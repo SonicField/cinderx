@@ -1,0 +1,127 @@
+// Copyright (c) Meta Platforms, Inc. and affiliates.
+#pragma once
+
+#include <gtest/gtest.h>
+
+#include "cinderx/Jit/lir/function.h"
+#include "cinderx/Jit/lir/instruction.h"
+#include "cinderx/Jit/lir/type.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <initializer_list>
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace cinderx::jit::lir {
+
+// Fluent query over a LIR Function for unit tests, replacing brittle string
+// matching. Predicates are ANDed; exists() walks basic blocks in sorted order
+// then instructions in program order and reports whether any matches. Use the
+// EXPECT_LIR / EXPECT_NO_LIR macros below to assert on a query.
+//
+// Example:
+//   EXPECT_LIR(Query(func).opcode(Opcode::kMove)
+//                  .outType(DataType::k64bit).inImm(0, 12));
+class Query {
+ public:
+  explicit Query(const Function& func);
+
+  Query& opcode(Opcode op);
+  // Match the condition carried by a Compare or a BranchCC.
+  Query& condition(Condition cond);
+  // Match the output operand's data type / LIR id (`%id`).
+  Query& outType(DataType dt);
+  Query& outVreg(int id);
+  Query& outInd(
+      int base_vreg,
+      int32_t offset,
+      std::optional<int> index_vreg = std::nullopt,
+      DataType dt = DataType::kObject);
+  Query& outInd(int base_vreg, int32_t offset, DataType dt);
+  Query& outIndBaseVreg(int id);
+  Query& outIndIndexVreg(int id);
+  Query& outIndOffset(int32_t offset);
+  Query& outIndNoIndex();
+  // Match input operand `index` as the immediate `v`.
+  Query& inImm(size_t index, uint64_t v);
+  // Match input operand `index` as the immediate or memory address `addr`.
+  Query& inAddr(size_t index, uint64_t addr);
+  // Match input operand `index` as a reference to the definition `%id`.
+  Query& inVreg(size_t index, int id);
+  // Match input operand `index`'s data type.
+  Query& inType(size_t index, DataType dt);
+  Query& guard(uint64_t deopt_id, uint64_t frame_index, DataType guard_type);
+  // Match properties of the instruction defining linked input operand `index`.
+  Query& inDefOpcode(size_t index, Opcode op);
+  Query& inDefImm(size_t index, size_t def_input_index, uint64_t v);
+  // Arbitrary extra predicate on the instruction.
+  Query& with(std::function<bool(const Instruction*)> pred);
+
+  bool exists() const;
+  bool matches(const Instruction& ins) const;
+
+  const Function& func() const;
+
+ private:
+  struct DefInputMatch {
+    size_t index{0};
+    std::optional<uint64_t> imm;
+  };
+
+  struct InputMatch {
+    size_t index{0};
+    std::optional<uint64_t> imm;
+    std::optional<uint64_t> addr;
+    std::optional<int> vreg;
+    std::optional<DataType> type;
+    std::optional<Opcode> def_opcode;
+    std::vector<DefInputMatch> def_inputs;
+  };
+
+  InputMatch& input(size_t index);
+  bool matchesOutput(const Instruction& ins) const;
+  bool matchesInputs(const Instruction& ins) const;
+  bool matchesInput(const Instruction& ins, const InputMatch& im) const;
+  bool matchesInputDef(const Operand& in, const InputMatch& im) const;
+  const Instruction* find() const;
+
+  const Function& func_;
+  std::optional<Opcode> opcode_;
+  std::optional<Condition> condition_;
+  std::optional<DataType> out_type_;
+  std::optional<int> out_vreg_;
+  std::optional<int> out_ind_base_vreg_;
+  std::optional<int> out_ind_index_vreg_;
+  std::optional<int32_t> out_ind_offset_;
+  bool out_ind_no_index_{false};
+  std::vector<InputMatch> inputs_;
+  std::function<bool(const Instruction*)> extra_;
+};
+
+// Format a LIR function for an EXPECT_LIR failure message.
+std::string lirFuncString(const Function& func);
+
+// Returns true if `queries` match, in order, an ordered (not necessarily
+// adjacent) subsequence of instructions within a single basic block.
+bool hasLIRSequence(const Function& func, std::initializer_list<Query> queries);
+
+} // namespace cinderx::jit::lir
+
+// Assert that a Query matches (or does not match) an instruction, dumping
+// the queried function on failure. A custom message can still be chained:
+//   EXPECT_LIR(Query(func).opcode(Opcode::kMove).inImm(0, 12));
+//   EXPECT_NO_LIR(Query(func).opcode(Opcode::kCall)) << "unexpected";
+// The function dump (and any chained message) is only evaluated on failure.
+#define EXPECT_LIR(query)       \
+  EXPECT_TRUE((query).exists()) \
+      << ::cinderx::jit::lir::lirFuncString((query).func())
+#define EXPECT_NO_LIR(query)     \
+  EXPECT_FALSE((query).exists()) \
+      << ::cinderx::jit::lir::lirFuncString((query).func())
+
+#define EXPECT_LIR_SEQUENCE(func, ...)                                    \
+  EXPECT_TRUE(::cinderx::jit::lir::hasLIRSequence((func), {__VA_ARGS__})) \
+      << ::cinderx::jit::lir::lirFuncString((func))

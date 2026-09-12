@@ -9,6 +9,7 @@
 #include "cinderx/Jit/hir/type_generated.h"
 #include "fmt/ostream.h"
 
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <ostream>
@@ -22,7 +23,7 @@
 // Tools/scripts/typed/generate_jit_type_h.py and lives in
 // Jit/hir/type_generated.h.
 
-namespace jit::hir {
+namespace cinderx::jit::hir {
 
 class Type {
  public:
@@ -67,10 +68,22 @@ class Type {
   static Type fromCDouble(double d);
   static Type fromCPtr(void* p);
 
-  static bool CIntFitsType(int64_t i, Type t);
+  static bool cIntFitsType(int64_t i, Type t);
+  static bool cuIntFitsType(uint64_t i, Type t);
+
+  // Convert a signed integer into a primitive Type.  The integer must fit
+  // inside the type's value range.
   static Type fromCInt(int64_t i, Type t);
-  static bool CUIntFitsType(uint64_t i, Type t);
+
+  // Like fromCInt(), but allows truncating the value.
+  static Type truncatedCInt(int64_t i, Type t);
+
+  // Convert an unsigned integer into a primitive Type.  The integer must fit
+  // inside the type's value range.
   static Type fromCUInt(uint64_t i, Type t);
+
+  // Like fromCUInt(), but allows truncating the value.
+  static Type truncatedCUInt(uint64_t i, Type t);
 
   // Assuming this Type is a primitive type that can be boxed, return the boxed
   // equivalent (e.g., TCInt32.asBoxed() == TLong).
@@ -161,9 +174,17 @@ class Type {
   // a subtype of all builtin exact types.
   bool isExact() const;
 
+  // Return true iff decref-ing a value of this type can neither run arbitrary
+  // Python code nor free a container that backs a live borrowed reference.
+  // These are the exact builtin scalar types: their tp_dealloc doesn't re-enter
+  // the interpreter, and they hold no borrowable PyObject* elements, so nothing
+  // can be borrowed from them.  bool is included because it cannot be
+  // subclassed; TNullptr allows the same reasoning to apply to XDecref of an
+  // optional value.
+  bool isLeafScalar() const;
+
   // Equality.
   bool operator==(Type other) const;
-  bool operator!=(Type other) const;
 
   // Strict and non-strict subtype checking.
   bool operator<(Type other) const;
@@ -236,7 +257,11 @@ class Type {
             reinterpret_cast<intptr_t>(value_spec)} {}
 
   constexpr Type(bits_t bits, double_t spec)
-      : Type{bits, kLifetimeBottom, kSpecDouble, bit_cast<intptr_t>(spec)} {}
+      : Type{
+            bits,
+            kLifetimeBottom,
+            kSpecDouble,
+            std::bit_cast<intptr_t>(spec)} {}
 
   constexpr Type(
       bits_t bits,
@@ -317,6 +342,10 @@ struct OwnedType {
 // Convert a Static Python primitive type code to an HIR type.
 Type prim_type_to_type(int prim_type);
 
+// The zero value of an unspecialized primitive type, e.g. CDouble ->
+// CDouble[0].
+Type primitiveZero(Type type);
+
 inline std::ostream& operator<<(std::ostream& os, const Type& ty) {
   return os << ty.toString();
 }
@@ -327,17 +356,17 @@ inline std::ostream& operator<<(std::ostream& os, const Type& ty) {
 HIR_TYPES(TY)
 #undef TY
 
-} // namespace jit::hir
+} // namespace cinderx::jit::hir
 
 template <>
-struct std::hash<jit::hir::Type> {
-  std::size_t operator()(const jit::hir::Type& ty) const {
+struct std::hash<cinderx::jit::hir::Type> {
+  std::size_t operator()(const cinderx::jit::hir::Type& ty) const {
     return ty.hash();
   }
 };
 
 template <>
-struct fmt::formatter<jit::hir::Type> : fmt::ostream_formatter {};
+struct fmt::formatter<cinderx::jit::hir::Type> : fmt::ostream_formatter {};
 
 #define incl_JIT_HIR_TYPE_INL_H
 #include "cinderx/Jit/hir/type_inl.h"

@@ -4,75 +4,41 @@
 
 #include "cinderx/python.h"
 
-#include <cstdint>
-#include <limits>
-#include <type_traits>
+#ifdef Py_GIL_DISABLED
+#include "internal/pycore_stackref.h"
+#endif
 
-#ifdef __cplusplus
+#include "cinderx/Common/define.h"
 #include "cinderx/Common/log.h"
 
+#include <atomic>
+#include <bit>
+#include <cerrno>
 #include <charconv>
 #include <concepts>
 #include <cstdarg>
 #include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <queue>
+#include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
 
-#define DISALLOW_COPY_AND_ASSIGN(klass) \
-  klass(const klass&) = delete;         \
-  klass& operator=(const klass&) = delete
-
 #define UNUSED __attribute__((unused))
 
-extern "C" {
+// This is for non-test builds. define FRIEND_TEST here so we don't have to
+// include the googletest header in our headers to be tested.
+#ifndef FRIEND_TEST
+#define FRIEND_TEST(test_case_name, test_name) friend class test_case_name
 #endif
 
-struct jit_string_t* ss_alloc(void);
-void ss_free(struct jit_string_t* ss);
-void ss_reset(struct jit_string_t* ss);
-int ss_is_empty(const struct jit_string_t* ss);
-const char* ss_get_string(const struct jit_string_t* ss);
-int ss_vsprintf(struct jit_string_t* ss, const char* format, va_list args);
-int ss_sprintf(struct jit_string_t* ss, const char* format, ...);
-struct jit_string_t* ss_sprintf_alloc(const char* format, ...);
-
-#ifdef __cplusplus
-}
-
-constexpr bool kPyDebug =
-#ifdef Py_DEBUG
-    true;
-#else
-    false;
-#endif
-
-constexpr bool kPyRefDebug =
-#ifdef Py_REF_DEBUG
-    true;
-#else
-    false;
-#endif
-
-constexpr bool kImmortalInstances =
-#if defined(Py_IMMORTAL_INSTANCES) || PY_VERSION_HEX >= 0x030C0000
-    true;
-#else
-    false;
-#endif
-
-struct jit_string_deleter {
-  void operator()(jit_string_t* ss) const {
-    ss_free(ss);
-  }
-};
-
-using auto_jit_string_t = std::unique_ptr<jit_string_t, jit_string_deleter>;
-
-const char* ss_get_string(const auto_jit_string_t& ss);
+namespace cinderx {
 
 // Loading a method returns up to 2 items, for one of three possible outcomes:
 // * A callable plus an object instance (self).
@@ -125,9 +91,75 @@ using GenResumeFunc = PyObject* (*)(PyObject * gen,
 
 namespace jit {
 
+// Tagged PyObject values follow CPython's _PyStackRef tagging scheme in
+// free-threaded builds. GIL builds keep using plain PyObject* values.
+#ifdef Py_GIL_DISABLED
+using TaggedPyObject = _PyStackRef;
+constexpr uintptr_t kDeferredRcTag = Py_TAG_DEFERRED;
+constexpr uintptr_t kPyObjectPtrTag = Py_TAG_PTR;
+constexpr uintptr_t kPyObjectTagBits = Py_TAG_BITS;
+#else
+using TaggedPyObject = PyObject*;
+constexpr uintptr_t kDeferredRcTag = 0;
+constexpr uintptr_t kPyObjectPtrTag = 0;
+constexpr uintptr_t kPyObjectTagBits = 0;
+#endif
+
+// `kPyObjectPtrTag` being zero lets us treat an untagged PyObject* as a
+// TaggedPyObject with no extra masking — see `untaggedPyObjectRef`.
+
+constexpr uint64_t kDeferredRcTagBit =
+    kFreeThreadedBuild ? std::countr_zero(kDeferredRcTag) : 0;
+
+inline uintptr_t taggedPyObjectBits(TaggedPyObject obj) {
+#ifdef Py_GIL_DISABLED
+  return obj.bits;
+#else
+  return reinterpret_cast<uintptr_t>(obj);
+#endif
+}
+
+inline bool isDeferredRcTagged(uint64_t raw) {
+  return kPyObjectTagBits != 0 && (raw & kPyObjectTagBits) == kDeferredRcTag;
+}
+
+inline bool isDeferredRcTagged(TaggedPyObject obj) {
+  return isDeferredRcTagged(taggedPyObjectBits(obj));
+}
+
+inline uint64_t stripDeferredRcTag(uint64_t raw) {
+  return raw & ~static_cast<uint64_t>(kPyObjectTagBits);
+}
+
+inline PyObject* untaggedPyObject(TaggedPyObject obj) {
+  return reinterpret_cast<PyObject*>(
+      stripDeferredRcTag(taggedPyObjectBits(obj)));
+}
+
+inline TaggedPyObject taggedPyObject(
+    PyObject* obj,
+    [[maybe_unused]] uintptr_t tag) {
+#ifdef Py_GIL_DISABLED
+  return {reinterpret_cast<uintptr_t>(obj) | tag};
+#else
+  return obj;
+#endif
+}
+
+inline TaggedPyObject untaggedPyObjectRef(PyObject* obj) {
+  return taggedPyObject(obj, kPyObjectPtrTag);
+}
+
+inline TaggedPyObject addDeferredRcTag(PyObject* obj) {
+  return taggedPyObject(obj, kDeferredRcTag);
+}
+
+} // namespace jit
+
 constexpr int kPointerSize = sizeof(void*);
 
 constexpr size_t kStackAlign = 16;
+constexpr size_t kVecDSize = 16;
 
 constexpr int kKiB = 1024;
 constexpr int kMiB = kKiB * kKiB;
@@ -145,25 +177,39 @@ constexpr bool isPowerOfTwo(T x) {
 }
 
 template <typename T>
+  requires std::is_integral_v<T>
 constexpr T roundDown(T x, size_t n) {
   if (n == 0) {
     return n;
   }
+
   JIT_DCHECK(isPowerOfTwo(n), "Must be 0 or a power of 2");
   return (x & -n);
 }
 
 template <typename T>
+  requires std::is_integral_v<T>
 constexpr T roundUp(T x, size_t n) {
   if (n == 0) {
-    return n;
+    return T{0};
   }
-  return roundDown(x + n - 1, n);
+
+  JIT_DCHECK(isPowerOfTwo(n), "Must be 0 or a power of 2");
+
+  using UnsignedT = std::make_unsigned_t<T>;
+  constexpr auto max = static_cast<UnsignedT>(std::numeric_limits<T>::max());
+  JIT_CHECK(n - 1 <= max, "roundUp overflow");
+
+  const auto mask = static_cast<UnsignedT>(n - 1);
+  const auto value = static_cast<UnsignedT>(x);
+  JIT_CHECK(value <= max - mask, "roundUp overflow");
+
+  return static_cast<T>((value + mask) & ~mask);
 }
 
 template <typename T1, typename T2>
   requires std::is_integral_v<T1> && std::is_integral_v<T2>
-constexpr std::common_type_t<T1, T1> ceilDiv(T1 a, T2 b) {
+constexpr std::common_type_t<T1, T2> ceilDiv(T1 a, T2 b) {
   return (a + b - 1) / b;
 }
 
@@ -189,12 +235,29 @@ combineHash(std::size_t seed, std::size_t hash, Args&&... args) {
 
 template <class T>
 std::optional<T> parseNumber(std::string_view s) {
-  T n = 0;
-  auto result = std::from_chars(&s.front(), (&s.back()) + 1, n);
-  if (result.ec == std::errc{}) {
-    return n;
+  // Apple's libc++ doesn't implement the floating-point overloads of
+  // std::from_chars.
+  if constexpr (std::is_floating_point_v<T> && kOS == OS::kMacOS) {
+    // strtod needs a NUL-terminated string.  Unlike from_chars it is
+    // locale-sensitive, but CinderX only parses numbers that it wrote itself,
+    // under the C locale.
+    std::string buf{s};
+    const char* begin = buf.c_str();
+    char* end = nullptr;
+    errno = 0;
+    double n = std::strtod(begin, &end);
+    if (end != begin + buf.size() || errno == ERANGE) {
+      return std::nullopt;
+    }
+    return static_cast<T>(n);
+  } else {
+    T n = 0;
+    auto result = std::from_chars(&s.front(), (&s.back()) + 1, n);
+    if (result.ec == std::errc{}) {
+      return n;
+    }
+    return std::nullopt;
   }
-  return std::nullopt;
 }
 
 // Return the given PyUnicodeObject as a std::string, or "" if an error occurs.
@@ -203,18 +266,6 @@ std::string unicodeAsString(PyObject* str);
 // Convert a C++ string into a Python unicode object.  Will return nullptr on
 // error.
 Ref<> stringAsUnicode(std::string_view str);
-
-inline int popcount(unsigned i) {
-  return __builtin_popcount(i);
-}
-
-inline int popcount(unsigned long i) {
-  return __builtin_popcountl(i);
-}
-
-inline int popcount(unsigned long long i) {
-  return __builtin_popcountll(i);
-}
 
 // Look up an item in the given map. Always abort if key doesn't exist.
 template <typename M, typename K>
@@ -297,6 +348,27 @@ bool fitsSignedInt(T val) {
   return fitsSignedInt<N>(reinterpret_cast<intptr_t>(val));
 }
 
+inline void* malloc_aligned(size_t size, size_t alignment) {
+#ifdef WIN32
+  return _aligned_malloc(size, alignment);
+#else
+  void* chunk = nullptr;
+  int result = posix_memalign(&chunk, alignment, size);
+  if (result) {
+    return nullptr;
+  }
+  return chunk;
+#endif
+}
+
+inline void free_aligned(void* ptr) {
+#ifdef WIN32
+  _aligned_free(ptr);
+#else
+  free(ptr);
+#endif
+}
+
 // std::unique_ptr for objects created with std::malloc() rather than new.
 struct FreeDeleter {
   void operator()(void* ptr) const {
@@ -305,7 +377,6 @@ struct FreeDeleter {
 };
 template <typename T>
 using unique_c_ptr = std::unique_ptr<T, FreeDeleter>;
-
 template <class T>
 class ScopeExit {
  public:
@@ -343,9 +414,38 @@ class CriticalSectionGuard final {
 #endif
 };
 
+// Typed, cross-version equivalent of CPython's FT_ATOMIC_LOAD_PTR_ACQUIRE().
+template <typename T>
+T* ftAtomicLoadPtrAcquire(T*& ptr) noexcept {
+  if constexpr (kFreeThreadedBuild) {
+#ifdef __cpp_lib_atomic_ref
+    return std::atomic_ref<T*>(ptr).load(std::memory_order_acquire);
+#else
+    return __atomic_load_n(&ptr, __ATOMIC_ACQUIRE);
+#endif
+  } else {
+    return ptr;
+  }
+}
+
+// Typed, cross-version equivalent of CPython's
+// FT_ATOMIC_STORE_PTR_RELAXED().
+template <typename T>
+void ftAtomicStorePtrRelaxed(T*& ptr, T* value) noexcept {
+  if constexpr (kFreeThreadedBuild) {
+#ifdef __cpp_lib_atomic_ref
+    std::atomic_ref<T*>(ptr).store(value, std::memory_order_relaxed);
+#else
+    __atomic_store(&ptr, &value, __ATOMIC_RELAXED);
+#endif
+  } else {
+    ptr = value;
+  }
+}
+
 #define SCOPE_EXIT_INTERNAL2(lname, aname, ...) \
   auto lname = [&]() { __VA_ARGS__; };          \
-  jit::ScopeExit<decltype(lname)> aname(std::move(lname));
+  cinderx::ScopeExit<decltype(lname)> aname(std::move(lname));
 
 #define SCOPE_EXIT_TOKENPASTE(x, y) SCOPE_EXIT_##x##y
 
@@ -357,157 +457,66 @@ class CriticalSectionGuard final {
 
 #define SCOPE_EXIT(...) SCOPE_EXIT_INTERNAL1(__COUNTER__, __VA_ARGS__)
 
-// Return a crc32 checksum of the bytecode for the given code object.
-// A frozen list is effectively a vector that is dynamically allocated at
-// runtime, but then can no longer be resized.
-template <typename T>
-class FrozenList {
- public:
-  FrozenList() = default;
-
-  // Make FrozenList copy constructible.
-  FrozenList(const FrozenList& other) {
-    reserve(other.size_);
-    std::copy(other.begin(), other.end(), ptr_.get());
+// Relaxed atomic store for func->vectorcall for thread-safe writes under
+// free-threading and to satisfy TSAN. A release store might be the right
+// choice in some cases to publish JIT metadata to readers, but CPython's
+// _PyVectorcall_FunctionInline does a plain (non-acquire) load, so
+// release/acquire isn't achievable without CPython changes.
+// Under the GIL this is unnecessary, but relaxed has no overhead so we skip
+// the Py_GIL_DISABLED guard.
+inline void setVectorcall(
+    BorrowedRef<PyFunctionObject> func,
+    vectorcallfunc entry) {
+  if (kFreeThreadedBuild) {
+    // This isn't perfect as there's no synchronization to be done around
+    // the sets and stopping the world every time we JIT a function would
+    // be terrible. We set this to 0 which is FUNC_VERSION_UNSET. Every
+    // function gets a version number assigned when it's created so no
+    // function seen in interpreter caches will have version 0.
+    //
+    // But we can tolerate a race, the optimizer will never cache an
+    // invalid version. But we may not deopt in the interpreter
+    // loop immediately. We will eventually pick up the invalidated
+    // version.
+#ifdef __cpp_lib_atomic_ref
+    std::atomic_ref<vectorcallfunc>(func->vectorcall)
+        .store(entry, std::memory_order_relaxed);
+    std::atomic_ref<uint32_t>(func->func_version)
+        .store(0, std::memory_order_relaxed);
+#else
+    __atomic_store_n(&func->vectorcall, entry, __ATOMIC_RELAXED);
+    __atomic_store_n(&func->func_version, 0, __ATOMIC_RELAXED);
+#endif
+  } else {
+    PyFunction_SetVectorcall(func, entry);
   }
+}
 
-  // Make FrozenList move constructible.
-  FrozenList(FrozenList&& other) noexcept {
-    *this = std::move(other);
-  }
+// Counterpart to setVectorcall(); see the comment there for why this is
+// relaxed.
+inline vectorcallfunc getVectorcall(BorrowedRef<PyFunctionObject> func) {
+#ifdef __cpp_lib_atomic_ref
+  return std::atomic_ref<vectorcallfunc>(func->vectorcall)
+      .load(std::memory_order_relaxed);
+#else
+  return __atomic_load_n(&func->vectorcall, __ATOMIC_RELAXED);
+#endif
+}
 
-  // Make FrozenList move assignable.
-  FrozenList& operator=(FrozenList&& other) noexcept {
-    if (this != &other) {
-      ensureUninitialized();
-
-      size_ = other.size_;
-      ptr_ = std::move(other.ptr_);
-
-      other.size_ = 0;
-      other.ptr_ = nullptr;
-    }
-
-    return *this;
-  }
-
-  // Construct a frozen list from the given initializer list.
-  /* implicit */ FrozenList(std::initializer_list<T> values) {
-    reserve(values.size());
-    std::copy(values.begin(), values.end(), ptr_.get());
-  }
-
-  // Make FrozenList copy assignable.
-  FrozenList& operator=(const FrozenList& other) {
-    if (this != &other) {
-      reserve(other.size_);
-      std::copy(other.begin(), other.end(), ptr_.get());
-    }
-
-    return *this;
-  }
-
-  // Destroy a frozen list.
-  ~FrozenList() = default;
-
-  // The size of the list.
-  size_t size() const {
-    return size_;
-  }
-
-  // Set the size of the frozen list and build a new pointer to the data, then
-  // fill the data with the default value for the type.
-  //
-  // In order to call this function, T must be default constructible.
-  void resize(size_t size) {
-    resize(size, T{});
-  }
-
-  // Set the size of the frozen list and build a new pointer to the data, then
-  // fill the data with a copy of the given value.
-  //
-  // In order to call this function, T must be copy constructible.
-  void resize(size_t size, const T& val) {
-    reserve(size);
-    std::fill(ptr_.get(), ptr_.get() + size, val);
-  }
-
-  // Provide the begin function for immutable range-based for-loop support.
-  const T* begin() const {
-    return ptr_.get();
-  }
-
-  // Provide the end function for immutable range-based for-loop support.
-  const T* end() const {
-    return ptr_.get() + size_;
-  }
-
-  // Provide the [] operator for accessing elements by index.
-  T& operator[](size_t index) const {
-    return ptr_[index];
-  }
-
-  // Like the [] operator, but throws an exception if the index is out of range.
-  T& at(size_t index) const {
-    if (index >= size_) {
-      throw std::out_of_range("Index out of range");
-    }
-    return ptr_[index];
-  }
-
- private:
-  size_t size_{0};
-  std::unique_ptr<T[]> ptr_;
-
-  // Raise an exception if the list has already been initialized.
-  void ensureUninitialized() {
-    if (ptr_ != nullptr) {
-      throw std::runtime_error("Cannot resize a frozen list twice");
-    }
-  }
-
-  // Set the size of the frozen list and build a new pointer to the data.
-  void reserve(size_t size) {
-    ensureUninitialized();
-    size_ = size;
-
-    if (size != 0) {
-      ptr_ = std::make_unique<T[]>(size);
-    }
-  }
-};
-
-using FuncVisitor = void (*)(BorrowedRef<PyFunctionObject>);
-
-inline void walkFunctionObjects(FuncVisitor visitor) {
+// Call visitor on every live PyFunctionObject on the GC heap.  Under
+// free-threading the visit runs with the world stopped, so the visitor must not
+// allocate or deallocate Python objects; taking a new reference is fine.
+template <typename Visitor>
+void walkFunctionObjects(Visitor visitor) {
   auto wrapper = [](PyObject* obj, void* arg) {
     if (PyFunction_Check(obj)) {
       BorrowedRef<PyFunctionObject> func{obj};
-      reinterpret_cast<FuncVisitor>(arg)(func);
+      (*static_cast<Visitor*>(arg))(func);
     }
     return 1;
   };
 
-  PyUnstable_GC_VisitObjects(wrapper, reinterpret_cast<void*>(visitor));
+  PyUnstable_GC_VisitObjects(wrapper, &visitor);
 }
 
-} // namespace jit
-
-template <typename D, typename S>
-inline constexpr D bit_cast(const S& src) {
-  static_assert(sizeof(S) == sizeof(D), "src and dst must be the same size");
-  static_assert(
-      std::is_scalar_v<D> && std::is_scalar_v<S>,
-      "both src and dst must be of scalar type.");
-  D dst;
-  std::memcpy(&dst, &src, sizeof(dst));
-  return dst;
-}
-
-#endif
-
-// this is for non-test builds. define FRIEND_TEST here so we don't
-// have to include the googletest header in our headers to be tested.
-#ifndef FRIEND_TEST
-#define FRIEND_TEST(test_case_name, test_name) friend class test_case_name
-#endif
+} // namespace cinderx

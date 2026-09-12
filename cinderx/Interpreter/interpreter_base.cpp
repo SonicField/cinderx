@@ -1,6 +1,5 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 
-#include "cinderx/Common/extra-py-flags.h"
 #include "cinderx/Interpreter/interpreter.h"
 #include "cinderx/UpstreamBorrow/borrowed.h"
 
@@ -14,26 +13,14 @@
 
 extern "C" {
 
-vectorcallfunc getInterpretedVectorcall(
-    [[maybe_unused]] const PyFunctionObject* func) {
-#ifdef ENABLE_INTERPRETER_LOOP
-  const PyCodeObject* code = (const PyCodeObject*)(func->func_code);
-  return (code->co_flags & CI_CO_STATICALLY_COMPILED)
-      ? Ci_StaticFunction_Vectorcall
-      : Ci_PyFunction_Vectorcall;
-#else
-  return Ci_PyFunction_Vectorcall;
-#endif
-}
-
 int Ci_InitFrameEvalFunc() {
 #ifdef ENABLE_INTERPRETER_LOOP
+  Ci_SetStaticFunctionVectorcall(Ci_StaticFunction_Vectorcall);
 #ifdef ENABLE_EVAL_HOOK
   Ci_hook_EvalFrame = Ci_EvalFrame;
 #elif defined(ENABLE_PEP523_HOOK)
-  // Let borrowed.h know the eval frame pointer
-  Ci_EvalFrameFunc = Ci_EvalFrame;
-
+  // Allow borrowed specialization code to recognize CinderX's evaluator.
+  Ci_SetEvalFrameFunc(Ci_EvalFrame);
   auto interp = _PyInterpreterState_GET();
   auto current_eval_frame = _PyInterpreterState_GetEvalFrameFunc(interp);
   if (current_eval_frame == Ci_EvalFrame) {
@@ -48,6 +35,9 @@ int Ci_InitFrameEvalFunc() {
   }
 
   _PyInterpreterState_SetEvalFrameFunc(interp, Ci_EvalFrame);
+#if PY_VERSION_HEX >= 0x030F0000
+  _PyInterpreterState_SetEvalFrameAllowSpecialization(interp, 1);
+#endif
 #endif
 #endif
 
@@ -56,10 +46,12 @@ int Ci_InitFrameEvalFunc() {
 
 void Ci_FiniFrameEvalFunc() {
 #ifdef ENABLE_INTERPRETER_LOOP
+  Ci_SetStaticFunctionVectorcall(nullptr);
 #ifdef ENABLE_EVAL_HOOK
   Ci_hook_EvalFrame = nullptr;
 #elif defined(ENABLE_PEP523_HOOK)
   _PyInterpreterState_SetEvalFrameFunc(_PyInterpreterState_GET(), nullptr);
+  Ci_SetEvalFrameFunc(nullptr);
 #endif
 #endif
 }

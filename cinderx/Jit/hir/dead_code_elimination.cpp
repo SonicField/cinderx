@@ -4,19 +4,19 @@
 
 #include "cinderx/Jit/hir/instr_effects.h"
 
-namespace jit::hir {
+namespace cinderx::jit::hir {
 
 namespace {
 
 bool isUseful(Instr& instr) {
-  return instr.IsTerminator() || instr.IsSnapshot() ||
-      (instr.asDeoptBase() != nullptr && !instr.IsPrimitiveBox()) ||
-      (!instr.IsPhi() && memoryEffects(instr).may_store != AEmpty);
+  return instr.isTerminator() || instr.isSnapshot() || instr.isUseObj() ||
+      (instr.asDeoptBase() != nullptr && !instr.isPrimitiveBox()) ||
+      (!instr.isPhi() && memoryEffects(instr).may_store != AEmpty);
 }
 
 } // namespace
 
-void DeadCodeElimination::Run(Function& func) {
+void DeadCodeElimination::run(Function& func) {
   Worklist<Instr*> worklist;
   for (auto& block : func.cfg.blocks) {
     for (Instr& instr : block) {
@@ -50,4 +50,4 @@ void DeadCodeElimination::Run(Function& func) {
   }
 }
 
-} // namespace jit::hir
+} // namespace cinderx::jit::hir

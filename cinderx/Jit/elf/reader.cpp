@@ -7,10 +7,12 @@
 #include <link.h>
 #endif
 
+#include <fmt/format.h>
+
 #include <istream>
 #include <sstream>
 
-namespace jit::elf {
+namespace cinderx::jit::elf {
 
 namespace {
 
@@ -162,4 +164,4 @@ CodeNoteData parseCodeNote(const Note& note) {
           : std::nullopt};
 }
 
-} // namespace jit::elf
+} // namespace cinderx::jit::elf

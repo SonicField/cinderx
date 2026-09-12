@@ -6,7 +6,9 @@
 #include "cinderx/Jit/hir/type.h"
 #include "cinderx/RuntimeTests/fixtures.h"
 
-using namespace jit::hir;
+namespace cinderx {
+
+using namespace cinderx::jit::hir;
 
 using HIRTypeTest = RuntimeTest;
 
@@ -91,11 +93,7 @@ TEST_F(HIRTypeTest, BuiltinCouldBe) {
 }
 
 TEST_F(HIRTypeTest, FromBuiltinObjects) {
-  if constexpr (PY_VERSION_HEX < 0x030C0000) {
-    EXPECT_EQ(Type::fromObject(Py_None), TNoneType);
-  } else {
-    EXPECT_EQ(Type::fromObject(Py_None), TImmortalNoneType);
-  }
+  EXPECT_EQ(Type::fromObject(Py_None), TImmortalNoneType);
   EXPECT_TRUE(Type::fromObject(Py_True) < TBool);
   EXPECT_TRUE(Type::fromObject(Py_False) < TLong);
 
@@ -935,14 +933,14 @@ class IntSubObjectSub2(IntSub, ObjectSub):
 
 TEST_F(HIRTypeTest, ReflowSimpleTypes) {
   Function func;
-  auto b0 = func.cfg.entry_block = func.cfg.AllocateBlock();
-  auto b1 = func.cfg.AllocateBlock();
-  auto b2 = func.cfg.AllocateBlock();
-  auto b3 = func.cfg.AllocateBlock();
+  auto b0 = func.cfg.entry_block = func.cfg.allocateBlock();
+  auto b1 = func.cfg.allocateBlock();
+  auto b2 = func.cfg.allocateBlock();
+  auto b3 = func.cfg.allocateBlock();
 
-  auto v0 = func.env.AllocateRegister();
-  auto v1 = func.env.AllocateRegister();
-  auto v2 = func.env.AllocateRegister();
+  auto v0 = func.env.allocateRegister();
+  auto v1 = func.env.allocateRegister();
+  auto v2 = func.env.allocateRegister();
   // Types start as Top and are set appropriately by reflowTypes() later.
   ASSERT_EQ(v0->type(), TTop);
   ASSERT_EQ(v1->type(), TTop);
@@ -953,7 +951,7 @@ TEST_F(HIRTypeTest, ReflowSimpleTypes) {
 
   b1->append<Branch>(b3);
 
-  b2->append<MakeList>(0, v1, FrameState{});
+  b2->append<MakeList>(v1, static_cast<size_t>(0), FrameState{});
   b2->append<Branch>(b3);
 
   std::unordered_map<BasicBlock*, Register*> phi_inputs{{b1, v0}, {b2, v1}};
@@ -970,15 +968,15 @@ TEST_F(HIRTypeTest, ReflowSimpleTypes) {
 
 TEST_F(HIRTypeTest, ReflowLoopTypes) {
   Function func;
-  auto b0 = func.cfg.entry_block = func.cfg.AllocateBlock();
-  auto b1 = func.cfg.AllocateBlock();
-  auto b2 = func.cfg.AllocateBlock();
+  auto b0 = func.cfg.entry_block = func.cfg.allocateBlock();
+  auto b1 = func.cfg.allocateBlock();
+  auto b2 = func.cfg.allocateBlock();
 
-  auto v0 = func.env.AllocateRegister();
-  auto v1 = func.env.AllocateRegister();
-  auto v2 = func.env.AllocateRegister();
+  auto v0 = func.env.allocateRegister();
+  auto v1 = func.env.allocateRegister();
+  auto v2 = func.env.allocateRegister();
 
-  b0->append<MakeTuple>(0, v0, FrameState{});
+  b0->append<MakeTuple>(v0, static_cast<size_t>(0), FrameState{});
   b0->append<Branch>(b1);
 
   std::unordered_map<BasicBlock*, Register*> phi_inputs{{b0, v0}, {b1, v2}};
@@ -995,3 +993,5 @@ TEST_F(HIRTypeTest, ReflowLoopTypes) {
   EXPECT_EQ(v1->type(), TMortalTupleExact | TMortalDictExact);
   EXPECT_EQ(v2->type(), TMortalDictExact);
 }
+
+} // namespace cinderx

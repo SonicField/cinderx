@@ -2,16 +2,18 @@
 
 #pragma once
 
+#include "cinderx/Common/containers.h"
 #include "cinderx/Jit/lir/block.h"
 
 #include <deque>
+#include <string>
 #include <vector>
 
-namespace jit::hir {
+namespace cinderx::jit::hir {
 class Function;
 }
 
-namespace jit::lir {
+namespace cinderx::jit::lir {
 
 class Function {
  public:
@@ -51,16 +53,51 @@ class Function {
   // Returns the list of all the basic blocks.
   // The basic blocks will be in RPO as long as the CFG has not been
   // modified since the last call to SortRPO().
-  const std::vector<BasicBlock*>& basicblocks() const;
-  std::vector<BasicBlock*>& basicblocks();
+  const std::vector<BasicBlock*>& basicBlocks() const;
+  std::vector<BasicBlock*>& basicBlocks();
 
   BasicBlock* entryBlock() const;
 
   size_t getNumBasicBlocks() const;
+  size_t getNumInstrs() const;
 
   void sortBasicBlocks();
 
+  // Set/get the exit block — the final block containing the epilogue.
+  // For non-generators this is the single exit block; for generators it is
+  // exit_epilogue_ (the shared epilogue after the return/yield merge).
+  // The block sorter uses this to ensure the exit block is always placed
+  // last, regardless of allocation order.
+  void setExitBlock(BasicBlock* block) {
+    exit_block_ = block;
+  }
+  BasicBlock* exitBlock() const {
+    return exit_block_;
+  }
+
+  // Set/get the generator resume entry block. This detached placeholder is
+  // populated post-regalloc by PopulateResumeEntryBlock and re-inserted into
+  // the block list in generateCode() before emission.
+  void setResumeEntryBlock(BasicBlock* block) {
+    resume_entry_block_ = block;
+  }
+  BasicBlock* resumeEntryBlock() const {
+    return resume_entry_block_;
+  }
+
   const hir::Function* hirFunc() const;
+
+  // Associate a debug annotation string with an instruction. The annotation
+  // covers that instruction and all subsequent instructions until the next
+  // annotated instruction or end of block (used by PYTHONJITDUMPASM=1).
+  void annotate(const Instruction* instr, std::string text) {
+    annotations_.emplace(instr, std::move(text));
+  }
+
+  const std::string* getAnnotation(const Instruction* instr) const {
+    auto it = annotations_.find(instr);
+    return it != annotations_.end() ? &it->second : nullptr;
+  }
 
  private:
   const hir::Function* hir_func_;
@@ -82,12 +119,24 @@ class Function {
   // unique_ptrs for a pathalogically large function.
   std::deque<BasicBlock> basic_block_store_;
   // NOTE: The first basic block should always be the entry basic block,
-  // where the function starts. The last basic block should be the exit block,
-  // where the function ends.
+  // where the function starts.
   std::vector<BasicBlock*> basic_blocks_;
+
+  // The exit block containing the epilogue. Set explicitly by the LIR
+  // generator so the block sorter doesn't have to rely on positional
+  // assumptions (e.g. back() being the exit block).
+  BasicBlock* exit_block_{nullptr};
+
+  // Generator resume entry block. It is detached from the pre-regalloc CFG,
+  // excluded during regalloc, and re-inserted in generateCode() after being
+  // populated.
+  BasicBlock* resume_entry_block_{nullptr};
 
   // The next id to assign to a BasicBlock or Instruction.
   int next_id_{0};
+
+  // Debug annotation map: instruction → label string for PYTHONJITDUMPASM.
+  UnorderedMap<const Instruction*, std::string> annotations_;
 };
 
-} // namespace jit::lir
+} // namespace cinderx::jit::lir

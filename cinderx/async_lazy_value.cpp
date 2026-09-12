@@ -12,8 +12,6 @@
 #include "cinderx/Common/py-portability.h"
 // clang-format on
 
-#if PY_VERSION_HEX >= 0x030C0000
-
 #if PY_VERSION_HEX >= 0x030D0000
 #include "internal/pycore_modsupport.h"
 #include "internal/pycore_object.h"
@@ -123,7 +121,7 @@ BorrowedRef<> AsyncLazyValueState::asyncioFutureBlocking() {
   return asyncio_future_blocking_;
 }
 
-BorrowedRef<PyTypeObject> AsyncLazyValueState::cancalledError() {
+BorrowedRef<PyTypeObject> AsyncLazyValueState::cancelledError() {
   if (cancelled_error_ != nullptr) {
     return cancelled_error_;
   }
@@ -137,17 +135,24 @@ BorrowedRef<PyTypeObject> AsyncLazyValueState::cancalledError() {
 }
 
 // Lookups up a get/set with the specific name. Returns the function if it's
-// found or Py_None if it isn't.
+// found.
 Ref<PyGetSetDescrObject> AsyncLazyValueState::lookupFutureGetSet(
     const char* name) {
   auto future_type = futureType();
   if (future_type == nullptr) {
-    return Ref<>::create(Py_None);
+    return nullptr;
   }
   auto func = Ref<PyGetSetDescrObject>::steal(
       PyObject_GetAttrString(future_type, name));
-  if (func == nullptr || Py_TYPE(func) != &PyGetSetDescr_Type) {
-    return Ref<>::create(Py_None);
+  if (func == nullptr) {
+    return nullptr;
+  }
+  if (Py_TYPE(func) != &PyGetSetDescr_Type) {
+    PyErr_Format(
+        PyExc_TypeError,
+        "Expected descr object, got %s",
+        Py_TYPE(func)->tp_name);
+    return nullptr;
   }
 
   return func;
@@ -237,13 +242,14 @@ Ref<PyMethodTableRef> init_table(PyTypeObject* t) {
   }
   return create_method_table(t);
 }
+
 } // namespace cinderx
 
 extern "C" {
 
 static cinderx::AsyncLazyValueState* get_state() {
   return static_cast<cinderx::AsyncLazyValueState*>(
-      cinderx::getModuleState()->asyncLazyValueState());
+      cinderx::getModuleState()->async_lazy_value.get());
 }
 
 static PyObject* get_event_loop() {
@@ -335,7 +341,11 @@ static int future_cancel_impl(FutureObj* fut, PyObject* msg) {
   (Py_TYPE(obj) == (PyTypeObject*)get_state()->asyncLazyValueComputeType())
 
 static PyObject* FutureObj_get_traceback(PyObject* fut) {
-  return get_state()->futureSourceTraceback()->d_getset->get(fut, nullptr);
+  auto traceback = get_state()->futureSourceTraceback();
+  if (traceback == nullptr) {
+    return nullptr;
+  }
+  return traceback->d_getset->get(fut, nullptr);
 }
 
 static PyObject* FutureLike_get_traceback(PyObject* fut) {
@@ -487,17 +497,28 @@ static int AsyncLazyValue_set_result(AsyncLazyValueObj* self, PyObject* res) {
 }
 
 static int AsyncLazyValue_set_error(AsyncLazyValueObj* self, PyObject* exc) {
-  int ok;
-  if (PyObject_IsInstance(exc, get_state()->cancalledError())) {
-    ok = notify_futures(self->alv_futures, future_cancel_impl, exc);
-  } else {
-    ok = notify_futures(
-        self->alv_futures, AsyncLazyValue_future_set_exception, exc);
+  cinderx::BorrowedRef<PyTypeObject> cancelled_error =
+      get_state()->cancelledError();
+  if (cancelled_error == nullptr) {
+    return -1;
+  }
+
+  int is_cancelled_error = PyObject_IsInstance(exc, cancelled_error);
+  if (is_cancelled_error < 0) {
+    return -1;
+  }
+
+  int notified = is_cancelled_error
+      ? notify_futures(self->alv_futures, future_cancel_impl, exc)
+      : notify_futures(
+            self->alv_futures, AsyncLazyValue_future_set_exception, exc);
+  if (notified < 0) {
+    return -1;
   }
 
   Py_CLEAR(self->alv_futures);
   self->alv_state = ALV_NOT_STARTED;
-  return ok;
+  return 0;
 }
 
 static PyObject* AsyncLazyValue_new_computeobj(AsyncLazyValueObj* self) {
@@ -640,7 +661,8 @@ static PyObject* create_task(PyObject* coro, PyObject* loop) {
   if (task == nullptr) {
     return nullptr;
   }
-  Ref<PyMethodTableRef> t = cinderx::get_or_create_method_table(Py_TYPE(task));
+  cinderx::Ref<PyMethodTableRef> t =
+      cinderx::get_or_create_method_table(Py_TYPE(task));
   if (t == nullptr) {
     Py_DECREF(task);
     return nullptr;
@@ -729,22 +751,8 @@ static PyObject* AsyncLazyValue_ensure_future(
 }
 
 static PyObject* AsyncLazyValue_link(
-    AsyncLazyValueObj* self,
+    AsyncLazyValueObj* Py_UNUSED(self),
     PyObject* Py_UNUSED(arg)) {
-#if 0
-  if (cinder_get_arg0_from_pyframe != nullptr) {
-    PyObject* parent = call_get_arg0_from_pyframe(
-        asyncio_alv_metadata_entrypoint_name, /*to_skip*/ one);
-    if (parent == nullptr) {
-      return nullptr;
-    }
-    if (parent != Py_None) {
-      self->alv_parent = parent;
-    } else {
-      Py_DECREF(parent);
-    }
-  }
-#endif
   Py_RETURN_NONE;
 }
 
@@ -775,9 +783,9 @@ static int AsyncLazyValue_clear(AsyncLazyValueObj* self) {
 }
 
 static void AsyncLazyValue_dealloc(AsyncLazyValueObj* self) {
-  AsyncLazyValue_clear(self);
-
   PyObject_GC_UnTrack(self);
+
+  AsyncLazyValue_clear(self);
   Py_DECREF(((PyObject*)self)->ob_type);
   Py_TYPE(self)->tp_free(self);
 }
@@ -914,9 +922,9 @@ static int AsyncLazyValueCompute_clear(AsyncLazyValueComputeObj* self) {
 }
 
 static void AsyncLazyValueCompute_dealloc(AsyncLazyValueComputeObj* self) {
-  AsyncLazyValueCompute_clear(self);
-
   PyObject_GC_UnTrack(self);
+
+  AsyncLazyValueCompute_clear(self);
   Py_DECREF(((PyObject*)self)->ob_type);
   Py_TYPE(self)->tp_free(self);
 }
@@ -934,17 +942,11 @@ static void forward_and_clear_pending_awaiter(AsyncLazyValueComputeObj* self) {
 
 /**
     Runs a function that was provided to AsyncLazyValue.
-    - if function was not a coroutine - calls _PyCoro_GetAwaitableIter on a
-   result and stores it for subsequent 'send' calls
-    - if function was a coroutine and it was completed eagerly -
-      sets 'did_step' indicator and returns the result
-    - if function was a coroutine but it was not completed eagerly
-      sets 'did_step' indicator, stores coroutine object for subsequent 'send'
-   calls and return result of the step (typically it is future)
+    Calls _PyCoro_GetAwaitableIter on the result and stores it for
+    subsequent 'send' calls.
  */
 static PyObject* AsyncLazyValueCompute_create_and_set_subcoro(
-    AsyncLazyValueComputeObj* self,
-    int* did_step) {
+    AsyncLazyValueComputeObj* self) {
   Py_ssize_t nargs = PyTuple_GET_SIZE(self->alvc_target->alv_args);
   PyObject** args = &PyTuple_GET_ITEM(self->alvc_target->alv_args, 0);
   PyObject* kwargs = self->alvc_target->alv_kwargs;
@@ -1030,8 +1032,8 @@ static PyObject* AsyncLazyValueCompute_handle_error(
 }
 
 static void AsyncLazyValueCompute_set_awaiter(
-    AsyncLazyValueComputeObj* self,
-    PyObject* awaiter) {
+    [[maybe_unused]] AsyncLazyValueComputeObj* self,
+    [[maybe_unused]] PyObject* awaiter) {
 #if ENABLE_GENERATOR_AWAITER
   if (self->alvc_coroobj != nullptr) {
     Ci_PyAwaitable_SetAwaiter(self->alvc_coroobj, awaiter);
@@ -1050,32 +1052,12 @@ static PyObject* AsyncLazyValueCompute_itersend_(
     PyObject* sentValue,
     int* pReturn) {
   if (self->alvc_coroobj == nullptr) {
-    int did_step = 0;
     // here alvc_coroobj coroutine object was not created yet -
     // call coroutine and set coroutine object for subsequent sends
-    PyObject* retval =
-        AsyncLazyValueCompute_create_and_set_subcoro(self, &did_step);
+    PyObject* retval = AsyncLazyValueCompute_create_and_set_subcoro(self);
     if (retval == nullptr) {
       // failed - handle error
       return AsyncLazyValueCompute_handle_error(self, tstate, 1, 0);
-    }
-    if (did_step) {
-      // if we did step when calling coroutine - we attempted to run
-      // coroutine eagerly which might have two outcomes
-      if (self->alvc_coroobj == nullptr) {
-        // 1. coroutine has finished eagerly
-        // set the successful result to owning AsyncLazyValue
-        int ok = AsyncLazyValue_set_result(self->alvc_target, retval);
-        if (ok < 0) {
-          Py_DECREF(retval);
-          return AsyncLazyValueCompute_handle_error(self, tstate, 1, 0);
-        }
-        // ..and set return indicator
-        *pReturn = 1;
-      }
-      // 2. coroutine was not finished eagerly but we did some work
-      // return without setting return indicator - meaning we yielded
-      return retval;
     }
     Py_DECREF(retval);
   }
@@ -1450,9 +1432,9 @@ static PyObject* AwaitableValueObj_next(AwaitableValueObj* self) {
 }
 
 static void AwaitableValueObj_dealloc(AwaitableValueObj* self) {
-  AwaitableValueObj_clear(self);
-
   PyObject_GC_UnTrack(self);
+
+  AwaitableValueObj_clear(self);
   Py_DECREF(((PyObject*)self)->ob_type);
   Py_TYPE(self)->tp_free(self);
 }
@@ -1498,6 +1480,5 @@ PyType_Spec AwaitableValue_Spec = {
     .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC | Py_TPFLAGS_IMMUTABLETYPE,
     .slots = awaitabletype_slots,
 };
-}
 
-#endif // PY_VERSION_HEX >= 0x030C0000
+} // extern "C"

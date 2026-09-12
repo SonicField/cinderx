@@ -9,16 +9,16 @@
 #include <fmt/format.h>
 #include <fmt/ostream.h>
 
+#include <bit>
 #include <cctype>
 #include <cstdint>
 #include <optional>
 #include <string>
-#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
-namespace jit::lir {
+namespace cinderx::jit::lir {
 
 // Convert an HIR type into an LIR type.
 DataType hirTypeToDataType(hir::Type tp);
@@ -28,6 +28,9 @@ class BasicBlockBuilder {
   BasicBlockBuilder(jit::codegen::Environ* env, Function* func);
 
   void setCurrentInstr(const hir::Instr* inst);
+  const hir::Instr* currentInstr() const {
+    return cur_hir_instr_;
+  }
 
   // Return the id of a DeoptMetadata for the current instruction, returning
   // the same id if called multiple times for the same instruction.
@@ -44,12 +47,17 @@ class BasicBlockBuilder {
   // Any predecessor/successor links are expected to be set up already.
   void switchBlock(BasicBlock* block);
 
+  // Set an annotation that will be applied to the next instruction appended.
+  void annotateNext(std::string text) {
+    cur_bb_->pending_annotation_ = std::move(text);
+  }
+
   // Allocate and append a new instruction to the instruction stream.
   template <class... Args>
-  Instruction* appendInstr(Instruction::Opcode opcode, Args&&... args) {
+  Instruction* appendInstr(Opcode opcode, Args&&... args) {
     auto instr = cur_bb_->allocateInstr(opcode, cur_hir_instr_);
-
-    return appendInstrArguments(instr, std::forward<Args>(args)...);
+    (genericCreateInstrInput(instr, args), ...);
+    return instr;
   }
 
   // Allocate and append a new instruction to the instruction stream.
@@ -57,19 +65,17 @@ class BasicBlockBuilder {
   // The instruction is expecting to produce a VReg and match it to an HIR
   // register.
   template <class... Args>
-  Instruction*
-  appendInstr(hir::Register* dest, Instruction::Opcode opcode, Args&&... args) {
+  Instruction* appendInstr(hir::Register* dest, Opcode opcode, Args&&... args) {
     auto dest_lir = OutVReg{hirTypeToDataType(dest->type())};
     auto instr = appendInstr(opcode, dest_lir, std::forward<Args>(args)...);
     auto [it, inserted] = env_->output_map.emplace(dest, instr);
-    JIT_CHECK(inserted, "HIR value '{}' defined twice in LIR", dest->name());
+    JIT_CHECK(inserted, "HIR value '{}' defined twice in LIR", *dest);
     return instr;
   }
 
   // Allocate and append a new instruction to the instruction stream.
   template <class... Args>
-  Instruction*
-  appendInstr(OutInd dest, Instruction::Opcode opcode, Args&&... args) {
+  Instruction* appendInstr(OutInd dest, Opcode opcode, Args&&... args) {
     auto instr = appendInstr(opcode, std::forward<Args>(args)...);
     instr->output()->setMemoryIndirect(
         dest.base, dest.index, dest.multiplier, dest.offset);
@@ -82,8 +88,7 @@ class BasicBlockBuilder {
   // The instruction is expecting to produce a VReg and match it to an HIR
   // register.
   template <class... Args>
-  Instruction*
-  appendInstr(OutMemImm dest, Instruction::Opcode opcode, Args&&... args) {
+  Instruction* appendInstr(OutMemImm dest, Opcode opcode, Args&&... args) {
     auto instr = appendInstr(opcode, std::forward<Args>(args)...);
     instr->output()->setMemoryAddress(dest.value);
     return instr;
@@ -94,10 +99,21 @@ class BasicBlockBuilder {
   // The instruction is expecting to produce a VReg and match it to an HIR
   // register.
   template <class... Args>
-  Instruction*
-  appendInstr(OutVReg dest, Instruction::Opcode opcode, Args&&... args) {
+  Instruction* appendInstr(OutVReg dest, Opcode opcode, Args&&... args) {
     auto instr = appendInstr(opcode, std::forward<Args>(args)...);
     instr->output()->setVirtualRegister();
+    instr->output()->setDataType(dest.data_type);
+    return instr;
+  }
+
+  // Allocate and append a new instruction to the instruction stream.
+  //
+  // The instruction is expecting to produce a VReg and match it to an HIR
+  // register.
+  template <class... Args>
+  Instruction* appendInstr(OutPhyReg dest, Opcode opcode, Args&&... args) {
+    auto instr = appendInstr(opcode, std::forward<Args>(args)...);
+    instr->output()->setPhyRegister(dest.value);
     instr->output()->setDataType(dest.data_type);
     return instr;
   }
@@ -105,7 +121,7 @@ class BasicBlockBuilder {
   // Allocate and append a new branching instruction to the instruction stream.
   template <class Arg>
   Instruction* appendBranch(
-      Instruction::Opcode opcode,
+      Opcode opcode,
       Arg&& arg,
       BasicBlock* true_bb,
       BasicBlock* false_bb) {
@@ -116,7 +132,21 @@ class BasicBlockBuilder {
   }
 
   // Allocate and append a new branching instruction which is checking a flag
-  Instruction* appendBranch(Instruction::Opcode opcode, BasicBlock* true_bb);
+  template <class... Args>
+  Instruction*
+  appendBranch(Opcode opcode, BasicBlock* true_bb, Args&&... args) {
+    auto instr = appendInstr(opcode, std::forward<Args>(args)...);
+    cur_bb_->addSuccessor(true_bb);
+    return instr;
+  }
+
+  // Allocate and append a branch on a condition read from the flags.
+  template <class... Args>
+  Instruction*
+  appendBranch(Condition cond, BasicBlock* true_bb, Args&&... args) {
+    return appendBranch(
+        Opcode::kBranchCC, true_bb, cond, std::forward<Args>(args)...);
+  }
 
   template <
       typename FuncReturnType,
@@ -154,6 +184,41 @@ class BasicBlockBuilder {
     return instr;
   }
 
+  // Call through a function pointer held in memory at `slot`, rather than
+  // through an address baked into the instruction stream.
+  //
+  // kCall's backends accept an Imm/Label/Stack/Reg callee but not a memory
+  // operand, so this emits the load and the indirect call as a pair. Arguments
+  // are checked against the pointee's signature exactly as
+  // appendCallInstruction checks a direct callee's.
+  template <
+      typename FuncReturnType,
+      typename... FuncArgs,
+      typename... AppendArgs>
+  Instruction* appendIndirectCallInstruction(
+      hir::Register* dst,
+      FuncReturnType (**slot)(FuncArgs...),
+      AppendArgs&&... args) {
+    auto instr = appendIndirectCallInstructionInternal(
+        slot, std::forward<AppendArgs>(args)...);
+    createInstrOutput(instr, dst);
+    return instr;
+  }
+
+  template <
+      typename FuncReturnType,
+      typename... FuncArgs,
+      typename... AppendArgs>
+  Instruction* appendIndirectCallInstruction(
+      OutVReg dst,
+      FuncReturnType (**slot)(FuncArgs...),
+      AppendArgs&&... args) {
+    auto instr = appendIndirectCallInstructionInternal(
+        slot, std::forward<AppendArgs>(args)...);
+    instr->addOperands(dst);
+    return instr;
+  }
+
   template <
       typename FuncReturnType,
       typename... FuncArgs,
@@ -170,14 +235,18 @@ class BasicBlockBuilder {
   }
 
   // Create a new LIR instruction for the current HIR instruction.
-  Instruction* createInstr(Instruction::Opcode opcode);
+  Instruction* createInstr(Opcode opcode);
 
   Instruction* getDefInstr(const hir::Register* reg);
 
   void createInstrInput(Instruction* instr, hir::Register* reg);
   void createInstrOutput(Instruction* instr, hir::Register* dst);
 
-  std::vector<BasicBlock*> Generate();
+  std::vector<BasicBlock*> generate();
+
+  BasicBlock* curBlock() const {
+    return cur_bb_;
+  }
 
  private:
   const hir::Instr* cur_hir_instr_{nullptr};
@@ -186,17 +255,6 @@ class BasicBlockBuilder {
   std::vector<BasicBlock*> bbs_;
   jit::codegen::Environ* env_;
   Function* func_;
-
-  constexpr Instruction* appendInstrArguments(Instruction* instr) {
-    return instr;
-  }
-
-  template <typename FirstT, typename... T>
-  Instruction*
-  appendInstrArguments(Instruction* instr, FirstT&& first_arg, T&&... args) {
-    genericCreateInstrInput(instr, first_arg);
-    return appendInstrArguments(instr, std::forward<T>(args)...);
-  }
 
   template <
       typename FuncReturnType,
@@ -210,79 +268,90 @@ class BasicBlockBuilder {
         "The number of parameters the function accepts and the number of "
         "arguments passed is different.");
 
-    auto instr = createInstr(Instruction::kCall);
+    auto instr = createInstr(Opcode::kCall);
     genericCreateInstrInput(instr, func);
 
-    // Although the static_assert above will fail if this is false, the compiler
-    // will still attempt to instatiate appendCallInstructionArguments, which
-    // will result in a ton of error spew that hides the actual error that we've
-    // generated.
+    // Avoid expanding mismatched packs when the arity check fails. Otherwise,
+    // the compiler produces additional errors that obscure the static_assert
+    // above.
     if constexpr (sizeof...(FuncArgs) == sizeof...(AppendArgs)) {
-      appendCallInstructionArguments<
-          sizeof...(FuncArgs),
-          0,
-          std::tuple<FuncArgs...>>(instr, std::forward<AppendArgs>(args)...);
+      (appendCallInstructionArgument<FuncArgs>(instr, args), ...);
     }
 
     return instr;
   }
 
-  template <
-      size_t ArgsLeft,
-      size_t CurArg,
-      typename FuncArgTuple,
-      typename... AppendArgs>
-  std::enable_if_t<ArgsLeft == 0, void> appendCallInstructionArguments(
-      Instruction*,
-      AppendArgs&&...) {}
+  template <typename ExpectedArgType, typename Arg>
+  void appendCallInstructionArgument(Instruction* instr, const Arg& arg) {
+    using ActualArgType = std::remove_cv_t<std::remove_reference_t<Arg>>;
 
-  template <
-      size_t ArgsLeft,
-      size_t CurArg,
-      typename FuncArgTuple,
-      typename... AppendArgs>
-  std::enable_if_t<ArgsLeft != 0, void> appendCallInstructionArguments(
-      Instruction* instr,
-      AppendArgs&&... args) {
-    using CurArgType = std::remove_cv_t<std::remove_reference_t<
-        std::tuple_element_t<CurArg, std::tuple<AppendArgs...>>>>;
-    using CurFuncArgType = std::tuple_element_t<CurArg, FuncArgTuple>;
-    auto&& cur_arg = std::get<CurArg>(std::forward_as_tuple(args...));
-    if constexpr (std::is_same_v<CurFuncArgType, PyThreadState*>) {
+    if constexpr (std::is_same_v<ExpectedArgType, PyThreadState*>) {
       JIT_CHECK(
-          cur_arg == env_->asm_tstate,
+          arg == env_->asm_tstate,
           "The thread state was passed as a different value than "
           "env_->asm_tstate");
     } else if constexpr (
-        std::is_same_v<CurArgType, hir::Register*> ||
-        std::is_same_v<CurArgType, std::string>) {
+        std::is_same_v<ActualArgType, hir::Register*> ||
+        std::is_same_v<ActualArgType, std::string>) {
       // Could add a runtime check here to ensure the type of the register is
       // correct, at least for non-temp-register args, but not doing that
       // currently.
-    } else if constexpr (std::is_same_v<CurArgType, Instruction*>) {
-    } else if constexpr (std::is_pointer_v<CurFuncArgType>) {
-      if constexpr (std::is_function_v<CurArgType>) {
-        // This came in as a reference to a function, as a bare function is
-        // not a valid parameter type. The ref was removed as part of the
-        // uniform handling above, so compare without the pointer on the
-        // CurFuncArgType.
+    } else if constexpr (std::is_same_v<ActualArgType, Instruction*>) {
+    } else if constexpr (std::is_pointer_v<ExpectedArgType>) {
+      if constexpr (std::is_function_v<ActualArgType>) {
+        // A bare function is passed by reference. ActualArgType has the
+        // reference removed, so compare it with the type pointed to by
+        // ExpectedArgType.
         static_assert(
-            std::is_same_v<CurArgType, std::remove_pointer_t<CurFuncArgType>>,
+            std::is_same_v<
+                ActualArgType,
+                std::remove_pointer_t<ExpectedArgType>>,
             "Mismatched function pointer parameter types!");
-      } else if constexpr (!std::is_same_v<CurArgType, std::nullptr_t>) {
+      } else if constexpr (!std::is_same_v<ActualArgType, std::nullptr_t>) {
         static_assert(
-            std::is_same_v<CurArgType, CurFuncArgType>,
+            std::is_same_v<ActualArgType, ExpectedArgType>,
             "Mismatched function parameter types!");
       }
     } else {
       static_assert(
-          std::is_same_v<CurArgType, CurFuncArgType>,
+          std::is_same_v<ActualArgType, ExpectedArgType>,
           "Mismatched function parameter types!");
     }
-    genericCreateInstrInput(instr, cur_arg);
-    appendCallInstructionArguments<ArgsLeft - 1, CurArg + 1, FuncArgTuple>(
-        instr, std::forward<AppendArgs>(args)...);
+
+    genericCreateInstrInput(instr, arg);
   }
+
+  template <
+      typename FuncReturnType,
+      typename... FuncArgs,
+      typename... AppendArgs>
+  Instruction* appendIndirectCallInstructionInternal(
+      FuncReturnType (**slot)(FuncArgs...),
+      AppendArgs&&... args) {
+    static_assert(
+        !std::is_void_v<FuncReturnType>,
+        "appendIndirectCallInstruction cannot be used with functions that "
+        "return void.");
+    static_assert(
+        sizeof...(FuncArgs) == sizeof...(AppendArgs),
+        "The number of parameters the function accepts and the number of "
+        "arguments passed is different.");
+
+    Instruction* target =
+        appendInstr(OutVReg{Operand::k64bit}, Opcode::kLoad, MemImm{slot});
+    auto instr = createInstr(Opcode::kCall);
+    instr->addOperands(VReg{target});
+
+    // See appendCallInstructionInternal for why this is guarded.
+    if constexpr (sizeof...(FuncArgs) == sizeof...(AppendArgs)) {
+      (appendCallInstructionArgument<FuncArgs>(instr, args), ...);
+    }
+    return instr;
+  }
+
+  bool usesImmediateInput(hir::Type const& tp);
+
+  void createRegisterInput(Instruction* instr, hir::Register* val);
 
   template <typename T>
   void genericCreateInstrInput(Instruction* instr, const T& val) {
@@ -292,21 +361,7 @@ class BasicBlockBuilder {
         instr->allocateImmediateInput(
             static_cast<uint64_t>(0), DataType::k64bit);
       } else {
-        auto tp = val->type();
-        auto dat = hirTypeToDataType(tp);
-        // We don't turn constant floats into immediates, as we always
-        // need to load these from general purpose registers or memory
-        // anyways.
-        if (tp.hasIntSpec()) {
-          instr->allocateImmediateInput(
-              static_cast<uint64_t>(tp.intSpec()), dat);
-        } else if (tp.hasObjectSpec()) {
-          env_->code_rt->addReference(tp.objectSpec());
-          instr->allocateImmediateInput(
-              reinterpret_cast<uint64_t>(tp.objectSpec()), DataType::kObject);
-        } else {
-          createInstrInput(instr, val);
-        }
+        createRegisterInput(instr, val);
       }
     } else if constexpr (std::is_same_v<CurArgType, Instruction*>) {
       instr->allocateLinkedInput(val);
@@ -320,7 +375,8 @@ class BasicBlockBuilder {
     } else if constexpr (std::is_same_v<CurArgType, bool>) {
       instr->allocateImmediateInput(val ? 1 : 0, DataType::k8bit);
     } else if constexpr (std::is_floating_point_v<CurArgType>) {
-      instr->allocateImmediateInput(bit_cast<uint64_t>(val), DataType::kDouble);
+      instr->allocateImmediateInput(
+          std::bit_cast<uint64_t>(val), DataType::kDouble);
     } else if constexpr (std::is_integral_v<CurArgType>) {
       if constexpr (sizeof(CurArgType) == 1) {
         instr->allocateImmediateInput(
@@ -343,4 +399,4 @@ class BasicBlockBuilder {
   }
 };
 
-} // namespace jit::lir
+} // namespace cinderx::jit::lir

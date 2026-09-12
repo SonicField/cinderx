@@ -8,17 +8,10 @@
 
 #include <ostream>
 
-namespace jit::hir {
-
-const std::string& Register::name() const {
-  if (name_.empty()) {
-    name_ = fmt::format("v{}", id_);
-  }
-  return name_;
-}
+namespace cinderx::jit::hir {
 
 std::ostream& operator<<(std::ostream& os, const Register& reg) {
-  return os << reg.name();
+  return os << 'v' << reg.id();
 }
 
 std::ostream& operator<<(std::ostream& os, RefKind kind) {
@@ -49,4 +42,4 @@ std::ostream& operator<<(std::ostream& os, ValueKind kind) {
   JIT_ABORT("Bad ValueKind {}", static_cast<int>(kind));
 }
 
-} // namespace jit::hir
+} // namespace cinderx::jit::hir

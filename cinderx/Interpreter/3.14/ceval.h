@@ -463,7 +463,7 @@ format_missing(PyThreadState *tstate, const char *kind,
     if (name_str == NULL)
         return;
     _PyErr_Format(tstate, PyExc_TypeError,
-                  "%U() missing %i required %s argument%s: %U",
+                  "%U() missing %zd required %s argument%s: %U",
                   qualname,
                   len,
                   kind,
@@ -978,41 +978,6 @@ _PyEval_FrameClearAndPop(PyThreadState *tstate, _PyInterpreterFrame * frame)
     else {
         clear_gen_frame(tstate, frame);
     }
-}
-_PyInterpreterFrame *
-_PyEvalFramePushAndInit(PyThreadState *tstate, _PyStackRef func,
-                        PyObject *locals, _PyStackRef const* args,
-                        size_t argcount, PyObject *kwnames, _PyInterpreterFrame *previous)
-{
-    PyFunctionObject *func_obj = (PyFunctionObject *)PyStackRef_AsPyObjectBorrow(func);
-    PyCodeObject * code = (PyCodeObject *)func_obj->func_code;
-    CALL_STAT_INC(frames_pushed);
-    _PyInterpreterFrame *frame = _PyThreadState_PushFrame(tstate, code->co_framesize);
-    if (frame == NULL) {
-        goto fail;
-    }
-    _PyFrame_Initialize(tstate, frame, func, locals, code, 0, previous);
-    if (initialize_locals(tstate, func_obj, frame->localsplus, args, argcount, kwnames)) {
-        assert(frame->owner == FRAME_OWNED_BY_THREAD);
-        clear_thread_frame(tstate, frame);
-        return NULL;
-    }
-    return frame;
-fail:
-    /* Consume the references */
-    PyStackRef_CLOSE(func);
-    Py_XDECREF(locals);
-    for (size_t i = 0; i < argcount; i++) {
-        PyStackRef_CLOSE(args[i]);
-    }
-    if (kwnames) {
-        Py_ssize_t kwcount = PyTuple_GET_SIZE(kwnames);
-        for (Py_ssize_t i = 0; i < kwcount; i++) {
-            PyStackRef_CLOSE(args[i+argcount]);
-        }
-    }
-    PyErr_NoMemory();
-    return NULL;
 }
 static _PyInterpreterFrame *
 _PyEvalFramePushAndInit_Ex(PyThreadState *tstate, _PyStackRef func,

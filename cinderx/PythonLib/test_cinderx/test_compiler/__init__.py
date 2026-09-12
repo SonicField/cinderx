@@ -1,5 +1,6 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # flake8: noqa
+
 import sys
 
 from .test_api import ApiTests
@@ -10,7 +11,6 @@ from .test_flags import FlagTests
 from .test_graph import GraphTests
 from .test_linepos import LinePositionTests
 from .test_optimizer import AstOptimizerTests
-from .test_py310 import Python310Tests
 from .test_pysourceloader import PySourceLoaderTest
 from .test_symbols import SymbolVisitorTests
 from .test_unparse import UnparseTests

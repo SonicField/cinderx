@@ -4,6 +4,7 @@
 
 #include "internal/pycore_code.h"
 
+#include "cinderx/Common/code.h"
 #include "cinderx/Common/extra-py-flags.h"
 #include "cinderx/Jit/hir/builder.h"
 #include "cinderx/Jit/hir/clean_cfg.h"
@@ -11,7 +12,15 @@
 #include "cinderx/Jit/hir/instr_effects.h"
 #include "cinderx/Jit/hir/preload.h"
 
-namespace jit::hir {
+#include <cstdint>
+#include <deque>
+#include <optional>
+#include <queue>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
+namespace cinderx::jit::hir {
 
 #define LOG_INLINER(...) JIT_LOGIF(getConfig().log.debug_inliner, __VA_ARGS__)
 
@@ -26,29 +35,36 @@ struct AbstractCall {
       : func{func}, nargs{nargs}, instr{instr}, target{target} {}
 
   Register* arg(std::size_t i) const {
-    if (instr->IsInvokeStaticFunction()) {
+    if (instr->isInvokeStaticFunction()) {
       auto f = static_cast<InvokeStaticFunction*>(instr);
       return f->arg(i + 1);
     }
-    if (instr->IsVectorCall()) {
+    if (instr->isVectorCall()) {
       auto f = static_cast<VectorCall*>(instr);
       return f->arg(i);
     }
-    JIT_ABORT("Unsupported call type {}", instr->opname());
+    if (instr->isCallMethod()) {
+      auto f = static_cast<CallMethod*>(instr);
+      return f->arg(i);
+    }
+    JIT_THROW("Unsupported call type {}", instr->opname());
   }
 
   BorrowedRef<PyFunctionObject> func;
   size_t nargs{0};
   DeoptBase* instr{nullptr};
   Register* target{nullptr};
+  // Score for ranking callsites as inlining candidates.  Lower is better.
+  size_t score{0};
+  // Discover order, used to break ranking ties in a stable manner.
+  uint64_t seq{0};
 };
 
-void dlogAndCollectFailureStats(
+void logInlineFailure(
     Function& caller,
-    AbstractCall* call_instr,
+    BorrowedRef<PyFunctionObject> callee,
     InlineFailureType failure_type) {
-  BorrowedRef<PyFunctionObject> func = call_instr->func;
-  std::string callee_name = funcFullname(func);
+  std::string callee_name = funcFullname(callee);
   Function::InlineFailureStats& inline_failure_stats =
       caller.inline_function_stats.failure_stats;
   inline_failure_stats[failure_type].insert(callee_name);
@@ -59,13 +75,12 @@ void dlogAndCollectFailureStats(
       getInlineFailureMessage(failure_type));
 }
 
-void dlogAndCollectFailureStats(
+void logInlineFailure(
     Function& caller,
-    AbstractCall* call_instr,
+    BorrowedRef<PyFunctionObject> callee,
     InlineFailureType failure_type,
     const char* tp_name) {
-  BorrowedRef<PyFunctionObject> func = call_instr->func;
-  std::string callee_name = funcFullname(func);
+  std::string callee_name = funcFullname(callee);
   Function::InlineFailureStats& inline_failure_stats =
       caller.inline_function_stats.failure_stats;
   inline_failure_stats[failure_type].insert(callee_name);
@@ -80,50 +95,47 @@ void dlogAndCollectFailureStats(
 // Assigns a cost to every function, to be used when determining whether it
 // makes sense to inline or not.
 size_t codeCost(BorrowedRef<PyCodeObject> code) {
-  // Manually iterating through the code block to count real opcodes and not
-  // inline caches.  Not the best metric but it's something to start with.
-  size_t num_opcodes = 0;
-  for ([[maybe_unused]] auto& instr : BytecodeInstructionBlock{code}) {
-    num_opcodes++;
-  }
-  return num_opcodes;
+  // Use the number of opcodes as the cost.  Not the best metric but it's
+  // something to start with.
+  BytecodeInstructionBlock instructions{code};
+  return std::distance(instructions.begin(), instructions.end());
 }
 
 // Most of these checks are only temporary and do not in perpetuity prohibit
 // inlining.
-bool canInline(Function& caller, AbstractCall* call_instr) {
-  BorrowedRef<PyFunctionObject> func = call_instr->func;
+bool canInline(Function& caller, const AbstractCall& call_instr) {
+  BorrowedRef<PyFunctionObject> callee = call_instr.func;
 
-  BorrowedRef<> globals = func->func_globals;
+  BorrowedRef<> globals = callee->func_globals;
   if (!PyDict_Check(globals)) {
-    dlogAndCollectFailureStats(
+    logInlineFailure(
         caller,
-        call_instr,
+        callee,
         InlineFailureType::kGlobalsNotDict,
         Py_TYPE(globals)->tp_name);
     return false;
   }
 
-  BorrowedRef<> builtins = func->func_builtins;
+  BorrowedRef<> builtins = callee->func_builtins;
   if (!PyDict_CheckExact(builtins)) {
-    dlogAndCollectFailureStats(
+    logInlineFailure(
         caller,
-        call_instr,
+        callee,
         InlineFailureType::kBuiltinsNotDict,
         Py_TYPE(builtins)->tp_name);
     return false;
   }
 
   auto fail = [&](InlineFailureType failure_type) {
-    dlogAndCollectFailureStats(caller, call_instr, failure_type);
+    logInlineFailure(caller, callee, failure_type);
     return false;
   };
 
-  if (func->func_kwdefaults != nullptr) {
+  if (callee->func_kwdefaults != nullptr) {
     return fail(InlineFailureType::kHasKwdefaults);
   }
 
-  BorrowedRef<PyCodeObject> code{func->func_code};
+  BorrowedRef<PyCodeObject> code{callee->func_code};
   JIT_CHECK(PyCode_Check(code), "Expected PyCodeObject");
 
   if (code->co_kwonlyargcount > 0) {
@@ -136,13 +148,12 @@ bool canInline(Function& caller, AbstractCall* call_instr) {
     return fail(InlineFailureType::kHasVarkwargs);
   }
   JIT_DCHECK(code->co_argcount >= 0, "argcount must be positive");
-  if (call_instr->nargs != static_cast<size_t>(code->co_argcount)) {
+  if (call_instr.nargs != static_cast<size_t>(code->co_argcount)) {
     return fail(InlineFailureType::kCalledWithMismatchedArgs);
   }
   if (code->co_flags & kCoFlagsAnyGenerator) {
     return fail(InlineFailureType::kIsGenerator);
   }
-#if PY_VERSION_HEX >= 0x030C0000
   // Avoid the allocation that can happen in
   // PyCode_GetCellvars and PyCode_GetFreevars
   for (int offset = 0; offset < code->co_nlocalsplus; offset++) {
@@ -153,23 +164,11 @@ bool canInline(Function& caller, AbstractCall* call_instr) {
       return fail(InlineFailureType::kHasFreevars);
     }
   }
-#else
-  Py_ssize_t ncellvars = PyTuple_GET_SIZE(PyCode_GetCellvars(code));
-  if (ncellvars > 0) {
-    return fail(InlineFailureType::kHasCellvars);
-  }
-  Py_ssize_t nfreevars = PyTuple_GET_SIZE(PyCode_GetFreevars(code));
-  if (nfreevars > 0) {
-    return fail(InlineFailureType::kHasFreevars);
-  }
-#endif
 
-  if constexpr (PY_VERSION_HEX >= 0x030C0000) {
-    // This requires access to the frame so we can't inline it.
-    for (auto& bci : BytecodeInstructionBlock{code}) {
-      if (bci.opcode() == EAGER_IMPORT_NAME) {
-        return fail(InlineFailureType::kHasEagerImportName);
-      }
+  // This requires access to the frame so we can't inline it.
+  for (auto& bci : BytecodeInstructionBlock{code}) {
+    if (bci.opcode() == EAGER_IMPORT_NAME) {
+      return fail(InlineFailureType::kHasEagerImportName);
     }
   }
 
@@ -179,29 +178,36 @@ bool canInline(Function& caller, AbstractCall* call_instr) {
 // As canInline() for checks which require a preloader.
 bool canInlineWithPreloader(
     Function& caller,
-    AbstractCall* call_instr,
+    const AbstractCall& call_instr,
     const Preloader& preloader) {
-  if (call_instr->instr->IsVectorCall() &&
+  if (call_instr.instr->isVectorCall() &&
       (preloader.code()->co_flags & CI_CO_STATICALLY_COMPILED) &&
       (preloader.returnType() <= TPrimitive || preloader.hasPrimitiveArgs())) {
     // TASK(T122371281) remove this constraint
-    dlogAndCollectFailureStats(
-        caller, call_instr, InlineFailureType::kIsVectorCallWithPrimitives);
+    logInlineFailure(
+        caller,
+        call_instr.func,
+        InlineFailureType::kIsVectorCallWithPrimitives);
     return false;
   }
 
   return true;
 }
 
-void inlineFunctionCall(Function& caller, AbstractCall* call_instr) {
+// Attempt to inline a single call.  On success returns the spliced-in callee
+// region (entry/exit blocks) so the caller can re-scan it for nested calls; on
+// failure returns nullopt (the reason is logged into the caller's stats).
+std::optional<InlineResult> inlineFunctionCall(
+    Function& caller,
+    const AbstractCall& call_instr) {
   if (!canInline(caller, call_instr)) {
-    return;
+    return std::nullopt;
   }
 
   auto caller_frame_state =
-      std::make_unique<FrameState>(*call_instr->instr->frameState());
+      std::make_unique<FrameState>(*call_instr.instr->frameState());
 
-  BorrowedRef<PyFunctionObject> callee = call_instr->func;
+  BorrowedRef<PyFunctionObject> callee = call_instr.func;
 
   // We are only able to inline functions that were already preloaded, since we
   // can't safely preload anything mid-compile (preloading can execute arbitrary
@@ -212,13 +218,12 @@ void inlineFunctionCall(Function& caller, AbstractCall* call_instr) {
   // that is part of the batch.
   Preloader* preloader = preloaderManager().find(callee);
   if (!preloader) {
-    dlogAndCollectFailureStats(
-        caller, call_instr, InlineFailureType::kNeedsPreload);
-    return;
+    logInlineFailure(caller, callee, InlineFailureType::kNeedsPreload);
+    return std::nullopt;
   }
 
   if (!canInlineWithPreloader(caller, call_instr, *preloader)) {
-    return;
+    return std::nullopt;
   }
 
   HIRBuilder hir_builder(*preloader);
@@ -233,8 +238,12 @@ void inlineFunctionCall(Function& caller, AbstractCall* call_instr) {
         callee_name,
         caller.fullname,
         exn.what());
-    return;
+    return std::nullopt;
   }
+
+  // Keep the callee and transitively its code object, which a
+  // PyFunctionObject owns strongly alive
+  caller.env.addReference(call_instr.func);
 
   // This logging is parsed by jitlist_bisect.py to find inlined functions.
   JIT_LOGIF(
@@ -244,11 +253,11 @@ void inlineFunctionCall(Function& caller, AbstractCall* call_instr) {
       caller.fullname);
 
   BorrowedRef<PyCodeObject> callee_code = preloader->code();
-  BasicBlock* tail = caller.cfg.splitAfter(*call_instr->instr);
+  BasicBlock* tail = caller.cfg.splitAfter(*call_instr.instr);
   auto begin_inlined_function = BeginInlinedFunction::create(
       callee, std::move(caller_frame_state), callee_name, preloader->reifier());
   auto callee_branch = Branch::create(result.entry);
-  if (call_instr->target != nullptr) {
+  if (call_instr.target != nullptr) {
     // Not a static call. Check that __code__ has not been swapped out since
     // the function was inlined.
     // VectorCall -> {LoadField, GuardIs, BeginInlinedFunction, Branch to
@@ -256,49 +265,176 @@ void inlineFunctionCall(Function& caller, AbstractCall* call_instr) {
     //
     // Consider emitting a DeoptPatchpoint here to catch the case where someone
     // swaps out function.__code__.
-    Register* code_obj = caller.env.AllocateRegister();
+    Register* code_obj = caller.env.allocateRegister();
     auto load_code = LoadField::create(
         code_obj,
-        call_instr->target,
+        call_instr.target,
         "func_code",
         offsetof(PyFunctionObject, func_code),
         TObject);
-    Register* guarded_code = caller.env.AllocateRegister();
+    Register* guarded_code = caller.env.allocateRegister();
     auto guard_code = GuardIs::create(guarded_code, callee_code, code_obj);
-    call_instr->instr->ExpandInto(
+    call_instr.instr->expandInto(
         {load_code, guard_code, begin_inlined_function, callee_branch});
   } else {
-    call_instr->instr->ExpandInto({begin_inlined_function, callee_branch});
+    call_instr.instr->expandInto({begin_inlined_function, callee_branch});
   }
   tail->push_front(EndInlinedFunction::create(begin_inlined_function));
 
-  // Transform LoadArg into Assign
+  // Transform LoadArg into Assign.  They'll only be in the entry block.
   for (auto it = result.entry->begin(); it != result.entry->end();) {
     auto& instr = *it;
     ++it;
 
-    if (instr.IsLoadArg()) {
+    if (instr.isLoadArg()) {
       auto load_arg = static_cast<LoadArg*>(&instr);
       auto assign =
-          Assign::create(instr.output(), call_instr->arg(load_arg->arg_idx()));
-      instr.ReplaceWith(*assign);
+          Assign::create(instr.output(), call_instr.arg(load_arg->argIdx()));
+      instr.replaceWith(*assign);
       delete &instr;
     }
   }
 
-  // Transform Return into Assign+Branch
-  auto return_instr = result.exit->GetTerminator();
+  // Transform Return into Assign+Branch.  The HIRBuilder guarantees that the
+  // callee's exit block always has a Return, even if it is unreachable.
+  auto return_instr = result.exit->getTerminator();
   JIT_CHECK(
-      return_instr->IsReturn(),
+      return_instr->isReturn(),
       "terminator from inlined function should be Return");
   auto assign =
-      Assign::create(call_instr->instr->output(), return_instr->GetOperand(0));
+      Assign::create(call_instr.instr->output(), return_instr->getOperand(0));
   auto return_branch = Branch::create(tail);
-  return_instr->ExpandInto({assign, return_branch});
+  return_instr->expandInto({assign, return_branch});
   delete return_instr;
 
-  delete call_instr->instr;
+  delete call_instr.instr;
   caller.inline_function_stats.num_inlined_functions++;
+  return result;
+}
+
+// Validate a dynamic call's function target and, if it names a concrete
+// function we can inline, append it as a candidate.  `target` is the register
+// holding the callee, `nargs` the number of positional arguments.
+void maybeAddDynamicCall(
+    Function& irfunc,
+    DeoptBase* instr,
+    Register* target,
+    size_t nargs,
+    CallFlags flags,
+    std::vector<AbstractCall>& calls) {
+  const std::string& caller_name = irfunc.fullname;
+  if (!target->isA(TFunc)) {
+    LOG_INLINER(
+        "Can't inline non-function {}:{} into {}",
+        *target,
+        target->type(),
+        caller_name);
+    return;
+  }
+  if (!target->type().hasValueSpec(TFunc)) {
+    LOG_INLINER(
+        "Can't inline unknown function {}:{} into {}",
+        *target,
+        target->type(),
+        caller_name);
+    return;
+  }
+  if (flags & CallFlags::KwArgs) {
+    LOG_INLINER(
+        "Can't inline {}:{} into {} because it has kwargs",
+        *target,
+        target->type(),
+        caller_name);
+    return;
+  }
+
+  BorrowedRef<PyFunctionObject> callee{target->type().objectSpec()};
+  calls.emplace_back(callee, nargs, instr, target);
+}
+
+// Scan a single block for calls that the inliner can potentially handle and
+// append them to `calls`.  The actual inlinability of a candidate is decided
+// later by canInline()/inlineFunctionCall().
+void collectCalls(
+    Function& irfunc,
+    BasicBlock& block,
+    std::vector<AbstractCall>& calls) {
+  for (auto& instr : block) {
+    if (instr.isVectorCall()) {
+      auto call = static_cast<VectorCall*>(&instr);
+      maybeAddDynamicCall(
+          irfunc, call, call->func(), call->numArgs(), call->flags(), calls);
+    } else if (instr.isCallMethod()) {
+      // A CallMethod is a plain (inlinable) function call only when its
+      // receiver is null; with a real receiver it's a method dispatch we can't
+      // turn into a direct call.  Which operand holds the callable vs. the null
+      // receiver differs by Python version (mirrors simplifyCallMethod()).  In
+      // the pipeline Simplify rewrites these into VectorCalls before the
+      // inliner runs, but freshly inlined callee bodies have not been through
+      // Simplify yet, so we must recognize the CallMethod form directly to
+      // inline transitively.
+      auto call = static_cast<CallMethod*>(&instr);
+      Register* target = nullptr;
+      if constexpr (PY_VERSION_HEX >= 0x030E0000) {
+        if (call->self()->type() <= TNullptr) {
+          target = call->func();
+        }
+      } else {
+        if (call->func()->type() <= TNullptr) {
+          target = call->self();
+        }
+      }
+      if (target != nullptr) {
+        maybeAddDynamicCall(
+            irfunc, call, target, call->numArgs(), call->flags(), calls);
+      }
+    } else if (instr.isInvokeStaticFunction()) {
+      auto call = static_cast<InvokeStaticFunction*>(&instr);
+      calls.emplace_back(call->func(), call->numArgs() - 1, call);
+    }
+  }
+}
+
+// Report whether `code` already appears among the functions inlined on the path
+// to a call site, walking the FrameState parent chain.  The outermost frame
+// (parent == nullptr) is the function being compiled, not an inlined frame, so
+// it is excluded: this still allows a directly recursive function to be inlined
+// once into itself, but prevents that inlined copy (or a mutual recursion
+// cycle) from being unrolled again and again.
+bool inlineStackContains(
+    const FrameState* frame,
+    BorrowedRef<PyCodeObject> code) {
+  for (; frame != nullptr && frame->parent != nullptr; frame = frame->parent) {
+    if (frame->code == code) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Collect the blocks that make up a freshly inlined callee, from its entry
+// block up to (and including) its single merged return block.  Traversal stops
+// at `exit` so we don't walk back out into the caller's code.
+std::vector<BasicBlock*> inlinedBlocks(BasicBlock* entry, BasicBlock* exit) {
+  std::vector<BasicBlock*> blocks;
+  std::unordered_set<BasicBlock*> seen{entry};
+  std::deque<BasicBlock*> queue{entry};
+  while (!queue.empty()) {
+    BasicBlock* block = queue.front();
+    queue.pop_front();
+    blocks.push_back(block);
+    if (block == exit) {
+      continue;
+    }
+    Instr* terminator = block->getTerminator();
+    for (std::size_t i = 0, n = terminator->numEdges(); i < n; i++) {
+      BasicBlock* succ = block->successor(i);
+      if (seen.insert(succ).second) {
+        queue.push_back(succ);
+      }
+    }
+  }
+  return blocks;
 }
 
 void tryEliminateBeginEnd(EndInlinedFunction* end) {
@@ -313,20 +449,15 @@ void tryEliminateBeginEnd(EndInlinedFunction* end) {
   for (; &*it != end; it++) {
     // Snapshots reference the FrameState owned by BeginInlinedFunction and, if
     // not removed, will contain bad pointers.
-    if (it->IsSnapshot()) {
+    if (it->isSnapshot()) {
       to_delete.push_back(&*it);
       continue;
     }
     // Instructions that either deopt or otherwise materialize a PyFrameObject
-    // need the shadow frames to exist. Everything that materializes a
-    // PyFrameObject should also be marked as deopting.
-
-    if (it->asDeoptBase()
-#if PY_VERSION_HEX >= 0x030C0000
-        // Updating the previous instruction needs the frame too.
-        || hasArbitraryExecution(*it)
-#endif
-    ) {
+    // need the inline frames to exist.  Everything that materializes a
+    // PyFrameObject should also be marked as deopting.  Updating the previous
+    // instruction needs the frame too.
+    if (it->asDeoptBase() || hasArbitraryExecution(*it)) {
       return;
     }
   }
@@ -338,7 +469,7 @@ void tryEliminateBeginEnd(EndInlinedFunction* end) {
 
 } // namespace
 
-void InlineFunctionCalls::Run(Function& irfunc) {
+void InlineFunctionCalls::run(Function& irfunc) {
   if (irfunc.code == nullptr) {
     // In tests, irfunc may not have bytecode.
     return;
@@ -351,93 +482,151 @@ void InlineFunctionCalls::Run(Function& irfunc) {
     return;
   }
 
-  // Scan through all function calls in `irfunc` and mark the ones that are
-  // suitable for inlining.
-  std::vector<AbstractCall> to_inline;
-  for (auto& block : irfunc.cfg.blocks) {
-    for (auto& instr : block) {
-      if (instr.IsVectorCall()) {
-        auto call = static_cast<VectorCall*>(&instr);
-        Register* target = call->func();
-        const std::string& caller_name = irfunc.fullname;
-        if (!target->isA(TFunc)) {
-          LOG_INLINER(
-              "Can't inline non-function {}:{} into {}",
-              *target,
-              target->type(),
-              caller_name);
-          continue;
-        }
-        if (!target->type().hasValueSpec(TFunc)) {
-          LOG_INLINER(
-              "Can't inline unknown function {}:{} into {}",
-              *target,
-              target->type(),
-              caller_name);
-          continue;
-        }
-        if (call->flags() & CallFlags::KwArgs) {
-          LOG_INLINER(
-              "Can't inline {}:{} into {} because it has kwargs",
-              *target,
-              target->type(),
-              caller_name);
-          continue;
-        }
+  const size_t cost_limit = getConfig().inliner.cost_limit;
+  const size_t depth_limit = getConfig().inliner.depth_limit;
+  const size_t cold_threshold = getConfig().inliner.cold_call_threshold;
 
-        BorrowedRef<PyFunctionObject> callee{target->type().objectSpec()};
-        to_inline.emplace_back(callee, call->numArgs(), call, target);
-      } else if (instr.IsInvokeStaticFunction()) {
-        auto call = static_cast<InvokeStaticFunction*>(&instr);
-        to_inline.emplace_back(call->func(), call->NumArgs() - 1, call);
-      }
+  const size_t original_cost = codeCost(irfunc.code);
+  size_t cost = original_cost;
+
+  // Priority queue of candidate calls, ordered so that smaller callees are
+  // inlined first.  Preferring small callees lets us fit more of them under the
+  // cost limit, which matters once a large function starts hitting it.  Ties
+  // are broken by discovery order to keep inlining stable and source-ordered.
+  auto lowerPriority = [](const AbstractCall& a, const AbstractCall& b) {
+    if (a.score != b.score) {
+      return a.score > b.score;
     }
+    return a.seq > b.seq;
+  };
+  std::priority_queue<
+      AbstractCall,
+      std::vector<AbstractCall>,
+      decltype(lowerPriority)>
+      queue{lowerPriority};
+  uint64_t seq = 0;
+
+  // Process the calls found in the caller's code and push the ones worth
+  // inlining onto the queue.
+  auto enqueueCandidates = [&](PyCodeObject* caller_code,
+                               const std::string& caller_name,
+                               const std::vector<AbstractCall>& candidates) {
+    size_t caller_count = codeCallCount(caller_code);
+    for (AbstractCall call : candidates) {
+      BorrowedRef<PyCodeObject> callee_code{call.func->func_code};
+
+      // Prune out callees that are substantially colder than the caller.  Don't
+      // prune anything when a caller hasn't been run yet (e.g. compiled via
+      // cinderx.jit.force_compile(), or via a JIT list).
+      if (caller_count != 0) {
+        size_t callee_count = codeCallCount(callee_code);
+        if (callee_count == 0 ||
+            caller_count / callee_count >= cold_threshold) {
+          LOG_INLINER(
+              "Pruning cold call to {} from {}: callee called {} times vs "
+              "caller's {}",
+              funcFullname(call.func),
+              caller_name,
+              callee_count,
+              caller_count);
+          continue;
+        }
+      }
+
+      // Rank callees by their size, smaller calls are cheaper to inline.
+      call.score = codeCost(callee_code);
+      call.seq = seq++;
+      queue.push(call);
+    }
+  };
+
+  // Seed the queue with the top-level function's callsites.  We grow it
+  // transitively: whenever we splice in a callee we re-scan its body so that
+  // the callee's own calls become candidates too.
+  {
+    std::vector<AbstractCall> candidates;
+    for (auto& block : irfunc.cfg.blocks) {
+      collectCalls(irfunc, block, candidates);
+    }
+    enqueueCandidates(irfunc.code, irfunc.fullname, candidates);
   }
 
-  if (to_inline.empty()) {
-    return;
-  }
+  while (!queue.empty()) {
+    AbstractCall call = queue.top();
+    queue.pop();
 
-  size_t cost_limit = getConfig().inliner_cost_limit;
-  size_t cost = codeCost(irfunc.code);
-
-  // Inline as many calls as possible, starting from the top of the function and
-  // working down.
-  for (auto& call : to_inline) {
     BorrowedRef<PyCodeObject> call_code{call.func->func_code};
+    const FrameState* call_site = call.instr->frameState();
+    // Inline depth of the call site.  A top-level call site is at depth 0, so
+    // the function we'd inline there lands at depth 1.
+    const size_t inline_depth = call_site->inlineDepth();
+
+    // Don't unroll directly or mutually recursive calls.
+    if (inlineStackContains(call_site, call_code)) {
+      logInlineFailure(irfunc, call.func, InlineFailureType::kIsRecursive);
+      continue;
+    }
+
+    // Bound how deep transitive inlining can go.
+    if (inline_depth >= depth_limit) {
+      logInlineFailure(
+          irfunc, call.func, InlineFailureType::kExceedsDepthLimit);
+      continue;
+    }
+
+    // Charge the callee's size against the budget.
     size_t new_cost = cost + codeCost(call_code);
     if (new_cost > cost_limit) {
       LOG_INLINER(
           "Inliner reached cost limit of {} when trying to inline {} into {}, "
-          "inlining stopping early",
+          "skipping",
           new_cost,
           funcFullname(call.func),
           irfunc.fullname);
-      break;
+      continue;
+    }
+
+    std::optional<InlineResult> result = inlineFunctionCall(irfunc, call);
+    if (!result.has_value()) {
+      // Inlining failed; the reason has been logged.  Don't charge its cost.
+      continue;
     }
     cost = new_cost;
 
-    inlineFunctionCall(irfunc, &call);
-
     // We need to reflow types after every inline to propagate new type
-    // information from the callee.
+    // information from the callee.  This also gives the newly inlined call
+    // targets the value specs that collectCalls() relies on.
     reflowTypes(irfunc);
+
+    // Re-scan the just-inlined body so calls it makes become candidates too,
+    // ranking and pruning them relative to the callee we just inlined.
+    std::vector<AbstractCall> nested;
+    for (BasicBlock* block : inlinedBlocks(result->entry, result->exit)) {
+      collectCalls(irfunc, *block, nested);
+    }
+    enqueueCandidates(call_code, funcFullname(call.func), nested);
   }
 
-  // The inliner will make some blocks unreachable and we need to remove them
-  // to make the CFG valid again. While inlining might make some blocks
-  // unreachable and therefore make less work (less to inline), we cannot
-  // remove unreachable blocks in the above loop. It might delete instructions
-  // pointed to by `to_inline`.
-  CopyPropagation{}.Run(irfunc);
-  CleanCFG{}.Run(irfunc);
+  // Inlining spliced callee sub-CFGs into the caller, changing block structure,
+  // so drop any cached dominance before CleanCFG (which consults it).
+  if (cost != original_cost) {
+    irfunc.invalidateDomTree();
+  }
+
+  // Inlining a callee with no reachable return leaves unreachable blocks
+  // behind.  We can't drop them inside the loop above (that might free call
+  // instructions still queued for inlining), so we clean up here once the loop
+  // is done.  CleanCFG removes the unreachable blocks; CopyPropagation first
+  // collapses the Assigns the inliner introduced.
+  CopyPropagation{}.run(irfunc);
+  CleanCFG{}.run(irfunc);
 }
 
-void BeginInlinedFunctionElimination::Run(Function& irfunc) {
+void BeginInlinedFunctionElimination::run(Function& irfunc) {
   std::vector<EndInlinedFunction*> ends;
   for (auto& block : irfunc.cfg.blocks) {
     for (auto& instr : block) {
-      if (!instr.IsEndInlinedFunction()) {
+      if (!instr.isEndInlinedFunction()) {
         continue;
       }
       ends.push_back(static_cast<EndInlinedFunction*>(&instr));
@@ -448,4 +637,4 @@ void BeginInlinedFunctionElimination::Run(Function& irfunc) {
   }
 }
 
-} // namespace jit::hir
+} // namespace cinderx::jit::hir

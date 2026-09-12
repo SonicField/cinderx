@@ -2,18 +2,15 @@
 
 #include "cinderx/Jit/generators_core.h"
 
-#include "cinderx/module_state.h"
-
-#if PY_VERSION_HEX >= 0x030C0000
-
 #include "internal/pycore_frame.h"
 
 #include "cinderx/Common/py-portability.h"
+#include "cinderx/module_state.h"
 
-namespace jit {
+namespace cinderx::jit {
 
 bool jitgen_is_coroutine(PyObject* o) {
-  if (Py_TYPE(o) != cinderx::getModuleState()->genType() &&
+  if (Py_TYPE(o) != cinderx::getModuleState()->gen_type &&
       !PyGen_CheckExact(o)) {
     return false;
   }
@@ -25,15 +22,16 @@ bool jitgen_is_coroutine(PyObject* o) {
   return code->co_flags & CO_ITERABLE_COROUTINE;
 }
 
-} // namespace jit
+} // namespace cinderx::jit
 
 extern "C" {
+
 int JitGen_CheckExact(PyObject* o) {
-  return Py_TYPE(o) == cinderx::getModuleState()->genType();
+  return Py_TYPE(o) == cinderx::getModuleState()->gen_type;
 }
 
 int JitCoro_CheckExact(PyObject* o) {
-  return Py_TYPE(o) == cinderx::getModuleState()->coroType();
+  return Py_TYPE(o) == cinderx::getModuleState()->coro_type;
 }
 
 // This is a slightly modified version of _PyCoro_GetAwaitableIter. It
@@ -48,7 +46,7 @@ PyObject* JitCoro_GetAwaitableIter(PyObject* o) {
   PyTypeObject* ot;
 
   if (JitCoro_CheckExact(o) || PyCoro_CheckExact(o) ||
-      jit::jitgen_is_coroutine(o)) {
+      cinderx::jit::jitgen_is_coroutine(o)) {
     /* 'o' is a coroutine. */
     return Py_NewRef(o);
   }
@@ -61,7 +59,7 @@ PyObject* JitCoro_GetAwaitableIter(PyObject* o) {
     PyObject* res = (*getter)(o);
     if (res != nullptr) {
       if (JitCoro_CheckExact(res) || PyCoro_CheckExact(res) ||
-          jit::jitgen_is_coroutine(res)) {
+          cinderx::jit::jitgen_is_coroutine(res)) {
         /* __await__ must return an *iterator*, not
            a coroutine or another awaitable (see PEP 492) */
         if constexpr (PY_VERSION_HEX >= 0x030F0000) {
@@ -95,16 +93,15 @@ PyObject* JitCoro_GetAwaitableIter(PyObject* o) {
     return res;
   }
 
-  PyErr_Format(
-      PyExc_TypeError,
-#if PY_VERSION_HEX >= 0x030E0000
-      "'%.100s' object can't be awaited",
-#else
-      "object %.100s can't be used in 'await' expression",
-#endif
-      ot->tp_name);
+  if constexpr (PY_VERSION_HEX >= 0x030E0000) {
+    PyErr_Format(
+        PyExc_TypeError, "'%.100s' object can't be awaited", ot->tp_name);
+  } else {
+    PyErr_Format(
+        PyExc_TypeError,
+        "object %.100s can't be used in 'await' expression",
+        ot->tp_name);
+  }
   return nullptr;
 }
 }
-
-#endif

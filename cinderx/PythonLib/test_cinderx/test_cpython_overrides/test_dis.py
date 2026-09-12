@@ -2,12 +2,9 @@
 import contextlib
 import dis
 import io
-import os
 import re
 import sys
 import unittest
-
-from cinderx.test_support import passIf
 
 try:
     # pyre-fixme[21]: Could not find name `shadowop` in `cinderx.opcode`.
@@ -16,7 +13,7 @@ except ImportError:
     if sys.version_info >= (3, 14):
         import opcode
 
-        # pyre-ignore[16]: No attribute _specialized_opmap
+        # pyrefly: ignore [missing-attribute]
         shadowop = set(opcode._specialized_opmap)
     else:
         shadowop = set()
@@ -152,8 +149,6 @@ Disassembly of <code object foo at 0x..., file "%s", line %d>:
 
 
 class CinderX_DisTests(unittest.TestCase):
-    _inline_comprehensions = os.getenv("PYTHONINLINECOMPREHENSIONS")
-
     maxDiff = None
 
     def get_disassembly(self, func, lasti=-1, wrapper=True, **kwargs):
@@ -197,44 +192,13 @@ class CinderX_DisTests(unittest.TestCase):
                 # pyre-ignore[16]: no attribute _OPNAME_WIDTH
                 width = dis._OPNAME_WIDTH
                 if sys.version_info >= (3, 12):
-                    # pyre-ignore[16]: unknown hasarg
                     if opcode in dis.hasarg:
-                        # pyre-ignore[16]: no attribute _OPARG_WIDTH
+                        # pyre-fixme[16]: Module `dis` has no attribute `_OPARG_WIDTH`.
                         width += 1 + dis._OPARG_WIDTH
                 else:
                     if opcode < dis.HAVE_ARGUMENT:
-                        # pyre-ignore[16]: no attribute _OPARG_WIDTH
                         width += 1 + dis._OPARG_WIDTH
                 self.assertLessEqual(len(opname), width)
-
-    @passIf(sys.version_info >= (3, 12), "3.12 inline comprehensions are different")
-    def test_bug_1333982(self) -> None:
-        # This one is checking bytecodes generated for an `assert` statement,
-        # so fails if the tests are run with -O.  Skip this test then.
-        if not __debug__:
-            self.skipTest("need asserts, run without -O")
-
-        # CinderX: Conditional skip for inline comprehensions
-        if self._inline_comprehensions:
-            self.do_disassembly_test(
-                bug1333982, dis_bug1333982_with_inline_comprehensions
-            )
-        else:
-            self.do_disassembly_test(bug1333982, dis_bug1333982)
-
-    @passIf(sys.version_info >= (3, 12), "3.12 inline comprehensions are different")
-    def test_disassemble_recursive(self) -> None:
-        def check(expected, **kwargs):
-            dis = self.get_disassembly(_h, **kwargs)
-            dis = self.strip_addresses(dis)
-            self.assertEqual(dis, expected)
-
-        check(dis_nested_0, depth=0)
-        # CinderX: Conditional skip for inline comprehensions
-        if self._inline_comprehensions:
-            check(dis_nested_1_with_inline_comprehensions, depth=1)
-        else:
-            check(dis_nested_1, depth=1)
 
 
 class CinderX_DisWithFileTests(CinderX_DisTests):

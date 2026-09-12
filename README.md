@@ -2,6 +2,8 @@
 
 [![PyPI - Version](https://img.shields.io/pypi/v/cinderx.svg)](https://pypi.org/pypi/cinderx/)
 
+![The CinderX logo, which is a lowercase "cinderx" with the dot in the i as a small flame, and a stylized orange x](assets/png/logo.png)
+
 CinderX is a Python extension that improves the performance of the Python
 runtime.
 
@@ -24,18 +26,37 @@ However these features are not compatible with the stock CPython runtime yet.
 
 ## Requirements
 
-- Python 3.14 or later
-- Linux (x86_64)
+- Python 3.14
 - GCC 13+ or Clang 18+
 
-The extension should build and import on macOS but most features will be
-disabled at runtime.  Windows is not yet supported at all.
+|         |        Linux       |        macOS       |       Windows      |
+| ------- | ------------------ | ------------------ | ------------------ |
+|  x86-64 | :white_check_mark: |         :x:        | :white_check_mark: |
+| aarch64 | :white_check_mark: | :white_check_mark: |         :x:        |
 
 ## Installation
 
 ```bash
 pip install cinderx
 ```
+
+## Using the JIT
+
+The recommended way to start using the JIT is to do:
+
+```python
+import cinderx.jit
+
+cinderx.jit.auto()
+```
+
+This will configure the CinderX extension to automatically compile Python
+functions to machine code.  It will track what functions are called frequently
+and compile the hottest ones automatically.
+
+See [the JIT documentation](https://facebookincubator.github.io/cinderx/jit) for
+more details, or browse the full [CinderX documentation
+site](https://facebookincubator.github.io/cinderx/).
 
 ## CinderX vs Cinder
 
@@ -46,7 +67,7 @@ decided to turn it into a Python extension to improve compatibility with newer
 Python versions.  This extension is now known as CinderX ("the X" is for
 "extension").
 
-For Python versions 3.10 through 3.12, CinderX still depends on patches to
+Historically, for Python versions 3.10 through 3.12, CinderX depended on patches to
 Meta's fork of the Python runtime.  Python 3.14 is the first version of stock
 CPython that CinderX supports.
 

@@ -2,16 +2,21 @@
 
 #include "cinderx/Jit/lir/function.h"
 
-#include "cinderx/Jit/containers.h"
+#include "cinderx/Common/containers.h"
 #include "cinderx/Jit/lir/blocksorter.h"
 
-namespace jit::lir {
+#include <algorithm>
+
+namespace cinderx::jit::lir {
 
 namespace {
 
+using CopiedEdgeMap =
+    UnorderedMap<const BasicBlock*, UnorderedMap<size_t, IncomingEdge>>;
+
 // Helper for copyOperand.
 void copyIndirect(
-    UnorderedMap<LinkedOperand*, int>& instr_refs,
+    UnorderedMap<Operand*, int>& instr_refs,
     Operand* dest_op,
     MemoryIndirect* source_op) {
   auto base = source_op->getBaseRegOperand();
@@ -36,94 +41,84 @@ void copyIndirect(
   dest_op->setMemoryIndirect(
       dest_base,
       dest_index,
-      source_op->getMultipiler(),
+      source_op->getMultiplier(),
       source_op->getOffset());
 
   // add linked operands to instr_refs
   auto memInd = dest_op->getMemoryIndirect();
   if (base->isLinked()) {
-    auto base_linked = static_cast<const LinkedOperand*>(base);
-    auto base_linked_id = base_linked->getLinkedOperand()->instr()->id();
-    instr_refs.emplace(
-        static_cast<LinkedOperand*>(memInd->getBaseRegOperand()),
-        base_linked_id);
+    auto base_linked_id = base->getLinkedOperand()->instr()->id();
+    instr_refs.emplace(memInd->getBaseRegOperand(), base_linked_id);
   }
 
   if (index != nullptr && index->isLinked()) {
-    auto index_linked = static_cast<const LinkedOperand*>(index);
-    auto index_linked_id = index_linked->getLinkedOperand()->instr()->id();
-    instr_refs.emplace(
-        static_cast<LinkedOperand*>(memInd->getIndexRegOperand()),
-        index_linked_id);
+    auto index_linked_id = index->getLinkedOperand()->instr()->id();
+    instr_refs.emplace(memInd->getIndexRegOperand(), index_linked_id);
   }
 }
 
-// Helper for copyOperandBase.
+// Helper for copyOperand.
 // Assume that type and data type are already be set.
 void copyOperand(
     UnorderedMap<int, BasicBlock*>& block_index_map,
-    UnorderedMap<LinkedOperand*, int>& instr_refs,
+    UnorderedMap<Operand*, int>& instr_refs,
     Operand* operand,
     Operand* operand_copy) {
   switch (operand->type()) {
-    case OperandBase::kReg: {
+    case Operand::kReg: {
       operand_copy->setPhyRegister(operand->getPhyRegister());
       operand_copy->setDataType(operand->dataType());
       break;
     }
-    case OperandBase::kStack: {
+    case Operand::kStack: {
       operand_copy->setStackSlot(operand->getStackSlot());
       operand_copy->setDataType(operand->dataType());
       break;
     }
-    case OperandBase::kMem: {
+    case Operand::kMem: {
       operand_copy->setMemoryAddress(operand->getMemoryAddress());
       break;
     }
-    case OperandBase::kImm: {
+    case Operand::kImm: {
       operand_copy->setConstant(operand->getConstant(), operand->dataType());
       break;
     }
-    case OperandBase::kLabel: {
+    case Operand::kLabel: {
       operand_copy->setBasicBlock(
           map_get_strict(block_index_map, operand->getBasicBlock()->id()));
       break;
     }
-    case OperandBase::kInd: {
+    case Operand::kInd: {
       copyIndirect(instr_refs, operand_copy, operand->getMemoryIndirect());
       break;
     }
-    case OperandBase::kNone:
-    case OperandBase::kVreg:
+    case Operand::kNone:
+    case Operand::kVreg:
       // operand_copy should already be type kVreg.
       break;
   }
 }
 
 // Helper for deepCopyBasicBlocks.
-void copyInput(
+std::unique_ptr<Operand> copyInput(
     UnorderedMap<int, BasicBlock*>& block_index_map,
-    UnorderedMap<LinkedOperand*, int>& instr_refs,
-    OperandBase* input,
+    UnorderedMap<Operand*, int>& instr_refs,
+    Operand* input,
     Instruction* instr_copy) {
+  auto input_copy = std::make_unique<Operand>(instr_copy);
   if (input->isLinked()) {
-    LinkedOperand* linked_opnd = instr_copy->allocateLinkedInput(nullptr);
-    instr_refs.emplace(
-        linked_opnd,
-        static_cast<LinkedOperand*>(input)->getDefine()->instr()->id());
+    instr_refs.emplace(input_copy.get(), input->getDefine()->instr()->id());
   } else {
-    // Allocate temporary input and set value_ using copyOperand.
-    Operand* input_copy = instr_copy->allocateImmediateInput(0);
-    copyOperand(
-        block_index_map, instr_refs, static_cast<Operand*>(input), input_copy);
+    copyOperand(block_index_map, instr_refs, input, input_copy.get());
     input_copy->setDataType(input->dataType());
   }
+  return input_copy;
 }
 
 // Helper for deepCopyBasicBlocks.
 void connectLinkedOperands(
     UnorderedMap<int, Instruction*>& output_index_map_,
-    UnorderedMap<LinkedOperand*, int>& instr_refs_) {
+    UnorderedMap<Operand*, int>& instr_refs_) {
   for (auto& [operand, instr_index] : instr_refs_) {
     auto instr = map_get_strict(output_index_map_, instr_index);
     operand->setLinkedInstr(instr);
@@ -138,18 +133,30 @@ void deepCopyBasicBlocks(
     UnorderedMap<int, BasicBlock*>& block_index_map_,
     const hir::Instr* origin) {
   UnorderedMap<int, Instruction*> output_index_map;
-  UnorderedMap<LinkedOperand*, int> instr_refs;
+  UnorderedMap<Operand*, int> instr_refs;
+  CopiedEdgeMap copied_edges;
 
   for (auto bb : src_blocks) {
     BasicBlock* bb_copy = map_get_strict(block_index_map_, bb->id());
-    for (auto succ : bb->successors()) {
-      bb_copy->addSuccessor(map_get_strict(block_index_map_, succ->id()));
+    for (size_t outgoing_slot = 0; outgoing_slot < bb->successors().size();
+         ++outgoing_slot) {
+      BasicBlock* succ = bb->successors()[outgoing_slot];
+      IncomingEdge edge =
+          bb_copy->addSuccessor(map_get_strict(block_index_map_, succ->id()));
+      copied_edges[succ].emplace(
+          bb->outgoingEdge(outgoing_slot).incomingSlot(), edge);
     }
+  }
+
+  for (auto bb : src_blocks) {
+    BasicBlock* bb_copy = map_get_strict(block_index_map_, bb->id());
     for (auto& instr : bb->instructions()) {
       // Copying the instruction will also copy the output
       // (including the output type and data type).
-      bb_copy->instructions().emplace_back(
-          std::make_unique<Instruction>(bb_copy, instr.get(), origin));
+      auto instruction = instr->isPhi()
+          ? Instruction::makePhi(bb_copy, instr.get(), origin)
+          : std::make_unique<Instruction>(bb_copy, instr.get(), origin);
+      bb_copy->instructions().emplace_back(std::move(instruction));
       Instruction* instr_copy = bb_copy->instructions().back().get();
       output_index_map.emplace(instr->id(), instr_copy);
       // Copy output.
@@ -157,9 +164,23 @@ void deepCopyBasicBlocks(
       Operand* output_copy = instr_copy->output();
       copyOperand(block_index_map_, instr_refs, output, output_copy);
       // Copy inputs.
-      for (size_t i = 0, n = instr->getNumInputs(); i < n; ++i) {
-        OperandBase* input = instr->getInput(i);
-        copyInput(block_index_map_, instr_refs, input, instr_copy);
+      if (instr->isPhi()) {
+        for (size_t i = 0; i < instr->numPhiInputs(); ++i) {
+          auto& incoming_edges = map_get_strict(copied_edges, bb);
+          instr_copy->addPhiInput(
+              map_get_strict(incoming_edges, i),
+              copyInput(
+                  block_index_map_,
+                  instr_refs,
+                  instr->phiInput(i),
+                  instr_copy));
+        }
+      } else {
+        for (size_t i = 0, n = instr->getNumInputs(); i < n; ++i) {
+          Operand* input = instr->getInput(i);
+          instr_copy->appendInput(
+              copyInput(block_index_map_, instr_refs, input, instr_copy));
+        }
       }
     }
   }
@@ -187,24 +208,25 @@ Function::CopyResult Function::copyFrom(
   JIT_CHECK(
       prev_bb->successors().size() == 1 && prev_bb->successors()[0] == next_bb,
       "prev_bb should only have 1 successor which should be next_bb.");
+  const size_t next_bb_incoming_slot = prev_bb->outgoingEdge(0).incomingSlot();
 
   UnorderedMap<int, BasicBlock*> block_index_map;
 
   // Initialize the basic blocks.
-  for (auto bb : src_func->basicblocks()) {
+  for (auto bb : src_func->basicBlocks()) {
     BasicBlock* bb_copy = &basic_block_store_.emplace_back(this);
     block_index_map.emplace(bb->id(), bb_copy);
     // Insert basic block before the last block.
     basic_blocks_.emplace(std::prev(basic_blocks_.end()), bb_copy);
   }
 
-  deepCopyBasicBlocks(src_func->basicblocks(), block_index_map, origin);
+  deepCopyBasicBlocks(src_func->basicBlocks(), block_index_map, origin);
 
   int end = basic_blocks_.size() - 1;
   int start = end - src_func->basic_blocks_.size();
   BasicBlock* dest_start = basic_blocks_.at(start);
   BasicBlock* dest_end = basic_blocks_.at(end - 1);
-  prev_bb->setSuccessor(0, dest_start);
+  prev_bb->setSuccessor(0, next_bb_incoming_slot, dest_start);
   JIT_CHECK(
       dest_end->successors().empty(),
       "Last block of function should have no successors.");
@@ -232,11 +254,11 @@ BasicBlock* Function::allocateBasicBlockAfter(BasicBlock* block) {
   return new_block;
 }
 
-const std::vector<BasicBlock*>& Function::basicblocks() const {
+const std::vector<BasicBlock*>& Function::basicBlocks() const {
   return basic_blocks_;
 }
 
-std::vector<BasicBlock*>& Function::basicblocks() {
+std::vector<BasicBlock*>& Function::basicBlocks() {
   return basic_blocks_;
 }
 
@@ -251,13 +273,47 @@ size_t Function::getNumBasicBlocks() const {
   return basic_blocks_.size();
 }
 
+size_t Function::getNumInstrs() const {
+  size_t n = 0;
+  for (const BasicBlock* block : basic_blocks_) {
+    n += block->getNumInstrs();
+  }
+  return n;
+}
+
 void Function::sortBasicBlocks() {
-  BasicBlockSorter sorter(basic_blocks_);
-  basic_blocks_ = sorter.getSortedBlocks();
+  // Remove resume_entry_block from the block list before sorting.
+  // It is a placeholder with no instructions or CFG edges during regalloc and
+  // must not participate in pre-regalloc block ordering or liveness analysis.
+  // PopulateResumeEntryBlock fills it after allocation.
+  //
+  // Resume blocks are reachable from yield blocks via allocator-only CFG
+  // edges. The resume_entry_block has no CFG edges and is re-inserted into the
+  // block list in generateCode() before code emission.
+  if (resume_entry_block_ != nullptr) {
+    std::erase(basic_blocks_, resume_entry_block_);
+  }
+
+  // Use the explicitly tracked exit block. Fall back to back() for
+  // compatibility with tests that don't call setExitBlock().
+  BasicBlock* exit = exit_block_ ? exit_block_ : basic_blocks_.back();
+  BasicBlockSorter sorter(basic_blocks_, exit);
+  auto result = sorter.sort();
+  basic_blocks_ = std::move(result.sorted_blocks);
+
+  if (result.pruned_blocks.empty()) {
+    return;
+  }
+
+  for (BasicBlock* block : basic_blocks_) {
+    block->removePredecessorsIf([&](BasicBlock* predecessor) {
+      return result.pruned_blocks.contains(predecessor);
+    });
+  }
 }
 
 const hir::Function* Function::hirFunc() const {
   return hir_func_;
 }
 
-} // namespace jit::lir
+} // namespace cinderx::jit::lir

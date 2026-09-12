@@ -10,32 +10,33 @@
 #include "cinderx/Jit/hir/printer.h"
 #include "cinderx/RuntimeTests/fixtures.h"
 
+namespace cinderx {
+
+using namespace cinderx::jit;
+
 class CodePatcherTest : public RuntimeTest {
  public:
-  std::unique_ptr<jit::CompiledFunction> generateCode(
-      jit::codegen::NativeGenerator& ngen) {
+  Ref<CompiledFunction> generateCode(codegen::NativeGenerator& ngen) {
     auto entry = ngen.getVectorcallEntry();
     if (entry == nullptr) {
       return nullptr;
     }
     std::span<const std::byte> code = ngen.getCodeBuffer();
-    int stack_size = ngen.GetCompiledFunctionStackSize();
-    int spill_stack_size = ngen.GetCompiledFunctionSpillStackSize();
-    return std::make_unique<jit::CompiledFunction>(
-        code,
-        reinterpret_cast<vectorcallfunc>(entry),
-        stack_size,
-        spill_stack_size,
-        jit::hir::Function::InlineFunctionStats{},
-        jit::hir::OpcodeCounts{},
-        nullptr);
+    int stack_size = ngen.getCompiledFunctionStackSize();
+    int spill_stack_size = ngen.getCompiledFunctionSpillStackSize();
+    CompiledFunctionData data;
+    data.code = code;
+    data.vectorcall_entry = reinterpret_cast<vectorcallfunc>(entry);
+    data.stack_size = stack_size;
+    data.spill_stack_size = spill_stack_size;
+    return CompiledFunction::create(std::move(data), false);
   }
 
  protected:
   asmjit::JitRuntime rt_;
 };
 
-class MyDeoptPatcher : public jit::JumpPatcher {
+class MyDeoptPatcher : public JumpPatcher {
  public:
   explicit MyDeoptPatcher(int id) : id_(id) {}
 
@@ -75,35 +76,44 @@ class MyDeoptPatcher : public jit::JumpPatcher {
 };
 
 TEST_F(CodePatcherTest, CodePatch) {
-  // Intentionally leaving these together to catch accidental stack scribbling.
-  uint16_t x = 123;
-  uint16_t y = 456;
-  uint16_t z = 789;
+  struct PatchpointMemory {
+    uint64_t before;
+    alignas(8) std::array<uint8_t, 8> patchpoint;
+    uint64_t after;
+  };
 
+  const std::array<uint8_t, 8> unpatched{
+      0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
+  const std::array<uint8_t, 8> patched{
+      0xef, 0xbe, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
+
+  constexpr uint64_t kBefore = 0x123456789abcdef0;
+  constexpr uint64_t kAfter = 0xfedcba9876543210;
+  PatchpointMemory memory{kBefore, unpatched, kAfter};
   std::array<uint8_t, 2> bytes{0xef, 0xbe};
 
-  jit::CodePatcher patcher;
+  CodePatcher patcher;
   EXPECT_FALSE(patcher.isLinked());
   EXPECT_FALSE(patcher.isPatched());
 
-  patcher.link(reinterpret_cast<uintptr_t>(&y), bytes);
+  patcher.link(reinterpret_cast<uintptr_t>(memory.patchpoint.data()), bytes);
   EXPECT_TRUE(patcher.isLinked());
   EXPECT_FALSE(patcher.isPatched());
-  EXPECT_EQ(x, 123);
-  EXPECT_EQ(y, 456);
-  EXPECT_EQ(z, 789);
+  EXPECT_EQ(memory.before, kBefore);
+  EXPECT_EQ(memory.patchpoint, unpatched);
+  EXPECT_EQ(memory.after, kAfter);
 
   patcher.patch();
   EXPECT_TRUE(patcher.isPatched());
-  EXPECT_EQ(x, 123);
-  EXPECT_EQ(y, 0xbeef);
-  EXPECT_EQ(z, 789);
+  EXPECT_EQ(memory.before, kBefore);
+  EXPECT_EQ(memory.patchpoint, patched);
+  EXPECT_EQ(memory.after, kAfter);
 
   patcher.unpatch();
   EXPECT_FALSE(patcher.isPatched());
-  EXPECT_EQ(x, 123);
-  EXPECT_EQ(y, 456);
-  EXPECT_EQ(z, 789);
+  EXPECT_EQ(memory.before, kBefore);
+  EXPECT_EQ(memory.patchpoint, unpatched);
+  EXPECT_EQ(memory.after, kAfter);
 }
 
 TEST_F(CodePatcherTest, DeoptPatch) {
@@ -120,25 +130,24 @@ def func():
 
   // Need to find the return instruction.  It should be the last instruction in
   // the last block.
-  jit::hir::BasicBlock* entry = irfunc->cfg.entry_block;
-  std::vector<jit::hir::BasicBlock*> postorder =
-      irfunc->cfg.GetPostOrderTraversal(entry);
+  hir::BasicBlock* entry = irfunc->cfg.entry_block;
+  std::vector<hir::BasicBlock*> postorder =
+      irfunc->cfg.getPostOrderTraversal(entry);
   ASSERT_GT(postorder.size(), 0);
-  jit::hir::Instr* term = postorder[0]->GetTerminator();
+  hir::Instr* term = postorder[0]->getTerminator();
   ASSERT_NE(term, nullptr);
-  ASSERT_TRUE(term->IsReturn()) << *term;
+  ASSERT_TRUE(term->isReturn()) << *term;
 
   // Insert a patchpoint immediately before the return
   auto patcher = irfunc->allocateCodePatcher<MyDeoptPatcher>(123);
-  irfunc->reifier =
-      jit::ThreadedRef<>::create(jit::makeFrameReifier(pyfunc->func_code));
   EXPECT_EQ(patcher->id(), 123);
-  auto patchpoint = jit::hir::DeoptPatchpoint::create(patcher);
-  patchpoint->InsertBefore(*term);
+  auto patchpoint = hir::DeoptPatchpoint::create(patcher);
+  patchpoint->insertBefore(*term);
 
   // Generate machine code and link the patcher
-  jit::Compiler::runPasses(*irfunc, jit::PassConfig::kAllExceptInliner);
-  jit::codegen::NativeGenerator ngen(irfunc.get());
+  Compiler::runPasses(*irfunc, PassConfig::kAllExceptInliner);
+  codegen::NativeGeneratorFactory factory;
+  codegen::NativeGenerator ngen(irfunc.get(), factory);
   auto jitfunc = generateCode(ngen);
   ASSERT_NE(jitfunc, nullptr);
   EXPECT_TRUE(patcher->isLinked());
@@ -147,8 +156,8 @@ def func():
   EXPECT_FALSE(patcher->calledOnPatch());
 
   size_t deopts = 0;
-  auto callback = [&deopts](const jit::DeoptMetadata&) { deopts += 1; };
-  jit::Context* jit_ctx = jit::getContext();
+  auto callback = [&deopts](const DeoptMetadata&) { deopts += 1; };
+  Context* jit_ctx = getContext();
   jit_ctx->setGuardFailureCallback(callback);
 
   // Make sure things work in the nominal case.
@@ -179,3 +188,5 @@ def func():
 
   jit_ctx->clearGuardFailureCallback();
 }
+
+} // namespace cinderx

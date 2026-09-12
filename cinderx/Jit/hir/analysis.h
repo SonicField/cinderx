@@ -4,6 +4,7 @@
 
 #include "cinderx/Jit/bitvector.h"
 #include "cinderx/Jit/dataflow.h"
+#include "cinderx/Jit/hir/dominance.h"
 #include "cinderx/Jit/hir/function.h"
 #include "cinderx/Jit/hir/hir.h"
 
@@ -11,7 +12,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
-namespace jit::hir {
+namespace cinderx::jit::hir {
 
 class BasicBlock;
 class Register;
@@ -32,106 +33,89 @@ bool operandsMustMatch(OperandType op_type);
 // Returns true if the type satisfies the passed in OperandType
 bool registerTypeMatches(Type op_type, OperandType expected_type);
 
+// Collect the registers that some instruction in `func` consumes as data, which
+// is every use except a deopt frame-state reference or a UseType assertion.
+//
+// A register missing from the result is only kept around so a deopt can restore
+// it; nothing on the fast path reads it.  That is what lets a pass rewrite
+// frame state to hold a cheaper equivalent of the value, such as replacing a
+// boxed float with its unboxed source.
+RegisterSet collectDataUses(const Function& func);
+
 // Base class for dataflow analyses that compute facts about registers in the
 // HIR.
 //
-// An analysis will typically inherit from either ForwardDataflowAnalysis or
-// BackwardDataflowAnalysis and provide implementations of `ComputeGenKill`,
-// `ComputeNewIn`, and `ComputeNewOut` that implement the analysis.
-//
-// This is potentially a good candidate for CRTP if the performance overhead of
-// the virtual functions becomes an issue.
-class DataflowAnalysis {
+// A subclass supplies gen/kill sets per block via computeGenKill() and picks a
+// direction and meet operator; the shared solver in DataFlowAnalyzer does the
+// rest.
+class RegisterAnalysis {
  public:
-  explicit DataflowAnalysis(const Function& irfunc)
-      : irfunc_(irfunc),
-        num_bits_(0),
-        df_analyzer_(),
-        df_entry_(),
-        df_exit_(),
-        df_blocks_() {}
+  virtual ~RegisterAnalysis() = default;
 
-  virtual ~DataflowAnalysis() {}
+  // Build the dataflow graph from the CFG and solve to a fixpoint. Must be
+  // called before querying any results.
+  void run();
 
-  virtual void Run() = 0;
-
-  RegisterSet GetIn(const BasicBlock* block);
-  RegisterSet GetOut(const BasicBlock* block);
+  RegisterSet getIn(const BasicBlock* block) const;
+  RegisterSet getOut(const BasicBlock* block) const;
 
  protected:
-  virtual void ComputeGenKill(
+  RegisterAnalysis(
+      const Function& irfunc,
+      jit::optimizer::Direction dir,
+      jit::optimizer::Meet meet)
+      : irfunc_{irfunc}, dir_{dir}, meet_{meet} {}
+
+  virtual void computeGenKill(
       const BasicBlock* block,
       RegisterSet& gen,
       RegisterSet& kill) = 0;
-  virtual jit::util::BitVector ComputeNewIn(
-      const jit::optimizer::DataFlowBlock* block) = 0;
-  virtual jit::util::BitVector ComputeNewOut(
-      const jit::optimizer::DataFlowBlock* block) = 0;
 
-  // Should be overridden by subclasses to set an appropriate uninitialized in-
-  // or out-state on the given block, if it should be something other than all
-  // zeros.
-  virtual void setUninitialized(jit::optimizer::DataFlowBlock* block) = 0;
+  virtual std::string name() const = 0;
 
-  virtual void Initialize();
-  void AddBasicBlock(const BasicBlock* cfg_block);
-
-  virtual std::string name() = 0;
-
-  void dump();
+  bool inBit(const BasicBlock* block, Register* reg) const;
+  bool outBit(const BasicBlock* block, Register* reg) const;
 
   const Function& irfunc_;
-  size_t num_bits_;
-  jit::optimizer::DataFlowAnalyzer<Register*> df_analyzer_;
-  jit::optimizer::DataFlowBlock df_entry_;
-  jit::optimizer::DataFlowBlock df_exit_;
-  std::unordered_map<const BasicBlock*, jit::optimizer::DataFlowBlock>
-      df_blocks_;
+  jit::optimizer::DataFlowAnalyzer<Register*> analyzer_;
+  std::unordered_map<const BasicBlock*, jit::optimizer::DataFlowBlock*> blocks_;
+
+ private:
+  void dump() const;
+
+  jit::optimizer::Direction dir_;
+  jit::optimizer::Meet meet_;
 };
 
-class BackwardDataflowAnalysis : public DataflowAnalysis {
- public:
-  explicit BackwardDataflowAnalysis(const Function& irfunc)
-      : DataflowAnalysis(irfunc) {}
-
-  void Run() override;
-};
-
-class ForwardDataflowAnalysis : public DataflowAnalysis {
- public:
-  explicit ForwardDataflowAnalysis(const Function& irfunc)
-      : DataflowAnalysis(irfunc) {}
-
-  void Run() override;
-};
-
-class LivenessAnalysis : public BackwardDataflowAnalysis {
+class LivenessAnalysis : public RegisterAnalysis {
  public:
   explicit LivenessAnalysis(const Function& irfunc)
-      : BackwardDataflowAnalysis(irfunc) {}
+      : RegisterAnalysis(
+            irfunc,
+            jit::optimizer::Direction::Backward,
+            jit::optimizer::Meet::Union) {}
 
-  bool IsLiveIn(const BasicBlock* cfg_block, Register* reg);
-  bool IsLiveOut(const BasicBlock* cfg_block, Register* reg);
+  bool isLiveIn(const BasicBlock* block, Register* reg) const {
+    return inBit(block, reg);
+  }
+  bool isLiveOut(const BasicBlock* block, Register* reg) const {
+    return outBit(block, reg);
+  }
 
   using LastUses =
       std::unordered_map<const Instr*, std::unordered_set<Register*>>;
 
   // Compute and return a map indicating which values die after which
-  // instructions. Must be called after Run().
-  LastUses GetLastUses();
+  // instructions. Must be called after run().
+  LastUses getLastUses();
 
  protected:
-  void ComputeGenKill(
+  void computeGenKill(
       const BasicBlock* block,
       RegisterSet& gen,
       RegisterSet& kill) final;
-  jit::util::BitVector ComputeNewIn(
-      const jit::optimizer::DataFlowBlock* block) final;
-  jit::util::BitVector ComputeNewOut(
-      const jit::optimizer::DataFlowBlock* block) final;
-  void setUninitialized(jit::optimizer::DataFlowBlock* block) final;
 
-  std::string name() final {
+  std::string name() const final {
     return "LivenessAnalysis";
   }
 };
@@ -171,25 +155,24 @@ class LivenessAnalysis : public BackwardDataflowAnalysis {
 // In both cases:
 //   Out(B) = Gen(B) U (In(B) - Kill(B))
 //
-class AssignmentAnalysis : public ForwardDataflowAnalysis {
+class AssignmentAnalysis : public RegisterAnalysis {
  public:
   AssignmentAnalysis(const Function& irfunc, bool is_definite);
 
-  bool IsAssignedIn(const BasicBlock* cfg_block, Register* reg);
-  bool IsAssignedOut(const BasicBlock* cfg_block, Register* reg);
+  bool isAssignedIn(const BasicBlock* block, Register* reg) const {
+    return inBit(block, reg);
+  }
+  bool isAssignedOut(const BasicBlock* block, Register* reg) const {
+    return outBit(block, reg);
+  }
 
  protected:
-  void ComputeGenKill(
+  void computeGenKill(
       const BasicBlock* block,
       RegisterSet& gen,
       RegisterSet& kill) final;
-  jit::util::BitVector ComputeNewIn(
-      const jit::optimizer::DataFlowBlock* block) final;
-  jit::util::BitVector ComputeNewOut(
-      const jit::optimizer::DataFlowBlock* block) final;
-  void setUninitialized(jit::optimizer::DataFlowBlock* block) final;
 
-  std::string name() final {
+  std::string name() const final {
     return fmt::format(
         "{}AssignmentAnalysis", is_definite_ ? "Definite" : "Maybe");
   }
@@ -197,33 +180,6 @@ class AssignmentAnalysis : public ForwardDataflowAnalysis {
   RegisterSet args_;
 
   bool is_definite_;
-};
-
-// Find the immediate dominator of each block, stored in a mapping from block
-// ids to blocks. The mapping returns nullptr if the block has no dominator.
-// This is the case for the entry block and any blocks not reachable from the
-// entry block.
-//
-// This implementation is based off of HHVM's implementation, which itself uses
-// Cooper, Harvey, and Kennedy's "A Simple, Fast Dominance Algorithm".
-class DominatorAnalysis {
- public:
-  explicit DominatorAnalysis(const Function& irfunc);
-
-  const BasicBlock* immediateDominator(const BasicBlock* block) {
-    JIT_DCHECK(block != nullptr, "Block cannot be null");
-    return idoms_[block->id];
-  }
-
-  const std::unordered_set<const BasicBlock*>& getBlocksDominatedBy(
-      const BasicBlock* block) {
-    JIT_DCHECK(block != nullptr, "Block cannot be null");
-    return dom_sets_[block->id];
-  }
-
- private:
-  std::unordered_map<int, const BasicBlock*> idoms_;
-  std::unordered_map<int, std::unordered_set<const BasicBlock*>> dom_sets_;
 };
 
 // Stores type information about registers that doesn't get stored in the
@@ -250,7 +206,7 @@ class RegisterTypeHints {
   // flow-sensitive way
   std::unordered_map<Register*, std::unordered_map<int, const Instr*>>
       dom_hint_;
-  DominatorAnalysis doms_;
+  DominatorTree doms_;
 };
 
-} // namespace jit::hir
+} // namespace cinderx::jit::hir

@@ -8,7 +8,7 @@
 #include <algorithm>
 #include <deque>
 
-namespace jit {
+namespace cinderx::jit {
 
 CodeObjLoc DebugInfo::getCodeObjLoc(const LocNode& node) const {
   return CodeObjLoc(code_objs_.at(node.code_obj_id), node.bc_off);
@@ -98,7 +98,7 @@ ActivationMap buildActivationMap(const jit::hir::Function& func) {
 
     processed.insert(item.block);
 
-    for (const auto& edge : item.block->out_edges()) {
+    for (const auto& edge : item.block->outEdges()) {
       workq.emplace_back(edge->to(), item.activation);
     }
   }
@@ -173,4 +173,4 @@ uint16_t DebugInfo::getCallerID(const jit::hir::FrameState* caller) {
   return inlined_calls_.size() - 1;
 }
 
-} // namespace jit
+} // namespace cinderx::jit

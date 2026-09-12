@@ -2,7 +2,6 @@
 
 # pyre-strict
 import ast
-import sys
 import unittest
 from ast import FunctionDef
 from textwrap import dedent
@@ -16,11 +15,8 @@ from cinderx.compiler.symbols import (
     TypeParamScope,
     TypeVarBoundScope,
 )
-from cinderx.test_support import passIf
 
 from .common import CompilerTest
-
-PRE_312: bool = sys.version_info < (3, 12)
 
 
 class SymbolVisitorTests(CompilerTest):
@@ -59,6 +55,18 @@ class SymbolVisitorTests(CompilerTest):
             gen = module.body[0].value
             self.assertIn("foo", visitor.scopes[gen].defs)
 
+    def test_class_comprehension_nested_class_closure(self) -> None:
+        # A class-body comprehension whose nested function captures __class__
+        # must keep __class__ free so the class allocates the closure cell;
+        # otherwise LOAD_CLOSURE __class__ gets an out-of-range offset.
+        d = self.run_code(
+            """
+            class _C:
+                res = [lambda: __class__ for _ in [1]]
+            """
+        )
+        self.assertIs(d["_C"].res[0](), d["_C"])
+
     def test_class_kwarg_in_nested_scope(self) -> None:
         code = """def f():
             def g():
@@ -90,7 +98,6 @@ class SymbolVisitorTests(CompilerTest):
         else:
             self.fail("scope not found")
 
-    @passIf(PRE_312, "Python 3.12+ only")
     def test_func_type_param(self) -> None:
         code = """def f[T](): pass"""
         module = ast.parse(code)
@@ -112,7 +119,6 @@ class SymbolVisitorTests(CompilerTest):
         else:
             self.fail("scope not found")
 
-    @passIf(PRE_312, "Python 3.12+ only")
     def test_func_type_param_collision(self) -> None:
         code = """def f[T](T): return T"""
         module = ast.parse(code)
@@ -135,7 +141,6 @@ class SymbolVisitorTests(CompilerTest):
         else:
             self.fail("scope not found")
 
-    @passIf(PRE_312, "Python 3.12+ only")
     def test_func_dup_type_var(self) -> None:
         code = """def f[T, T](): pass"""
         module = ast.parse(code)
@@ -143,7 +148,6 @@ class SymbolVisitorTests(CompilerTest):
         with self.assertRaisesRegex(SyntaxError, "duplicated type parameter: 'T'"):
             visitor.visit(module)
 
-    @passIf(PRE_312, "Python 3.12+ only")
     def test_func_type_param_bound(self) -> None:
         code = """def f[T: str](): pass"""
         module = ast.parse(code)
@@ -172,7 +176,6 @@ class SymbolVisitorTests(CompilerTest):
         else:
             self.fail("scope not found")
 
-    @passIf(PRE_312, "Python 3.12+ only")
     def test_func_type_var_tuple(self) -> None:
         code = """def f[*T](): pass"""
         module = ast.parse(code)
@@ -194,7 +197,6 @@ class SymbolVisitorTests(CompilerTest):
         else:
             self.fail("scope not found")
 
-    @passIf(PRE_312, "Python 3.12+ only")
     def test_func_param_spec(self) -> None:
         code = """def f[**T](): pass"""
         module = ast.parse(code)
@@ -216,7 +218,6 @@ class SymbolVisitorTests(CompilerTest):
         else:
             self.fail("scope not found")
 
-    @passIf(PRE_312, "Python 3.12+ only")
     def test_class_type_param(self) -> None:
         code = """class C[T]: pass"""
         module = ast.parse(code)
@@ -237,12 +238,13 @@ class SymbolVisitorTests(CompilerTest):
         else:
             self.fail("scope not found")
 
-    @passIf(PRE_312, "Python 3.12+ only")
     def test_type_param_mangled(self) -> None:
-        code = dedent("""
+        code = dedent(
+            """
         class C:
             def f[__T](): pass
-        """)
+        """
+        )
         module = ast.parse(code)
         visitor = SymbolVisitor(0)
         visitor.visit(module)
@@ -253,12 +255,13 @@ class SymbolVisitorTests(CompilerTest):
         else:
             self.fail("scope not found")
 
-    @passIf(PRE_312, "Python 3.12+ only")
     def test_use_type_param(self) -> None:
-        code = dedent("""
+        code = dedent(
+            """
         class C[T]:
             def f(): return T
-        """)
+        """
+        )
         module = ast.parse(code)
         visitor = SymbolVisitor(0)
         visitor.visit(module)
@@ -280,13 +283,14 @@ class SymbolVisitorTests(CompilerTest):
         else:
             self.fail("scope not found")
 
-    @passIf(PRE_312, "Python 3.12+ only")
     def test_refer_class_scope(self) -> None:
-        code = dedent("""
+        code = dedent(
+            """
         class C:
             class Nested: pass
             def f[T](self, x: Nested): pass
-        """)
+        """
+        )
         module = ast.parse(code)
         visitor = SymbolVisitor(0)
         visitor.visit(module)
@@ -306,11 +310,12 @@ class SymbolVisitorTests(CompilerTest):
         else:
             self.fail("scope not found")
 
-    @passIf(PRE_312, "Python 3.12+ only")
     def test_type_alias_global(self) -> None:
-        code = dedent("""
+        code = dedent(
+            """
         type T = int
-        """)
+        """
+        )
         module = ast.parse(code)
         visitor = SymbolVisitor(0)
         visitor.visit(module)
@@ -321,12 +326,13 @@ class SymbolVisitorTests(CompilerTest):
         else:
             self.fail("scope not found")
 
-    @passIf(PRE_312, "Python 3.12+ only")
     def test_type_alias_class(self) -> None:
-        code = dedent("""
+        code = dedent(
+            """
         class C:
             type T = int
-        """)
+        """
+        )
         module = ast.parse(code)
         visitor = SymbolVisitor(0)
         visitor.visit(module)
@@ -342,12 +348,13 @@ class SymbolVisitorTests(CompilerTest):
         else:
             self.fail("scope not found")
 
-    @passIf(PRE_312, "Python 3.12+ only")
     def test_type_alias_generic_class(self) -> None:
-        code = dedent("""
+        code = dedent(
+            """
         class C[X]:
             type T[X] = int
-        """)
+        """
+        )
         module = ast.parse(code)
         visitor = SymbolVisitor(0)
         visitor.visit(module)

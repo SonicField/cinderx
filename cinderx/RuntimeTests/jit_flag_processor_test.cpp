@@ -7,13 +7,15 @@
 
 #include <list>
 
+namespace cinderx {
+
 // tests to ensure FlagProcessor is correctly processing command
 // line and environment variable parameters and producing a
 // pretty help message for JIT associated X parameters
 
 using JITFlagProcessorTest = RuntimeTest;
 
-using namespace jit;
+using namespace cinderx::jit;
 using namespace std;
 
 TEST_F(JITFlagProcessorTest, EmptyHelpMessage) {
@@ -267,3 +269,5 @@ TEST_F(JITFlagProcessorTest, FlagWithNoEnvVar) {
       [&the_variable]() { the_variable = 0; },
       [&the_variable]() { ASSERT_EQ(the_variable, 1); });
 }
+
+} // namespace cinderx

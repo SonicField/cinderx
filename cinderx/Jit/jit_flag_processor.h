@@ -4,13 +4,15 @@
 
 #include "cinderx/python.h"
 
+#include "cinderx/Common/ref.h"
+
 #include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
 
-namespace jit {
+namespace cinderx::jit {
 
 struct Option {
   // required
@@ -61,8 +63,8 @@ struct Option {
     return *this;
   }
 
-  std::string getFormatted_cmdline_flag();
-  std::string getFormatted_environment_variable();
+  std::string getFormattedCmdlineFlag();
+  std::string getFormattedEnvironmentVariable();
 
  private:
   std::string getFormatted(std::string);
@@ -130,6 +132,14 @@ struct FlagProcessor {
   // Return true if one or more flags have been registered
   bool hasOptions();
 
+  // Try to resolve an option via its command line flag.  Return true on
+  // success.
+  bool handleCliFlag(const Option& option, BorrowedRef<> cmdline_args);
+
+  // Try to resolve an option via its environment variable.  Return true on
+  // success.
+  bool handleEnvVar(const Option& option);
+
   // Return true if the option has been added and false otherwise.
   bool canHandle(std::string_view option_name);
 
@@ -139,4 +149,5 @@ struct FlagProcessor {
  private:
   std::vector<std::unique_ptr<Option>> options_;
 };
-} // namespace jit
+
+} // namespace cinderx::jit

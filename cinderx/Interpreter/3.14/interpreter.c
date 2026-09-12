@@ -32,13 +32,42 @@
 #define DK_KIND(dk) (dk->dk_kind)
 #endif
 
+#undef EXTRA_CASES
+
+#define EXTRA_CASES \
+    case 122: \
+    case 123: \
+    case 124: \
+    case 125: \
+    case 127: \
+    case 212: \
+    case 213: \
+    case 214: \
+    case 215: \
+    case 216: \
+    case 217: \
+    case 218: \
+    case 219: \
+    case 220: \
+    case 221: \
+    case 222: \
+    case 223: \
+    case 224: \
+    case 225: \
+    case 226: \
+    case 227: \
+    case 228: \
+    case 229: \
+    case 230: \
+    case 231: \
+    case 232: \
+    case 233: \
+        ;
+
 #ifdef ENABLE_INTERPRETER_LOOP
 
-bool Ci_DelayAdaptiveCode = false;
-uint64_t Ci_AdaptiveThreshold = 80;
-
 bool is_adaptive_enabled(CodeExtra *extra) {
-    return !Ci_DelayAdaptiveCode || Ci_code_extra_get_calls(extra) > Ci_AdaptiveThreshold;
+    return !Ci_GetDelayAdaptiveCode() || Ci_code_extra_get_calls(extra) > Ci_GetAdaptiveThreshold();
 }
 
 #endif

@@ -2,11 +2,11 @@
 
 #include "cinderx/Jit/codegen/arch/aarch64.h"
 
-#include "cinderx/Jit/codegen/arch/detection.h"
+#include "cinderx/Common/define.h"
 
 #ifdef CINDER_AARCH64
 
-namespace jit::codegen {
+namespace cinderx::jit::codegen {
 
 PhyLocation PhyLocation::parse(std::string_view name) {
 #define FIND_GP_REG(V64, V32)           \
@@ -33,7 +33,7 @@ PhyLocation PhyLocation::parse(std::string_view name) {
 }
 
 std::string PhyLocation::toString() const {
-  if (is_memory()) {
+  if (isMemory()) {
     return fmt::format("[X29({})]", loc);
   } else if (bitSize == 32 || bitSize == 16 || bitSize == 8) {
     return std::string{name32(static_cast<RegId>(loc))};
@@ -41,6 +41,6 @@ std::string PhyLocation::toString() const {
   return std::string{name(static_cast<RegId>(loc))};
 }
 
-} // namespace jit::codegen
+} // namespace cinderx::jit::codegen
 
 #endif

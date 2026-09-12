@@ -7,7 +7,11 @@
 
 #include <sstream>
 
-using namespace jit;
+namespace cinderx {
+
+#ifdef ENABLE_ELF_READER
+
+using namespace cinderx::jit;
 
 using ElfTest = RuntimeTest;
 
@@ -70,10 +74,10 @@ def func(x):
 
   BorrowedRef<PyFunctionObject> func{func_obj};
   BorrowedRef<PyCodeObject> code{func->func_code};
-  std::optional<CompiledFunctionData> compiled_data = Compiler().Compile(func);
+  std::optional<CompiledFunctionData> compiled_data = Compiler().compile(func);
   ASSERT_TRUE(compiled_data.has_value());
   auto compiled_func =
-      std::make_unique<CompiledFunction>(std::move(*compiled_data));
+      CompiledFunction::create(std::move(*compiled_data), false);
 
   std::stringstream ss;
 
@@ -109,3 +113,7 @@ def func(x):
   ASSERT_LT(note_data.normal_entry_offset, 10000);
   ASSERT_EQ(note_data.static_entry_offset, std::nullopt);
 }
+
+#endif
+
+} // namespace cinderx

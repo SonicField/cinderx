@@ -14,7 +14,16 @@
 #include "cinderx/StaticPython/strictmoduleobject.h"
 #include "cinderx/module_state.h"
 
+#include <iostream>
+#include <string>
+
+namespace cinderx {
+
 #define JIT_TEST_MOD_NAME "jittestmodule"
+
+void setPythonProgramName(std::string name);
+
+void initializePython();
 
 #define THROW(...)                                      \
   {                                                     \
@@ -23,6 +32,18 @@
     }                                                   \
     throw std::runtime_error{fmt::format(__VA_ARGS__)}; \
   }
+
+// Use SKIP(MESSAGE) instead of GTEST_SKIP() << MESSAGE, it's friendier to
+// internal test runs.
+#ifndef TEST_SKIP_IS_SUCCESS
+#define SKIP(MESSAGE) GTEST_SKIP() << (MESSAGE)
+#else
+#define SKIP(MESSAGE)       \
+  {                         \
+    std::cerr << (MESSAGE); \
+    return;                 \
+  }
+#endif
 
 class RuntimeTest : public ::testing::Test {
  public:
@@ -39,9 +60,7 @@ class RuntimeTest : public ::testing::Test {
 
   RuntimeTest(Flags flags = kDefaultFlags) : flags_{flags} {
     // TASK(T190613453): Python compiler doesn't work with 3.12 yet.
-    if constexpr (PY_VERSION_HEX >= 0x030C0000) {
-      flags_ = static_cast<Flags>(flags_ & ~kCinderCompiler);
-    }
+    flags_ = static_cast<Flags>(flags_ & ~kCinderCompiler);
 
     JIT_CHECK(
         !isCinderCompiler() || !isStaticCompiler(),
@@ -57,8 +76,12 @@ class RuntimeTest : public ::testing::Test {
       jit::getMutableConfig().force_init = true;
     }
 
-    Py_Initialize();
+    initializePython();
     ASSERT_TRUE(Py_IsInitialized());
+
+    auto cinderx_mod = Ref<>::steal(PyImport_ImportModule("cinderx"));
+    JIT_CHECK(
+        cinderx_mod != nullptr, "Could not import cinderx during test setup");
 
     auto mod_state = cinderx::getModuleState();
     ASSERT_NE(mod_state, nullptr) << "Could not load the CinderX module state, "
@@ -68,7 +91,7 @@ class RuntimeTest : public ::testing::Test {
     // initialized is trying to use the code allocator and crashing, so check
     // that here.
     if (jit) {
-      auto code_allocator = mod_state->codeAllocator();
+      auto code_allocator = mod_state->code_allocator.get();
       ASSERT_NE(code_allocator, nullptr)
           << "Configured to use the JIT but it wasn't initialized";
     }
@@ -340,3 +363,5 @@ class HIRTest : public RuntimeTest {
   std::string expected_hir_;
   bool src_is_hir_;
 };
+
+} // namespace cinderx

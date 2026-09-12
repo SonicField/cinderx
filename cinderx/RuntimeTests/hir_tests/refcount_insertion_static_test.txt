@@ -12,28 +12,17 @@ class Test:
         self.x: int32 = 0
 
 test = Test.__init__
---- Expected 3.10 ---
-fun jittestmodule:Test.__init__ {
-  bb 0 {
-    v5:User[Test] = LoadArg<0; "self", User[Test]>
-    v6:CInt32[0] = LoadConst<CInt32[0]>
-    v8:Nullptr = LoadConst<Nullptr>
-    StoreField<x@16> v5 v6 v8
-    v10:NoneType = LoadConst<NoneType>
-    Incref v10
-    Return<NoneType> v10
-  }
-}
 --- Expected 3.12 ---
 fun jittestmodule:Test.__init__ {
   bb 0 {
     v8:User[Test] = LoadArg<0; "self", User[Test]>
+    LoadFrame
     v10:CInt32 = LoadEvalBreaker
     CondBranch<2, 1> v10
   }
 
   bb 2 (preds 0) {
-    v11:CInt32 = RunPeriodicTasks {
+    v16:CInt32 = RunPeriodicTasks {
       LiveValues<1> b:v8
       FrameState {
         CurInstrOffset 0
@@ -44,23 +33,24 @@ fun jittestmodule:Test.__init__ {
   }
 
   bb 1 (preds 0, 2) {
-    v13:CInt32[0] = LoadConst<CInt32[0]>
-    v14:Nullptr = LoadConst<Nullptr>
-    StoreField<x@16> v8 v13 v14
-    v16:ImmortalNoneType = LoadConst<ImmortalNoneType>
-    Return<ImmortalNoneType> v16
+    v11:CInt32[0] = LoadConst<CInt32[0]>
+    v12:Nullptr = LoadConst<Nullptr>
+    StoreField<x@16> v8 v11 v12
+    v14:ImmortalNoneType = LoadConst<ImmortalNoneType>
+    Return<ImmortalNoneType> v14
   }
 }
 --- Expected 3.14 ---
 fun jittestmodule:Test.__init__ {
   bb 0 {
     v8:User[Test] = LoadArg<0; "self", User[Test]>
+    LoadFrame
     v10:CInt64 = LoadEvalBreaker
     CondBranch<2, 1> v10
   }
 
   bb 2 (preds 0) {
-    v11:CInt32 = RunPeriodicTasks {
+    v16:CInt32 = RunPeriodicTasks {
       LiveValues<1> b:v8
       FrameState {
         CurInstrOffset 0
@@ -71,23 +61,24 @@ fun jittestmodule:Test.__init__ {
   }
 
   bb 1 (preds 0, 2) {
-    v13:CInt32[0] = LoadConst<CInt32[0]>
-    v14:Nullptr = LoadConst<Nullptr>
-    StoreField<x@16> v8 v13 v14
-    v16:ImmortalNoneType = LoadConst<ImmortalNoneType>
-    Return<NoneType> v16
+    v11:CInt32[0] = LoadConst<CInt32[0]>
+    v12:Nullptr = LoadConst<Nullptr>
+    StoreField<x@16> v8 v11 v12
+    v14:ImmortalNoneType = LoadConst<ImmortalNoneType>
+    Return<NoneType> v14
   }
 }
 --- Expected 3.15 ---
 fun jittestmodule:Test.__init__ {
   bb 0 {
     v8:User[Test] = LoadArg<0; "self", User[Test]>
+    LoadFrame
     v10:CInt64 = LoadEvalBreaker
     CondBranch<2, 1> v10
   }
 
   bb 2 (preds 0) {
-    v11:CInt32 = RunPeriodicTasks {
+    v16:CInt32 = RunPeriodicTasks {
       LiveValues<1> b:v8
       FrameState {
         CurInstrOffset 0
@@ -98,9 +89,67 @@ fun jittestmodule:Test.__init__ {
   }
 
   bb 1 (preds 0, 2) {
+    v11:CInt32[0] = LoadConst<CInt32[0]>
+    v12:Nullptr = LoadConst<Nullptr>
+    StoreField<x@16> v8 v11 v12
+    v14:ImmortalNoneType = LoadConst<ImmortalNoneType>
+    Return<NoneType> v14
+  }
+}
+--- Expected 3.16 ---
+fun jittestmodule:Test.__init__ {
+  bb 0 {
+    v8:User[Test] = LoadArg<0; "self", User[Test]>
+    LoadFrame
+    v10:CInt64 = LoadEvalBreaker
+    CondBranch<2, 1> v10
+  }
+
+  bb 2 (preds 0) {
+    v16:CInt32 = RunPeriodicTasks {
+      LiveValues<1> b:v8
+      FrameState {
+        CurInstrOffset 0
+        Locals<1> v8
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
+    v11:CInt32[0] = LoadConst<CInt32[0]>
+    v12:Nullptr = LoadConst<Nullptr>
+    StoreField<x@16> v8 v11 v12
+    v14:ImmortalNoneType = LoadConst<ImmortalNoneType>
+    Return<NoneType> v14
+  }
+}
+--- Expected 3.14t ---
+fun jittestmodule:Test.__init__ {
+  bb 0 {
+    v9:User[Test] = LoadArg<0; "self", User[Test]>
+    LoadFrame
+    v11:User[Test] = TagIfDeferred v9
+    AtQuiescentState
+    v12:CInt64 = LoadEvalBreaker
+    CondBranch<2, 1> v12
+  }
+
+  bb 2 (preds 0) {
+    v18:CInt32 = RunPeriodicTasks {
+      LiveValues<1> b:v11
+      FrameState {
+        CurInstrOffset 0
+        Locals<1> v11
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
     v13:CInt32[0] = LoadConst<CInt32[0]>
     v14:Nullptr = LoadConst<Nullptr>
-    StoreField<x@16> v8 v13 v14
+    StoreField<x@32> v11 v13 v14
     v16:ImmortalNoneType = LoadConst<ImmortalNoneType>
     Return<NoneType> v16
   }
@@ -113,29 +162,17 @@ class Test:
         self.x = 0
 
 test = Test.__init__
---- Expected 3.10 ---
-fun jittestmodule:Test.__init__ {
-  bb 0 {
-    v4:User[Test] = LoadArg<0; "self", User[Test]>
-    v5:ImmortalLongExact[0] = LoadConst<ImmortalLongExact[0]>
-    v7:OptObject = LoadField<x@16, OptObject, owned> v4
-    StoreField<x@16> v4 v5 v7
-    XDecref v7
-    v8:NoneType = LoadConst<NoneType>
-    Incref v8
-    Return<NoneType> v8
-  }
-}
 --- Expected 3.12 ---
 fun jittestmodule:Test.__init__ {
   bb 0 {
     v7:User[Test] = LoadArg<0; "self", User[Test]>
+    LoadFrame
     v9:CInt32 = LoadEvalBreaker
     CondBranch<2, 1> v9
   }
 
   bb 2 (preds 0) {
-    v10:CInt32 = RunPeriodicTasks {
+    v14:CInt32 = RunPeriodicTasks {
       LiveValues<1> b:v7
       FrameState {
         CurInstrOffset 0
@@ -146,24 +183,25 @@ fun jittestmodule:Test.__init__ {
   }
 
   bb 1 (preds 0, 2) {
-    v12:ImmortalLongExact[0] = LoadConst<ImmortalLongExact[0]>
-    v13:OptObject = LoadField<x@16, OptObject, owned> v7
-    StoreField<x@16> v7 v12 v13
-    XDecref v13
-    v14:ImmortalNoneType = LoadConst<ImmortalNoneType>
-    Return<ImmortalNoneType> v14
+    v10:ImmortalLongExact[0] = LoadConst<ImmortalLongExact[0]>
+    v11:OptObject = LoadField<x@16, OptObject, owned> v7
+    StoreField<x@16> v7 v10 v11
+    XDecref v11
+    v12:ImmortalNoneType = LoadConst<ImmortalNoneType>
+    Return<ImmortalNoneType> v12
   }
 }
 --- Expected 3.14 ---
 fun jittestmodule:Test.__init__ {
   bb 0 {
     v7:User[Test] = LoadArg<0; "self", User[Test]>
+    LoadFrame
     v9:CInt64 = LoadEvalBreaker
     CondBranch<2, 1> v9
   }
 
   bb 2 (preds 0) {
-    v10:CInt32 = RunPeriodicTasks {
+    v14:CInt32 = RunPeriodicTasks {
       LiveValues<1> b:v7
       FrameState {
         CurInstrOffset 0
@@ -174,24 +212,25 @@ fun jittestmodule:Test.__init__ {
   }
 
   bb 1 (preds 0, 2) {
-    v12:ImmortalLongExact[0] = LoadConst<ImmortalLongExact[0]>
-    v13:OptObject = LoadField<x@16, OptObject, owned> v7
-    StoreField<x@16> v7 v12 v13
-    XDecref v13
-    v14:ImmortalNoneType = LoadConst<ImmortalNoneType>
-    Return<NoneType> v14
+    v10:ImmortalLongExact[0] = LoadConst<ImmortalLongExact[0]>
+    v11:OptObject = LoadField<x@16, OptObject, owned> v7
+    StoreField<x@16> v7 v10 v11
+    XDecref v11
+    v12:ImmortalNoneType = LoadConst<ImmortalNoneType>
+    Return<NoneType> v12
   }
 }
 --- Expected 3.15 ---
 fun jittestmodule:Test.__init__ {
   bb 0 {
     v7:User[Test] = LoadArg<0; "self", User[Test]>
+    LoadFrame
     v9:CInt64 = LoadEvalBreaker
     CondBranch<2, 1> v9
   }
 
   bb 2 (preds 0) {
-    v10:CInt32 = RunPeriodicTasks {
+    v14:CInt32 = RunPeriodicTasks {
       LiveValues<1> b:v7
       FrameState {
         CurInstrOffset 0
@@ -202,9 +241,69 @@ fun jittestmodule:Test.__init__ {
   }
 
   bb 1 (preds 0, 2) {
+    v10:ImmortalLongExact[0] = LoadConst<ImmortalLongExact[0]>
+    v11:OptObject = LoadField<x@16, OptObject, owned> v7
+    StoreField<x@16> v7 v10 v11
+    XDecref v11
+    v12:ImmortalNoneType = LoadConst<ImmortalNoneType>
+    Return<NoneType> v12
+  }
+}
+--- Expected 3.16 ---
+fun jittestmodule:Test.__init__ {
+  bb 0 {
+    v7:User[Test] = LoadArg<0; "self", User[Test]>
+    LoadFrame
+    v9:CInt64 = LoadEvalBreaker
+    CondBranch<2, 1> v9
+  }
+
+  bb 2 (preds 0) {
+    v14:CInt32 = RunPeriodicTasks {
+      LiveValues<1> b:v7
+      FrameState {
+        CurInstrOffset 0
+        Locals<1> v7
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
+    v10:ImmortalLongExact[0] = LoadConst<ImmortalLongExact[0]>
+    v11:OptObject = LoadField<x@16, OptObject, owned> v7
+    StoreField<x@16> v7 v10 v11
+    XDecref v11
+    v12:ImmortalNoneType = LoadConst<ImmortalNoneType>
+    Return<NoneType> v12
+  }
+}
+--- Expected 3.14t ---
+fun jittestmodule:Test.__init__ {
+  bb 0 {
+    v8:User[Test] = LoadArg<0; "self", User[Test]>
+    LoadFrame
+    v10:User[Test] = TagIfDeferred v8
+    AtQuiescentState
+    v11:CInt64 = LoadEvalBreaker
+    CondBranch<2, 1> v11
+  }
+
+  bb 2 (preds 0) {
+    v16:CInt32 = RunPeriodicTasks {
+      LiveValues<1> b:v10
+      FrameState {
+        CurInstrOffset 0
+        Locals<1> v10
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
     v12:ImmortalLongExact[0] = LoadConst<ImmortalLongExact[0]>
-    v13:OptObject = LoadField<x@16, OptObject, owned> v7
-    StoreField<x@16> v7 v12 v13
+    v13:OptObject = LoadField<x@32, OptObject, owned> v10
+    StoreField<x@32> v10 v12 v13
     XDecref v13
     v14:ImmortalNoneType = LoadConst<ImmortalNoneType>
     Return<NoneType> v14

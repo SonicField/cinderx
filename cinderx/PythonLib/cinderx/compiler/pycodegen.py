@@ -64,11 +64,10 @@ try:
         NEXT_LOCATION,
         NO_LOCATION,
         PyFlowGraph,
-        PyFlowGraph310,
         PyFlowGraph312,
         PyFlowGraph314,
         PyFlowGraph315,
-        PyFlowGraphCinder310,
+        PyFlowGraph316,
         ResumeOparg,
         SrcLocation,
     )
@@ -76,13 +75,11 @@ try:
         Annotations,
         AnnotationScope,
         BaseSymbolVisitor,
-        CinderSymbolVisitor,
         ClassScope,
         FunctionScope,
         GenExprScope,
         ModuleScope,
         Scope,
-        SymbolVisitor310,
         SymbolVisitor312,
         SymbolVisitor314,
         TypeParams,
@@ -93,13 +90,6 @@ try:
     from .visitor import ASTVisitor
 except Exception:
     raise
-
-try:
-    from cinder import _set_qualname as cx_set_qualname
-except ImportError:
-
-    def cx_set_qualname(code: CodeType, qualname: str | None) -> None:
-        pass
 
 
 IS_3_12_8: bool = sys.version_info[:3] >= (3, 12, 8)
@@ -371,9 +361,13 @@ class CodeGenerator(ASTVisitor):
     optimized = 0  # is namespace access optimized?
     class_name: str | None = None  # provide default for instance variable
     future_flags = 0
-    flow_graph: type[PyFlowGraph] = PyFlowGraph310
+    flow_graph: type[PyFlowGraph] = PyFlowGraph312
     _SymbolVisitor: type[BaseSymbolVisitor] = BaseSymbolVisitor
     pattern_context: type[PatternContext] = PatternContext
+    # gh-issue-151907: a list comprehension used as an expression statement
+    # (its result discarded) skips building the list. Only enabled for the
+    # Python versions whose compiler performs this optimization.
+    _unused_listcomp_avoids_creation: bool = False
 
     # pyre-fixme[4] This appears to be unused.
     __initialized = None
@@ -1039,6 +1033,30 @@ class CodeGenerator(ASTVisitor):
         self.visit(elt)
         self.visit(val)
 
+    def compile_unpack_starred(
+        self, comp: CompNode, elt: ast.Starred, yield_: bool
+    ) -> None:
+        # gh-issue-151907 / PEP 798: a starred comprehension element is unpacked
+        # -- its value is iterated and each item is yielded (generator
+        # expression) or discarded (list comprehension whose result is unused).
+        # Only reachable on the 3.16+ code generators, where the grammar allows
+        # a starred element in a comprehension.
+        unpack_start = self.newBlock("unpack_start")
+        unpack_end = self.newBlock("unpack_end")
+        self.visit(elt.value)
+        self.set_pos(elt)
+        self.emit("GET_ITER", 0)
+        self.nextBlock(unpack_start)
+        self.emit("FOR_ITER", unpack_end)
+        self.nextBlock()
+        if yield_:
+            self.emit_yield(self.scopes[comp])
+        self.emit("POP_TOP")
+        self.set_no_pos()
+        self.emitJump(unpack_start)
+        self.nextBlock(unpack_end)
+        self.emit_end_for()
+
     # exception related
 
     def visitRaise(self, node: ast.Raise) -> None:
@@ -1122,8 +1140,13 @@ class CodeGenerator(ASTVisitor):
         else:
             self.visitStatements(node.body)
 
-        self.set_with_position_for_exit(node, kind)
         self.pop_fblock(kind)
+        if kind == ASYNC_WITH and IS_3_12_8:
+            self.set_pos(item.context_expr)
+        elif kind == WITH:
+            self.set_no_pos()
+        else:
+            self.set_pos(node)
         self.emit("POP_BLOCK")
 
         if IS_3_12_8:
@@ -1173,6 +1196,23 @@ class CodeGenerator(ASTVisitor):
             self.emit_print()
         elif is_const(node.value):
             self.emit("NOP")
+        elif self._unused_listcomp_avoids_creation and isinstance(
+            node.value, ast.ListComp
+        ):
+            # gh-issue-151907: compile the discarded list comprehension without
+            # building the list; the artificial POP_TOP below drops the leftover
+            # copy of the iterable left on the stack by the COPY 1.
+            comp = node.value
+            self.compile_comprehension(
+                comp,
+                sys.intern("<listcomp>"),
+                comp.elt,
+                None,
+                "BUILD_LIST",
+                avoid_creation=True,
+            )
+            self.set_no_pos()
+            self.emit("POP_TOP")
         else:
             self.visit(node.value)
             self.set_no_pos()
@@ -1414,9 +1454,7 @@ class CodeGenerator(ASTVisitor):
 
     def emitAugName(self, node: ast.AugAssign) -> None:
         target = node.target
-
-        # pyre-fixme[16] This code assumes that the target of the AugAssign is a
-        # Name as opposed to ast.Attribute or ast.Subscript.
+        assert isinstance(target, ast.Name)
         name = target.id
 
         self.loadName(name)
@@ -1485,6 +1523,10 @@ class CodeGenerator(ASTVisitor):
     def emit_call_function_ex(self, nkwelts: int) -> None:
         self.emit("CALL_FUNCTION_EX", int(nkwelts > 0))
 
+    @staticmethod
+    def _call_stack_use(nargs: int, nkwds: int) -> int:
+        return nargs + nkwds * 2
+
     def _call_helper(
         self,
         argcnt: int,
@@ -1494,7 +1536,7 @@ class CodeGenerator(ASTVisitor):
     ) -> None:
         starred = any(isinstance(arg, ast.Starred) for arg in args)
         mustdictunpack = any(arg.arg is None for arg in kwargs)
-        manyargs = (len(args) + (len(kwargs) * 2)) > STACK_USE_GUIDELINE
+        manyargs = self._call_stack_use(len(args), len(kwargs)) > STACK_USE_GUIDELINE
         if not (starred or mustdictunpack or manyargs):
             return self._fastcall_helper(argcnt, node, args, kwargs)
 
@@ -1775,8 +1817,10 @@ class CodeGenerator(ASTVisitor):
         self.emit("BUILD_SLICE", num)
 
     def visitExtSlice(self, node: ast.ExtSlice) -> None:
+        # pyrefly: ignore [missing-attribute]
         for d in node.dims:
             self.visit(d)
+        # pyrefly: ignore [missing-attribute]
         self.emit("BUILD_TUPLE", len(node.dims))
 
     def emit_dup(self, count: int = 1) -> None:
@@ -1791,6 +1835,7 @@ class CodeGenerator(ASTVisitor):
         self, node: ast.expr | None
     ) -> None | str | bytes | bool | int | float | complex | ast.Ellipsis:
         assert isinstance(node, ast.Constant)
+        # pyrefly: ignore [bad-return]
         return node.value
 
     def get_bool_const(self, node: ast.expr) -> bool | None:
@@ -2344,8 +2389,10 @@ class CodeGenerator(ASTVisitor):
         self, name: str, ctx: type[ast.expr_context], loc: ast.AST
     ) -> None:
         if ctx is ast.Store and name == "__debug__":
+            # pyrefly: ignore [no-matching-overload]
             raise SyntaxError("cannot assign to __debug__", loc)
         if ctx is ast.Del and name == "__debug__":
+            # pyrefly: ignore [no-matching-overload]
             raise SyntaxError("cannot delete __debug__", loc)
 
     def _error_duplicate_store(self, name: str) -> SyntaxError:
@@ -2421,11 +2468,8 @@ class CodeGenerator(ASTVisitor):
             return "<string>"
         elif isinstance(node, ast.Interactive):
             return "<stdin>"
-        # pyre-ignore[16]: Module `ast` has no attribute `TypeAlias`.
         elif hasattr(ast, "TypeAlias") and isinstance(node, ast.TypeAlias):
-            # pyre-ignore[16]: `_ast.AST` has no attribute `name`
             return node.name.id
-        # pyre-ignore[16]: Module `ast` has no attribute `TypeVar`.
         elif hasattr(ast, "TypeVar") and isinstance(node, ast.TypeVar):
             return node.name
         elif isinstance(node, TypeParams):
@@ -2785,6 +2829,7 @@ class CodeGenerator(ASTVisitor):
         val: ast.expr | None,
         opcode: str | None,
         oparg: object = 0,
+        avoid_creation: bool = False,
     ) -> None:
         raise NotImplementedError()
 
@@ -2813,1069 +2858,6 @@ class Entry:
         self.node = node
 
 
-class CodeGenerator310(CodeGenerator):
-    flow_graph: type[PyFlowGraph] = PyFlowGraph310
-    _SymbolVisitor = SymbolVisitor310
-    unqualified_asts: tuple[type[ast.AST]] = (ast.ClassDef,)
-
-    def __init__(
-        self,
-        parent: CodeGenerator | None,
-        node: AST,
-        symbols: BaseSymbolVisitor,
-        graph: PyFlowGraph,
-        flags: int = 0,
-        optimization_lvl: int = 0,
-        future_flags: int | None = None,
-        name: str | None = None,
-    ) -> None:
-        super().__init__(
-            parent, node, symbols, graph, flags, optimization_lvl, future_flags, name
-        )
-
-    def make_child_codegen(
-        self,
-        tree: CodeGenTree,
-        graph: PyFlowGraph,
-    ) -> CodeGenerator310:
-        return type(self)(
-            self,
-            tree,
-            self.symbols,
-            graph,
-            flags=self.flags,
-            optimization_lvl=self.optimization_lvl,
-        )
-
-    # Names and attribute access --------------------------------------------------
-
-    def _nameOp(self, prefix: str, name: str) -> None:
-        # TASK(T130490253): The JIT suppression should happen in the jit, not the compiler.
-        if (
-            prefix == "LOAD"
-            and name == "super"
-            and isinstance(self.scope, FunctionScope)
-        ):
-            scope = self.check_name(name)
-            if scope in (SC_GLOBAL_EXPLICIT, SC_GLOBAL_IMPLICIT):
-                self.scope.suppress_jit = True
-
-        name = self.mangle(name)
-        scope = self.check_name(name)
-        if scope == SC_LOCAL:
-            if not self.optimized:
-                self.emit(prefix + "_NAME", name)
-            else:
-                self.emit(prefix + "_FAST", name)
-        elif scope == SC_GLOBAL_EXPLICIT:
-            self.emit(prefix + "_GLOBAL", name)
-        elif scope == SC_GLOBAL_IMPLICIT:
-            if not self.optimized:
-                self.emit(prefix + "_NAME", name)
-            else:
-                self.emit(prefix + "_GLOBAL", name)
-        elif scope == SC_FREE or scope == SC_CELL:
-            if isinstance(self.scope, ClassScope) and prefix == "LOAD":
-                self.emit(prefix + "_CLASSDEREF", name)
-            else:
-                self.emit(prefix + "_DEREF", name)
-        else:
-            raise RuntimeError("unsupported scope for var %s: %d" % (name, scope))
-
-    def visitAssert(self, node: ast.Assert) -> None:
-        if not self.optimization_lvl:
-            end = self.newBlock()
-            self.compileJumpIf(node.test, end, True)
-
-            self.emit_load_assertion_error()
-            if node.msg:
-                self.visit(node.msg)
-                self.emit_call_one_arg()
-                self.emit("RAISE_VARARGS", 1)
-            else:
-                self.emit("RAISE_VARARGS", 1)
-            self.nextBlock(end)
-
-    def emit_import_name(self, name: str) -> None:
-        self.emit("IMPORT_NAME", name)
-
-    def visitAttribute(self, node: ast.Attribute) -> None:
-        self.visit(node.value)
-
-        if isinstance(node.ctx, ast.Store):
-            end_lineno = node.end_lineno
-            assert end_lineno
-
-            with self.temp_lineno(end_lineno):
-                self.emit("STORE_ATTR", self.mangle(node.attr))
-        elif isinstance(node.ctx, ast.Del):
-            self.emit("DELETE_ATTR", self.mangle(node.attr))
-        else:
-            end_lineno = node.end_lineno
-            assert end_lineno
-
-            with self.temp_lineno(end_lineno):
-                self.emit("LOAD_ATTR", self.mangle(node.attr))
-
-    # Stack manipulation --------------------------------------------------
-
-    def emit_rotate_stack(self, count: int) -> None:
-        if count == 2:
-            self.emit("ROT_TWO")
-        elif count == 3:
-            self.emit("ROT_THREE")
-        elif count == 4:
-            self.emit("ROT_FOUR")
-        else:
-            raise ValueError("Expected rotate of 2, 3, or 4")
-
-    def emit_dup(self, count: int = 1) -> None:
-        if count == 1:
-            self.emit("DUP_TOP")
-        elif count == 2:
-            self.emit("DUP_TOP_TWO")
-        else:
-            raise ValueError(f"Unsupported dup count {count}")
-
-    def _visitAnnotation(self, node: ast.expr) -> None:
-        if self.future_flags & CO_FUTURE_ANNOTATIONS:
-            self.emit("LOAD_CONST", to_expr(node))
-        else:
-            self.visit(node)
-
-    def emit_store_annotation(self, name: str, node: ast.AnnAssign) -> None:
-        assert self.did_setup_annotations
-
-        self._visitAnnotation(node.annotation)
-        self.emit("LOAD_NAME", "__annotations__")
-        mangled = self.mangle(name)
-        self.emit("LOAD_CONST", mangled)
-        self.emit("STORE_SUBSCR")
-
-    # Loops --------------------------------------------------
-
-    def visitFor(self, node: ast.For) -> None:
-        start = self.newBlock("for_start")
-        body = self.newBlock("for_body")
-        cleanup = self.newBlock("for_cleanup")
-        end = self.newBlock("for_end")
-
-        self.push_loop(FOR_LOOP, start, end)
-        self.visit(node.iter)
-        self.emit("GET_ITER")
-
-        self.nextBlock(start)
-        self.emit("FOR_ITER", cleanup)
-        self.nextBlock(body)
-        self.visit(node.target)
-        self.visitStatements(node.body)
-        self.set_no_pos()
-        self.emitJump(start)
-        self.nextBlock(cleanup)
-        self.pop_loop()
-
-        if node.orelse:
-            self.visitStatements(node.orelse)
-        self.nextBlock(end)
-
-    def emit_end_for(self) -> None:
-        pass
-
-    # Class and function definitions --------------------------------------------------
-
-    def generate_function_with_body(
-        self,
-        node: FuncOrLambda,
-        name: str,
-        first_lineno: int,
-        body: list[ast.stmt],
-    ) -> CodeGenerator:
-        gen = cast(
-            CodeGenerator310,
-            self.make_func_codegen(node, node.args, name, first_lineno),
-        )
-
-        self.processBody(node, body, gen)
-
-        gen.finish_function()
-
-        return gen
-
-    def build_function(
-        self, node: FuncOrLambda, gen: CodeGenerator, first_lineno: int | None = None
-    ) -> None:
-        flags = 0
-        if node.args.defaults:
-            for default in node.args.defaults:
-                self.visitDefault(default)
-                flags |= MAKE_FUNCTION_DEFAULTS
-            self.emit("BUILD_TUPLE", len(node.args.defaults))
-
-        if self.emit_kwonlydefaults(node):
-            flags |= MAKE_FUNCTION_KWDEFAULTS
-
-        if not isinstance(node, ast.Lambda):
-            flags |= self.build_annotations(node)
-
-        self.emit_closure(gen, flags)
-
-    def emit_function_decorators(
-        self, node: ast.FunctionDef | ast.AsyncFunctionDef
-    ) -> None:
-        for _dec in node.decorator_list:
-            self.emit_call_one_arg()
-
-    def visitClassDef(self, node: ast.ClassDef) -> None:
-        first_lineno = None
-        immutability_flag = self.find_immutability_flag(node)
-        for decorator in node.decorator_list:
-            if first_lineno is None:
-                first_lineno = decorator.lineno
-            self.visit_decorator(decorator, node)
-
-        first_lineno = node.lineno if first_lineno is None else first_lineno
-        gen = self.make_class_codegen(node, first_lineno)
-        gen.emit("LOAD_NAME", "__name__")
-        gen.storeName("__module__")
-        gen.emit("LOAD_CONST", gen.get_qual_prefix(gen) + gen.name)
-        gen.storeName("__qualname__")
-        if gen.findAnn(node.body):
-            gen.did_setup_annotations = True
-            gen.emit("SETUP_ANNOTATIONS")
-
-        doc = gen.get_docstring(node)
-        if doc is not None:
-            gen.set_pos(node.body[0])
-            gen.emit("LOAD_CONST", doc)
-            gen.storeName("__doc__")
-
-        self.walkClassBody(node, gen)
-
-        gen.set_no_pos()
-
-        scope = gen.scope
-        assert isinstance(scope, ClassScope)
-
-        if scope.needs_class_closure:
-            gen.emit("LOAD_CLOSURE", "__class__")
-            gen.emit_dup()
-            gen.emit("STORE_NAME", "__classcell__")
-        else:
-            gen.emit("LOAD_CONST", None)
-        gen.emit("RETURN_VALUE")
-
-        self.emit_build_class(node, gen)
-
-        for d in reversed(node.decorator_list):
-            self.emit_decorator_call(d, node)
-
-        self.register_immutability(node, immutability_flag)
-        self.post_process_and_store_name(node)
-
-    def emit_build_class(self, node: ast.ClassDef, class_body: CodeGenerator) -> None:
-        self.emit("LOAD_BUILD_CLASS")
-        self.emit_closure(class_body, 0)
-        self.emit("LOAD_CONST", node.name)
-
-        self._call_helper(2, None, node.bases, node.keywords)
-
-    def get_qual_prefix(self, gen: CodeHolder) -> str:
-        prefix = ""
-        if gen.scope.global_scope:
-            return prefix
-        # Construct qualname prefix
-        parent = gen.scope.parent
-        while not isinstance(parent, ModuleScope):
-            # Only real functions use "<locals>", nested scopes like
-            # comprehensions don't.
-            if parent.is_function_scope:
-                prefix = parent.name + ".<locals>." + prefix
-            else:
-                prefix = parent.name + "." + prefix
-            if parent.global_scope:
-                break
-            parent = parent.parent
-        return prefix
-
-    def emit_make_function(
-        self, gen: CodeHolder | CodeGenerator | PyFlowGraph, qualname: str, flags: int
-    ) -> None:
-        if isinstance(gen, CodeGenerator):
-            gen.set_qual_name(qualname)
-        self.emit("LOAD_CONST", gen)
-        self.emit("LOAD_CONST", qualname)  # py3 qualname
-        self.emit("MAKE_FUNCTION", flags)
-
-    # Comprehensions --------------------------------------------------
-
-    def emit_get_awaitable(self, kind: AwaitableKind) -> None:
-        self.emit("GET_AWAITABLE")
-
-    def compile_comprehension(
-        self,
-        node: CompNode,
-        name: str,
-        elt: ast.expr,
-        val: ast.expr | None,
-        opcode: str | None,
-        oparg: object = 0,
-    ) -> None:
-        self.check_async_comprehension(node)
-
-        gen = cast(CodeGenerator310, self.make_comprehension_codegen(node, name))
-        gen.set_pos(node)
-
-        if opcode:
-            gen.emit(opcode, oparg)
-
-        gen.compile_comprehension_generator(node, 0, 0, elt, val, type(node), True)
-
-        if not isinstance(node, ast.GeneratorExp):
-            gen.emit("RETURN_VALUE")
-
-        gen.finish_function()
-
-        self.finish_comprehension(gen, node)
-
-    def compile_comprehension_generator(
-        self,
-        comp: CompNode,
-        gen_index: int,
-        depth: int,
-        elt: ast.expr,
-        val: ast.expr | None,
-        type: type[CompNode],
-        outermost_gen_is_param: bool,
-    ) -> None:
-        if comp.generators[gen_index].is_async:
-            self._compile_async_comprehension(
-                comp, gen_index, depth, elt, val, type, outermost_gen_is_param
-            )
-        else:
-            self._compile_sync_comprehension(
-                comp, gen_index, depth, elt, val, type, outermost_gen_is_param
-            )
-
-    def _compile_async_comprehension(
-        self,
-        comp: CompNode,
-        gen_index: int,
-        depth: int,
-        elt: ast.expr,
-        val: ast.expr | None,
-        type: type[CompNode],
-        outermost_gen_is_param: bool,
-    ) -> None:
-        start = self.newBlock("start")
-        except_ = self.newBlock("except")
-        if_cleanup = self.newBlock("if_cleanup")
-
-        gen = comp.generators[gen_index]
-        if gen_index == 0 and outermost_gen_is_param:
-            self.loadName(".0")
-        else:
-            self.visit(gen.iter)
-            self.emit("GET_AITER")
-
-        self.nextBlock(start)
-        self.emit("SETUP_FINALLY", except_)
-        self.emit("GET_ANEXT")
-        self.emit("LOAD_CONST", None)
-        self.emit_yield_from(await_=True)
-        self.emit("POP_BLOCK")
-        self.visit(gen.target)
-
-        for if_ in gen.ifs:
-            self.compileJumpIf(if_, if_cleanup, False)
-            self.newBlock()
-
-        depth += 1
-        gen_index += 1
-        if gen_index < len(comp.generators):
-            self.compile_comprehension_generator(
-                comp, gen_index, depth, elt, val, type, False
-            )
-        elif type is ast.GeneratorExp:
-            self.visit(elt)
-            self.emit_yield(self.scopes[comp])
-            self.emit("POP_TOP")
-        elif type is ast.ListComp:
-            self.visit(elt)
-            self.emit("LIST_APPEND", depth + 1)
-        elif type is ast.SetComp:
-            self.visit(elt)
-            self.emit("SET_ADD", depth + 1)
-        elif type is ast.DictComp:
-            assert val is not None
-            self.compile_dictcomp_element(elt, val)
-            self.emit("MAP_ADD", depth + 1)
-        else:
-            raise NotImplementedError("unknown comprehension type")
-
-        self.nextBlock(if_cleanup)
-        self.emitJump(start)
-
-        self.nextBlock(except_)
-        self.emit("END_ASYNC_FOR")
-
-    def _compile_sync_comprehension(
-        self,
-        comp: CompNode,
-        gen_index: int,
-        depth: int,
-        elt: ast.expr,
-        val: ast.expr | None,
-        type: type[CompNode],
-        outermost_gen_is_param: bool,
-    ) -> None:
-        start = self.newBlock("start")
-        skip = self.newBlock("skip")
-        if_cleanup = self.newBlock("if_cleanup")
-        anchor = self.newBlock("anchor")
-
-        gen = comp.generators[gen_index]
-        if gen_index == 0 and outermost_gen_is_param:
-            self.loadName(".0")
-        else:
-            if isinstance(gen.iter, (ast.Tuple, ast.List)):
-                elts = gen.iter.elts
-                if len(elts) == 1 and not isinstance(elts[0], ast.Starred):
-                    self.visit(elts[0])
-                    start = None
-            if start:
-                self.compile_comprehension_iter(gen)
-
-        if start:
-            depth += 1
-            self.nextBlock(start)
-            self.emit("FOR_ITER", anchor)
-            self.nextBlock()
-        self.visit(gen.target)
-
-        for if_ in gen.ifs:
-            self.compileJumpIf(if_, if_cleanup, False)
-            self.newBlock()
-
-        gen_index += 1
-        if gen_index < len(comp.generators):
-            self.compile_comprehension_generator(
-                comp, gen_index, depth, elt, val, type, False
-            )
-        else:
-            if type is ast.GeneratorExp:
-                self.visit(elt)
-                self.emit_yield(self.scopes[comp])
-                self.emit("POP_TOP")
-            elif type is ast.ListComp:
-                self.visit(elt)
-                self.emit("LIST_APPEND", depth + 1)
-            elif type is ast.SetComp:
-                self.visit(elt)
-                self.emit("SET_ADD", depth + 1)
-            elif type is ast.DictComp:
-                assert val is not None
-                self.compile_dictcomp_element(elt, val)
-                self.emit("MAP_ADD", depth + 1)
-            else:
-                raise NotImplementedError("unknown comprehension type")
-
-            self.nextBlock(skip)
-        self.nextBlock(if_cleanup)
-        if start:
-            self.emitJump(start)
-            self.nextBlock(anchor)
-            self.emit_end_for()
-
-    # Function calls --------------------------------------------------
-
-    def emit_prepare_call(self) -> None:
-        pass
-
-    def emit_call(self, nargs: int) -> None:
-        self.emit("CALL_FUNCTION", nargs)
-
-    def emit_call_kw(self, nargs: int, kwargs: tuple[str, ...]) -> None:
-        self.emit("LOAD_CONST", kwargs)
-        self.emit("CALL_FUNCTION_KW", nargs + len(kwargs))
-
-    def emit_call_exit_with_nones(self) -> None:
-        self.emit("LOAD_CONST", None)
-        self.emit_dup()
-        self.emit_dup()
-        self.emit("CALL_FUNCTION", 3)
-
-    def _fastcall_helper(
-        self,
-        argcnt: int,
-        node: ast.expr | None,
-        args: list[ast.expr],
-        kwargs: list[ast.keyword],
-    ) -> None:
-        # No * or ** args, faster calling sequence.
-        for arg in args:
-            self.visit(arg)
-        if len(kwargs) > 0:
-            self.visit_list(kwargs)
-            self.emit("LOAD_CONST", tuple(arg.arg for arg in kwargs))
-            self.emit("CALL_FUNCTION_KW", argcnt + len(args) + len(kwargs))
-            return
-        self.emit("CALL_FUNCTION", argcnt + len(args))
-
-    def _can_optimize_call(self, node: ast.Call) -> bool:
-        return (
-            isinstance(node.func, ast.Attribute)
-            and isinstance(node.func.ctx, ast.Load)
-            and not node.keywords
-            and not any(isinstance(arg, ast.Starred) for arg in node.args)
-            and len(node.args) < STACK_USE_GUIDELINE
-        )
-
-    def visitCall(self, node: ast.Call) -> None:
-        if not self._can_optimize_call(node):
-            self.visit(node.func)
-            self._call_helper(0, node, node.args, node.keywords)
-            return
-
-        attr = node.func
-        assert isinstance(attr, ast.Attribute)
-        self.visit(attr.value)
-        with self.temp_lineno(attr.end_lineno or -1):
-            self.emit("LOAD_METHOD", self.mangle(attr.attr))
-            for arg in node.args:
-                self.visit(arg)
-            nargs = len(node.args)
-            self.emit("CALL_METHOD", nargs)
-
-    # Exceptions and with --------------------------------------------------
-
-    def emit_try_except(self, node: ast.Try) -> None:
-        body = self.newBlock("try_body")
-        except_ = self.newBlock("try_handlers")
-        orElse = self.newBlock("try_else")
-        end = self.newBlock("try_end")
-
-        self.emit("SETUP_FINALLY", except_)
-        self.nextBlock(body)
-
-        self.push_fblock(Entry(TRY_EXCEPT, body, None, None))
-        self.visitStatements(node.body)
-        self.pop_fblock(TRY_EXCEPT)
-        self.set_no_pos()
-        self.emit("POP_BLOCK")
-        self.emit_jump_forward(orElse)
-        self.nextBlock(except_)
-        self.push_fblock(Entry(EXCEPTION_HANDLER, None, None, None))
-
-        last = len(node.handlers) - 1
-        for i in range(len(node.handlers)):
-            handler = node.handlers[i]
-            expr = handler.type
-            target = handler.name
-            body = handler.body
-            self.set_pos(handler)
-            except_ = self.newBlock(f"try_except_{i}")
-            if expr:
-                self.emit_dup()
-                self.visit(expr)
-                self.emit("JUMP_IF_NOT_EXC_MATCH", except_)
-                self.nextBlock()
-            elif i < last:
-                raise self.syntax_error("default 'except:' must be last", handler)
-            else:
-                self.set_pos(handler)
-            self.emit("POP_TOP")
-            if target:
-                cleanup_end = self.newBlock(f"try_cleanup_end{i}")
-                cleanup_body = self.newBlock(f"try_cleanup_body{i}")
-
-                self.storeName(target)
-                self.emit("POP_TOP")
-
-                self.emit("SETUP_FINALLY", cleanup_end)
-                self.nextBlock(cleanup_body)
-                self.push_fblock(
-                    Entry(HANDLER_CLEANUP, cleanup_body, cleanup_end, target)
-                )
-                self.visit_list(body)
-                self.pop_fblock(HANDLER_CLEANUP)
-                self.set_no_pos()
-                self.emit("POP_BLOCK")
-                self.emit("POP_EXCEPT")
-
-                self.emit("LOAD_CONST", None)
-                self.storeName(target)
-                self.delName(target)
-                self.emit_jump_forward(end)
-
-                self.nextBlock(cleanup_end)
-                self.set_no_pos()
-                self.emit("LOAD_CONST", None)
-                self.storeName(target)
-                self.delName(target)
-
-                self.emit("RERAISE", 1)
-
-            else:
-                cleanup_body = self.newBlock(f"try_cleanup_body{i}")
-                self.emit("POP_TOP")
-                self.emit("POP_TOP")
-                self.nextBlock(cleanup_body)
-                self.push_fblock(Entry(HANDLER_CLEANUP, cleanup_body, None, None))
-                self.visit_list(body)
-                self.pop_fblock(HANDLER_CLEANUP)
-                self.set_no_pos()
-                self.emit("POP_EXCEPT")
-                self.emit_jump_forward(end)
-            self.nextBlock(except_)
-
-        self.pop_fblock(EXCEPTION_HANDLER)
-        self.set_no_pos()
-        self.emit("RERAISE", 0)
-        self.nextBlock(orElse)
-        self.visitStatements(node.orelse)
-        self.nextBlock(end)
-
-    def emit_try_finally(
-        self,
-        node: ast.Try | None,
-        try_body: Callable[[], None] | None = None,
-        final_body: Callable[[], None] | None = None,
-    ) -> None:
-        """
-        The overall idea is:
-           SETUP_FINALLY end
-           try-body
-           POP_BLOCK
-           finally-body
-           JUMP exit
-        end:
-           finally-body
-        exit:
-        """
-        body = self.newBlock("try_finally_body")
-        end = self.newBlock("try_finally_end")
-        exit_ = self.newBlock("try_finally_exit")
-
-        if final_body is None:
-            assert node
-            final_body = lambda: self.visitStatements(node.finalbody)
-
-        # try block
-        self.emit("SETUP_FINALLY", end)
-
-        self.nextBlock(body)
-        self.push_fblock(Entry(FINALLY_TRY, body, end, final_body))
-        if try_body is not None:
-            try_body()
-        else:
-            assert node
-            if node.handlers:
-                self.emit_try_except(node)
-            else:
-                self.visitStatements(node.body)
-
-        self.emit_noline("POP_BLOCK")
-        self.pop_fblock(FINALLY_TRY)
-        final_body()
-        self.emit_jump_forward_noline(exit_)
-
-        # finally block
-        self.nextBlock(end)
-        self.push_fblock(Entry(FINALLY_END, end, None, None))
-        final_body()
-        self.pop_fblock(FINALLY_END)
-        self.emit("RERAISE", 0)
-
-        self.nextBlock(exit_)
-
-    def emit_with_except_cleanup(self, cleanup: Block) -> None:
-        self.emit("WITH_EXCEPT_START")
-
-    def emit_with_except_finish(self, cleanup: Block) -> None:
-        except_ = self.newBlock()
-        self.emit("POP_JUMP_IF_TRUE", except_)
-        self.nextBlock()
-        self.emit("RERAISE", 1)
-
-        self.nextBlock(except_)
-        self.emit("POP_TOP")
-        self.emit("POP_TOP")
-        self.emit("POP_TOP")
-        self.emit("POP_EXCEPT")
-        self.emit("POP_TOP")
-
-    def set_with_position_for_exit(
-        self, node: ast.With | ast.AsyncWith, kind: int
-    ) -> None:
-        if kind == WITH:
-            self.set_no_pos()
-
-    def emit_setup_with(self, node: ast.withitem, target: Block, async_: bool) -> None:
-        self.emit("SETUP_ASYNC_WITH" if async_ else "SETUP_WITH", target)
-
-    # Operators and augmented assignment --------------------------------------------------
-
-    def emitAugRHS(self, node: ast.AugAssign) -> None:
-        with self.temp_lineno(node.lineno):
-            self.visit(node.value)
-            self.emit(self._augmented_opcode[type(node.op)])
-
-    def emitAugAttribute(self, node: ast.AugAssign) -> None:
-        target = node.target
-        assert isinstance(target, ast.Attribute)
-        self.visit(target.value)
-        self.emit_dup()
-        with self.temp_lineno(node.target.end_lineno or -1):
-            self.emit("LOAD_ATTR", self.mangle(target.attr))
-        self.emitAugRHS(node)
-        self.graph.set_pos(
-            SrcLocation(
-                node.target.end_lineno or -1, node.target.end_lineno or -1, -1, -1
-            )
-        )
-        self.emit_rotate_stack(2)
-        self.emit("STORE_ATTR", self.mangle(target.attr))
-
-    def unaryOp(self, node: ast.UnaryOp, op: str) -> None:
-        self.visit(node.operand)
-        self.emit(op)
-
-    _binary_opcode: dict[type[ast.operator], str] = {
-        ast.Add: "BINARY_ADD",
-        ast.Sub: "BINARY_SUBTRACT",
-        ast.Mult: "BINARY_MULTIPLY",
-        ast.MatMult: "BINARY_MATRIX_MULTIPLY",
-        ast.Div: "BINARY_TRUE_DIVIDE",
-        ast.FloorDiv: "BINARY_FLOOR_DIVIDE",
-        ast.Mod: "BINARY_MODULO",
-        ast.Pow: "BINARY_POWER",
-        ast.LShift: "BINARY_LSHIFT",
-        ast.RShift: "BINARY_RSHIFT",
-        ast.BitOr: "BINARY_OR",
-        ast.BitXor: "BINARY_XOR",
-        ast.BitAnd: "BINARY_AND",
-    }
-
-    def emit_binary_subscr(self) -> None:
-        self.emit("BINARY_SUBSCR")
-
-    def emit_bin_op(self, binop: type[ast.operator]) -> None:
-        op = self._binary_opcode[binop]
-        self.emit(op)
-
-    # Misc --------------------------------------------------
-
-    def emitJump(self, target: Block) -> None:
-        self.emit("JUMP_ABSOLUTE", target)
-
-    def emit_jump_forward(self, target: Block) -> None:
-        self.emit("JUMP_FORWARD", target)
-
-    def emit_jump_forward_noline(self, target: Block) -> None:
-        self.emit_noline("JUMP_FORWARD", target)
-
-    def emit_print(self) -> None:
-        self.emit("PRINT_EXPR")
-
-    def emit_yield(self, scope: Scope) -> None:
-        self.emit("YIELD_VALUE")
-
-    def emit_yield_from(self, await_: bool = False) -> None:
-        self.emit("YIELD_FROM")
-
-    def _visitSequenceLoad(
-        self,
-        elts: list[ast.expr],
-        build_op: str,
-        add_op: str,
-        extend_op: str,
-        num_pushed: int = 0,
-        is_tuple: bool = False,
-    ) -> None:
-        if len(elts) > 2 and all(isinstance(elt, ast.Constant) for elt in elts):
-            elts_tuple = tuple(
-                elt.value for elt in elts if isinstance(elt, ast.Constant)
-            )
-            if is_tuple:
-                self.emit("LOAD_CONST", elts_tuple)
-            else:
-                if add_op == "SET_ADD":
-                    elts_tuple = frozenset(elts_tuple)
-                self.emit(build_op, num_pushed)
-                self.emit("LOAD_CONST", elts_tuple)
-                self.emit(extend_op, 1)
-            return
-
-        big = (len(elts) + num_pushed) > STACK_USE_GUIDELINE
-        starred_load = self.hasStarred(elts)
-        if not starred_load and not big:
-            for elt in elts:
-                self.visit(elt)
-            collection_size = num_pushed + len(elts)
-            self.emit("BUILD_TUPLE" if is_tuple else build_op, collection_size)
-            return
-
-        sequence_built = False
-        if big:
-            self.emit(build_op, num_pushed)
-            sequence_built = True
-        for on_stack, elt in enumerate(elts):
-            if isinstance(elt, ast.Starred):
-                if not sequence_built:
-                    self.emit(build_op, on_stack + num_pushed)
-                    sequence_built = True
-                self.visit(elt.value)
-                self.emit(extend_op, 1)
-            else:
-                self.visit(elt)
-                if sequence_built:
-                    self.emit(add_op, 1)
-
-        if is_tuple:
-            self.emit("LIST_TO_TUPLE")
-
-    def unwind_setup_entry(self, e: Entry, preserve_tos: int) -> None:
-        if e.kind in (
-            WHILE_LOOP,
-            EXCEPTION_HANDLER,
-            ASYNC_COMPREHENSION_GENERATOR,
-            STOP_ITERATION,
-        ):
-            return
-
-        elif e.kind == FOR_LOOP or e.kind == ASYNC_FOR_LOOP:
-            if preserve_tos:
-                self.emit_rotate_stack(2)
-            self.emit("POP_TOP")
-
-        elif e.kind == TRY_EXCEPT:
-            self.emit("POP_BLOCK")
-
-        elif e.kind == FINALLY_TRY:
-            self.emit("POP_BLOCK")
-            if preserve_tos:
-                self.push_fblock(Entry(POP_VALUE, None, None, None))
-            assert callable(e.unwinding_datum)
-            e.unwinding_datum()
-            if preserve_tos:
-                self.pop_fblock(POP_VALUE)
-            self.set_no_pos()
-
-        elif e.kind == FINALLY_END:
-            if preserve_tos:
-                self.emit_rotate_stack(4)
-            self.emit("POP_TOP")
-            self.emit("POP_TOP")
-            self.emit("POP_TOP")
-            if preserve_tos:
-                self.emit_rotate_stack(4)
-            self.emit("POP_EXCEPT")
-
-        elif e.kind in (WITH, ASYNC_WITH):
-            assert isinstance(e.unwinding_datum, AST)
-            self.set_pos(e.unwinding_datum)
-            self.emit("POP_BLOCK")
-            if preserve_tos:
-                self.emit_rotate_stack(2)
-            self.emit_call_exit_with_nones()
-            if e.kind == ASYNC_WITH:
-                self.emit_get_awaitable(AwaitableKind.AsyncExit)
-                self.emit("LOAD_CONST", None)
-                self.emit_yield_from(await_=True)
-            self.emit("POP_TOP")
-            self.set_no_pos()
-
-        elif e.kind == HANDLER_CLEANUP:
-            datum = e.unwinding_datum
-            if datum is not None:
-                self.emit("POP_BLOCK")
-            if preserve_tos:
-                self.emit_rotate_stack(4)
-            self.emit("POP_EXCEPT")
-            if datum is not None:
-                self.emit("LOAD_CONST", None)
-                assert isinstance(datum, str)
-                self.storeName(datum)
-                self.delName(datum)
-
-        elif e.kind == POP_VALUE:
-            if preserve_tos:
-                self.emit_rotate_stack(2)
-            self.emit("POP_TOP")
-
-        else:
-            raise Exception(f"Unexpected kind {e.kind}")
-
-    def visitJoinedStr(self, node: ast.JoinedStr) -> None:
-        if len(node.values) > STACK_USE_GUIDELINE:
-            self.emit("LOAD_CONST", "")
-            self.emit("LOAD_METHOD", "join")
-            self.emit("BUILD_LIST")
-            for value in node.values:
-                self.visit(value)
-                self.emit("LIST_APPEND", 1)
-            self.emit("CALL_METHOD", 1)
-        else:
-            for value in node.values:
-                self.visit(value)
-            if len(node.values) != 1:
-                self.emit("BUILD_STRING", len(node.values))
-
-    def visitBoolOp(self, node: ast.BoolOp) -> None:
-        self.emit_test(node, type(node.op) is ast.Or)
-
-    def emit_rot_n(self, n: int) -> None:
-        self.emit("ROT_N", n)
-
-    def emitAugSubscript(self, node: ast.AugAssign) -> None:
-        assert isinstance(node.target, ast.Subscript)
-        self.visitSubscript(node.target, True)
-        self.emitAugRHS(node)
-        self.emit_rotate_stack(3)
-        self.emit("STORE_SUBSCR")
-
-    def visitSubscript(self, node: ast.Subscript, aug_flag: bool = False) -> None:
-        self.visit(node.value)
-        self.visit(node.slice)
-        if isinstance(node.ctx, ast.Load):
-            self.emit_binary_subscr()
-        elif isinstance(node.ctx, ast.Store):
-            if aug_flag:
-                self.emit_dup(2)
-                self.emit_binary_subscr()
-            else:
-                self.emit("STORE_SUBSCR")
-        elif isinstance(node.ctx, ast.Del):
-            self.emit("DELETE_SUBSCR")
-        else:
-            assert 0
-
-    def emitChainedCompareStep(
-        self, op: ast.cmpop, value: ast.expr, cleanup: Block, always_pop: bool = False
-    ) -> None:
-        self.visit(value)
-        self.emit_dup()
-        self.emit_rotate_stack(3)
-        self.defaultEmitCompare(op)
-        self.emit(
-            "POP_JUMP_IF_FALSE" if always_pop else "JUMP_IF_FALSE_OR_POP", cleanup
-        )
-        self.nextBlock(label="compare_or_cleanup")
-
-    def visitCompare(self, node: ast.Compare) -> None:
-        self.visit(node.left)
-        cleanup = self.newBlock("cleanup")
-        for op, code in zip(node.ops[:-1], node.comparators[:-1]):
-            self.emitChainedCompareStep(op, code, cleanup)
-        # now do the last comparison
-        if node.ops:
-            op = node.ops[-1]
-            code = node.comparators[-1]
-            self.visit(code)
-            self.defaultEmitCompare(op)
-        if len(node.ops) > 1:
-            end = self.newBlock("end")
-            self.emit_jump_forward(end)
-            self.nextBlock(cleanup)
-            self.emit_rotate_stack(2)
-            self.emit("POP_TOP")
-            self.nextBlock(end)
-
-    def emit_compile_jump_if_compare(
-        self, test: ast.Compare, next: Block, is_if_true: bool
-    ) -> None:
-        cleanup = self.newBlock()
-        self.visit(test.left)
-        for op, comparator in zip(test.ops[:-1], test.comparators[:-1]):
-            self.emitChainedCompareStep(op, comparator, cleanup, always_pop=True)
-        self.visit(test.comparators[-1])
-        self.defaultEmitCompare(test.ops[-1])
-        self.emit("POP_JUMP_IF_TRUE" if is_if_true else "POP_JUMP_IF_FALSE", next)
-        self.nextBlock()
-        end = self.newBlock()
-        self.emit_jump_forward_noline(end)
-        self.nextBlock(cleanup)
-        self.emit("POP_TOP")
-        if not is_if_true:
-            self.emit_jump_forward_noline(next)
-        self.nextBlock(end)
-
-    def emit_finish_jump_if(
-        self, test: ast.expr, next: Block, is_if_true: bool
-    ) -> None:
-        self.visit(test)
-        self.emit("POP_JUMP_IF_TRUE" if is_if_true else "POP_JUMP_IF_FALSE", next)
-
-    def emit_import_star(self) -> None:
-        self.emit("IMPORT_STAR")
-
-    def emit_match_jump_to_end(self, end: Block) -> None:
-        self.emit_jump_forward(end)
-
-    def emit_match_jump_to_fail_pop_unconditional(self, pc: PatternContext) -> None:
-        self._jump_to_fail_pop(pc, "JUMP_FORWARD")
-
-    def emit_finish_match_class(self, node: ast.MatchClass, pc: PatternContext) -> None:
-        # TOS is now a tuple of (nargs + nattrs) attributes. Preserve it:
-        pc.on_top += 1
-        self._jump_to_fail_pop(pc, "POP_JUMP_IF_FALSE")
-        patterns = node.patterns
-        kwd_patterns = node.kwd_patterns
-        nargs = len(patterns)
-        nattrs = len(node.kwd_attrs)
-        for i in range(nargs + nattrs):
-            if i < nargs:
-                pattern = patterns[i]
-            else:
-                pattern = kwd_patterns[i - nargs]
-            if self._wildcard_check(pattern):
-                continue
-            self.emit_dup()
-            self.emit("LOAD_CONST", i)
-            self.emit_binary_subscr()
-            self._visit_subpattern(pattern, pc)
-        # Success! Pop the tuple of attributes:
-        pc.on_top -= 1
-        self.emit("POP_TOP")
-
-    def emit_finish_match_mapping(
-        self,
-        node: ast.MatchMapping,
-        pc: PatternContext,
-        star_target: str | None,
-        size: int,
-    ) -> None:
-        self.emit("BUILD_TUPLE", size)
-        self.emit("MATCH_KEYS")
-        # There's now a tuple of keys and a tuple of values on top of the subject:
-        pc.on_top += 2
-        self._jump_to_fail_pop(pc, "POP_JUMP_IF_FALSE")
-        # So far so good. Use that tuple of values on the stack to match
-        # sub-patterns against:
-        for i, pattern in enumerate(node.patterns):
-            if self._wildcard_check(pattern):
-                continue
-            self.emit_dup()
-            self.emit("LOAD_CONST", i)
-            self.emit_binary_subscr()
-            self._visit_subpattern(pattern, pc)
-
-        # If we get this far, it's a match! We're done with the tuple of values,
-        # and whatever happens next should consume the tuple of keys underneath it:
-        pc.on_top -= 2
-        self.emit("POP_TOP")
-        if star_target:
-            # If we have a starred name, bind a dict of remaining items to it:
-            self.emit("COPY_DICT_WITHOUT_KEYS")
-            self._pattern_helper_store_name(star_target, pc, node)
-        else:
-            # Otherwise, we don't care about this tuple of keys anymore:
-            self.emit("POP_TOP")
-        # Pop the subject:
-        pc.on_top -= 1
-        self.emit("POP_TOP")
-
-
 class CodeGenerator312(CodeGenerator):
     flow_graph: type[PyFlowGraph] = PyFlowGraph312
     _SymbolVisitor = SymbolVisitor312
@@ -3883,7 +2865,6 @@ class CodeGenerator312(CodeGenerator):
     #  `Tuple[Type[ClassDef], Type[TypeVar]]`.
     unqualified_asts: tuple[type[ast.AST]] = (
         ast.ClassDef,
-        # pyre-ignore[16]: No such attribute
         getattr(ast, "TypeVar", None),
     )
 
@@ -4271,11 +3252,9 @@ class CodeGenerator312(CodeGenerator):
             assert 0
 
     def emit_call_intrinsic_1(self, oparg: str) -> None:
-        # pyre-fixme[16]: Module `opcodes` has no attribute `INTRINSIC_1`.
         self.emit("CALL_INTRINSIC_1", INTRINSIC_1.index(oparg))
 
     def emit_call_intrinsic_2(self, oparg: str) -> None:
-        # pyre-fixme[16]: Module `opcodes` has no attribute `INTRINSIC_2`.
         self.emit("CALL_INTRINSIC_2", INTRINSIC_2.index(oparg))
 
     def emit_import_star(self) -> None:
@@ -4736,7 +3715,6 @@ class CodeGenerator312(CodeGenerator):
         self,
         bound: ast.expr,
         name: str,
-        # pyre-ignore[11]: Annotation `ast.ParamSpec` is not defined as a type.
         key: ast.TypeVar | ast.TypeVarTuple | ast.ParamSpec | TypeVarDefault,
         allow_starred: bool,
     ) -> None:
@@ -4775,11 +3753,9 @@ class CodeGenerator312(CodeGenerator):
 
     def compile_type_params(
         self,
-        # pyre-ignore[11]: Annotation is not defined as a valid type
         type_params: list[ast.TypeVar | ast.TypeVarTuple | ast.ParamSpec],
     ) -> None:
         for param in type_params:
-            # pyre-ignore[16]: Undefined attribute [16]: Module `ast` has no attribute `TypeVar`.
             if isinstance(param, ast.TypeVar):
                 self.set_pos(param)
                 self.emit("LOAD_CONST", param.name)
@@ -4802,7 +3778,6 @@ class CodeGenerator312(CodeGenerator):
                     self.emit_call_intrinsic_2("INTRINSIC_SET_TYPEPARAM_DEFAULT")
                 self.emit("COPY", 1)
                 self.storeName(param.name)
-            # pyre-ignore[16]: Module `ast` has no attribute `TypeVarTuple`.
             elif isinstance(param, ast.TypeVarTuple):
                 self.set_pos(param)
                 self.emit("LOAD_CONST", param.name)
@@ -4814,7 +3789,6 @@ class CodeGenerator312(CodeGenerator):
                     self.emit_call_intrinsic_2("INTRINSIC_SET_TYPEPARAM_DEFAULT")
                 self.emit("COPY", 1)
                 self.storeName(param.name)
-            # pyre-ignore[16]: Module `ast` has no attribute `ParamSpec`.
             elif isinstance(param, ast.ParamSpec):
                 self.set_pos(param)
                 self.emit("LOAD_CONST", param.name)
@@ -4866,7 +3840,6 @@ class CodeGenerator312(CodeGenerator):
 
         self.emit_init_class_attrs(gen, node, first_lineno)
 
-        # pyre-ignore[16]: no attribute type_params
         if node.type_params:
             gen.loadName(".type_params")
             gen.emit("STORE_NAME", "__type_params__")
@@ -4935,7 +3908,6 @@ class CodeGenerator312(CodeGenerator):
         self.emit_closure(class_body, 0)
         self.emit("LOAD_CONST", node.name)
 
-        # pyre-ignore[16]: no attribute type_params
         if node.type_params:
             self.loadName(".type_params")
             self.emit_call_intrinsic_1("INTRINSIC_SUBSCRIPT_GENERIC")
@@ -4967,7 +3939,6 @@ class CodeGenerator312(CodeGenerator):
         first_lineno = node.lineno if first_lineno is None else first_lineno
 
         outer_gen: CodeGenerator312 = self
-        # pyre-ignore[16]: no attribute type_params
         if node.type_params:
             self.prepare_type_params()
             gen_param_scope = self.symbols.scopes[TypeParams(node)]
@@ -5010,7 +3981,6 @@ class CodeGenerator312(CodeGenerator):
         self.set_pos(node)
         self.post_process_and_store_name(node)
 
-    # pyre-ignore[11]: Annotation `ast.TypeAlias` is not defined as a type.
     def make_type_alias_code_gen(self, node: ast.TypeAlias) -> CodeGenerator312:
         filename = self.graph.filename
         symbols = self.symbols
@@ -5032,6 +4002,14 @@ class CodeGenerator312(CodeGenerator):
 
     def emit_type_alias_set_func_defaults(self, code_gen: CodeGenerator) -> None:
         pass
+
+    def make_annotations_code_holder(self, code_gen: CodeGenerator) -> CodeHolder:
+        # Hook for the typevar-bound/default and type-alias-value scopes, which
+        # carry a synthetic ".format" parameter on 3.14+. Only CPython 3.16
+        # renames it back to "format" for these scopes (3.14/3.15 rename it for
+        # the __annotate__ scope only), so the default is to emit the code
+        # generator unchanged. See CodeGenerator316 for the override.
+        return code_gen
 
     def visitTypeAlias(self, node: ast.TypeAlias) -> None:
         outer_gen: CodeGenerator312 = self
@@ -5072,7 +4050,7 @@ class CodeGenerator312(CodeGenerator):
         code_gen.graph.emit_with_loc("RETURN_VALUE", 0, loc=node)
 
         outer_gen.set_pos(node)
-        outer_gen.emit_closure(code_gen, 0)
+        outer_gen.emit_closure(outer_gen.make_annotations_code_holder(code_gen), 0)
         self.emit_type_alias_set_func_defaults(outer_gen)
         outer_gen.emit("BUILD_TUPLE", 3)
         outer_gen.emit_call_intrinsic_1("INTRINSIC_TYPEALIAS")
@@ -5094,12 +4072,17 @@ class CodeGenerator312(CodeGenerator):
             if not isinstance(parent, TypeParamScope):
                 # Only real functions use "<locals>", nested scopes like
                 # comprehensions don't.
+                # pyrefly: ignore [missing-attribute]
                 if parent.is_function_scope:
+                    # pyrefly: ignore [missing-attribute]
                     prefix = parent.name + ".<locals>." + prefix
                 else:
+                    # pyrefly: ignore [missing-attribute]
                     prefix = parent.name + "." + prefix
+                # pyrefly: ignore [missing-attribute]
                 if parent.global_scope:
                     break
+            # pyrefly: ignore [missing-attribute]
             parent = parent.parent
         return prefix
 
@@ -5225,7 +4208,6 @@ class CodeGenerator312(CodeGenerator):
 
     # Exceptions --------------------------------------------------
 
-    # pyre-ignore[11]: Annotation `ast.TryStar` is not defined as a type.
     def visitTryStar(self, node: ast.TryStar) -> None:
         if node.finalbody:
             # pyre-fixme[6]: For 1st argument expected `Optional[Try]` but got
@@ -5460,26 +4442,19 @@ class CodeGenerator312(CodeGenerator):
             self.pop_fblock(HANDLER_CLEANUP)
             self.set_no_pos()
             self.emit("POP_BLOCK")
-            if handler.name:
+            handler_name = handler.name
+            if handler_name:
                 self.emit("LOAD_CONST", None)
-                # pyre-fixme[6]: For 1st argument expected `str` but got
-                #  `Optional[str]`.
-                self.storeName(handler.name)
-                # pyre-fixme[6]: For 1st argument expected `str` but got
-                #  `Optional[str]`.
-                self.delName(handler.name)
+                self.storeName(handler_name)
+                self.delName(handler_name)
             self.emit_jump_forward(except_)
 
             # except:
             self.nextBlock(cleanup_end)
-            if handler.name:
+            if handler_name:
                 self.emit("LOAD_CONST", None)
-                # pyre-fixme[6]: For 1st argument expected `str` but got
-                #  `Optional[str]`.
-                self.storeName(handler.name)
-                # pyre-fixme[6]: For 1st argument expected `str` but got
-                #  `Optional[str]`.
-                self.delName(handler.name)
+                self.storeName(handler_name)
+                self.delName(handler_name)
 
             # add exception raised to the res list
             self.emit("LIST_APPEND", 3)
@@ -5627,6 +4602,7 @@ class CodeGenerator312(CodeGenerator):
         val: ast.expr | None,
         opcode: str | None,
         oparg: object = 0,
+        avoid_creation: bool = False,
     ) -> None:
         self.check_async_comprehension(node)
 
@@ -5659,9 +4635,11 @@ class CodeGenerator312(CodeGenerator):
             elt,
             val,
             type(node),
-            IterStackState.IterableOnStack
-            if scope.inlined
-            else IterStackState.IterableInLocal,
+            (
+                IterStackState.IterableOnStack
+                if scope.inlined
+                else IterStackState.IterableInLocal
+            ),
         )
         if inlined_state is not None:
             self.pop_fblock(STOP_ITERATION)
@@ -5685,14 +4663,15 @@ class CodeGenerator312(CodeGenerator):
         val: ast.expr | None,
         type: type[ast.AST],
         iter_on_stack: IterStackState,
+        avoid_creation: bool = False,
     ) -> None:
         if comp.generators[gen_index].is_async:
             self._compile_async_comprehension(
-                comp, gen_index, depth, elt, val, type, iter_on_stack
+                comp, gen_index, depth, elt, val, type, iter_on_stack, avoid_creation
             )
         else:
             self._compile_sync_comprehension(
-                comp, gen_index, depth, elt, val, type, iter_on_stack
+                comp, gen_index, depth, elt, val, type, iter_on_stack, avoid_creation
             )
 
     def _compile_async_comprehension(
@@ -5704,6 +4683,7 @@ class CodeGenerator312(CodeGenerator):
         val: ast.expr | None,
         type: type[ast.AST],
         iter_on_stack: IterStackState,
+        avoid_creation: bool = False,
     ) -> None:
         start = self.newBlock("start")
         except_ = self.newBlock("except")
@@ -5784,6 +4764,7 @@ class CodeGenerator312(CodeGenerator):
         val: ast.expr | None,
         type: type[ast.AST],
         iter_on_stack: IterStackState,
+        avoid_creation: bool = False,
     ) -> None:
         start = self.newBlock("start")
         skip = self.newBlock("skip")
@@ -6080,7 +5061,7 @@ class CinderCodeGenBase(CodeGenerator):
     Code in this class should be common to all python versions.
     Inherit from this class and a concrete code generator, e.g.
 
-    class CinderCodeGenerator310(CinderCodeGenBase, CodeGenerator310):
+    class CinderCodeGenerator312(CinderCodeGenBase, CodeGenerator312):
         ...
 
     Note that CinderCodeGenBase needs to come first in the list of base
@@ -6089,11 +5070,6 @@ class CinderCodeGenBase(CodeGenerator):
 
     def set_qual_name(self, qualname: str) -> None:
         self._qual_name = qualname
-
-    def getCode(self) -> CodeType:
-        code = super().getCode()
-        cx_set_qualname(code, self._qual_name)
-        return code
 
     def visitAttribute(self, node: ast.Attribute) -> None:
         if isinstance(node.ctx, ast.Load) and self._is_super_call(node.value):
@@ -6243,7 +5219,7 @@ class CodeGenerator314(CodeGenerator312):
 
         loc = self.graph.loc
         self.set_pos(bound)
-        self.emit_closure(outer_gen, 0)
+        self.emit_closure(self.make_annotations_code_holder(outer_gen), 0)
         self.emit("SET_FUNCTION_ATTRIBUTE", MAKE_FUNCTION_DEFAULTS)
         self.set_pos(loc)
 
@@ -6314,6 +5290,10 @@ class CodeGenerator314(CodeGenerator312):
         ):
             return False
 
+        genexpr_scope = self.scopes.get(node.args[0])
+        if genexpr_scope and genexpr_scope.coroutine:
+            return False
+
         skip_optimization = self.newBlock("skip_optimization")
         attr = node.func
         assert isinstance(attr, ast.Name)
@@ -6330,6 +5310,8 @@ class CodeGenerator314(CodeGenerator312):
                 const = list
             elif attr.id == "set":
                 const = set
+            elif attr.id == "frozenset":
+                const = frozenset
             else:
                 assert attr.id == "tuple"
                 const = tuple
@@ -6348,7 +5330,7 @@ class CodeGenerator314(CodeGenerator312):
 
         if const is tuple or const is list:
             self.emit("BUILD_LIST", 0)
-        elif const is set:
+        elif const is set or const is frozenset:
             self.emit("BUILD_SET", 0)
         self.visit(node.args[0])
         loop = self.newBlock("loop")
@@ -6358,16 +5340,17 @@ class CodeGenerator314(CodeGenerator312):
         if const is tuple or const is list:
             self.emit_opt_function_loop_append()
             self.emit("JUMP", loop)
-        elif const is set:
+        elif const is set or const is frozenset:
             self.emit("SET_ADD", 3)
             self.emit("JUMP", loop)
         else:
             self.emit("TO_BOOL")
+            # pyrefly: ignore [bad-argument-type]
             self.emit(continue_jump_opcode, loop)
         self.nextBlock()
 
         self.emit_noline("POP_ITER")
-        if const not in (tuple, list, set):
+        if const not in (tuple, list, set, frozenset):
             self.emit("LOAD_CONST", not initial_res)
         self.emit("JUMP", end)
 
@@ -6376,6 +5359,8 @@ class CodeGenerator314(CodeGenerator312):
         self.emit("POP_ITER")
         if const is tuple:
             self.emit_call_intrinsic_1("INTRINSIC_LIST_TO_TUPLE")
+        elif const is frozenset:
+            self.emit_call_intrinsic_1("INTRINSIC_BUILD_FROZENSET")
         elif const is list or const is set:
             # already the right type
             pass
@@ -6591,6 +5576,7 @@ class CodeGenerator314(CodeGenerator312):
         val: ast.expr | None,
         type: type[ast.AST],
         iter_on_stack: IterStackState,
+        avoid_creation: bool = False,
     ) -> None:
         start = self.newBlock("start")
         except_ = self.newBlock("except")
@@ -6627,21 +5613,51 @@ class CodeGenerator314(CodeGenerator312):
         elt_loc = elt
         if gen_index < len(comp.generators):
             self.compile_comprehension_generator(
-                comp, gen_index, depth, elt, val, type, IterStackState.IterableInLocal
+                comp,
+                gen_index,
+                depth,
+                elt,
+                val,
+                type,
+                IterStackState.IterableInLocal,
+                avoid_creation,
             )
         elif type is ast.GeneratorExp:
-            self.visit(elt)
-            self.set_pos(elt)
-            self.emit_yield(self.scopes[comp])
-            self.emit("POP_TOP")
+            if isinstance(elt, ast.Starred):
+                self.compile_unpack_starred(comp, elt, yield_=True)
+            else:
+                self.visit(elt)
+                self.set_pos(elt)
+                self.emit_yield(self.scopes[comp])
+                self.emit("POP_TOP")
         elif type is ast.ListComp:
-            self.visit(elt)
-            self.set_pos(elt)
-            self.emit("LIST_APPEND", depth + 1)
+            if avoid_creation:
+                # gh-issue-151907: result discarded.
+                if isinstance(elt, ast.Starred):
+                    self.compile_unpack_starred(comp, elt, yield_=False)
+                else:
+                    self.visit(elt)
+                    self.set_pos(elt)
+                    self.emit("POP_TOP")
+            elif isinstance(elt, ast.Starred):
+                # PEP 798: [*x for ...] extends the result list.
+                self.visit(elt.value)
+                self.set_pos(elt)
+                self.emit("LIST_EXTEND", depth + 1)
+            else:
+                self.visit(elt)
+                self.set_pos(elt)
+                self.emit("LIST_APPEND", depth + 1)
         elif type is ast.SetComp:
-            self.visit(elt)
-            self.set_pos(elt)
-            self.emit("SET_ADD", depth + 1)
+            if isinstance(elt, ast.Starred):
+                # PEP 798: {*x for ...} updates the result set.
+                self.visit(elt.value)
+                self.set_pos(elt)
+                self.emit("SET_UPDATE", depth + 1)
+            else:
+                self.visit(elt)
+                self.set_pos(elt)
+                self.emit("SET_ADD", depth + 1)
         elif type is ast.DictComp:
             assert val is not None
             self.compile_dictcomp_element(elt, val)
@@ -6978,8 +5994,13 @@ class CodeGenerator314(CodeGenerator312):
                 "__conditional_annotations__",
             )
             self.emit("LOAD_CONST", conditional_index)
-            self.emit("SET_ADD", 1)
+            self.emit_add_conditional_annotation()
             self.emit("POP_TOP")
+
+    def emit_add_conditional_annotation(self) -> None:
+        # Register the annotation's index into the `__conditional_annotations__`
+        # set that is on top of the stack (below the just-loaded index).
+        self.emit("SET_ADD", 1)
 
     def setup_annotations(
         self,
@@ -7018,6 +6039,8 @@ class CodeGenerator314(CodeGenerator312):
         return outer_gen
 
     def leave_annotations(self, gen: CodeGenerator) -> None:
+        # The __annotate__ scope's ".format" parameter is renamed back to
+        # "format" in every version that defers annotations (3.14+).
         self.emit_closure(AnnotationsCodeHolder(gen), 0)
 
     def emit_argannotation(
@@ -7131,9 +6154,11 @@ class CodeGenerator314(CodeGenerator312):
 
         self._nameOp(
             "STORE",
-            "__annotate_func__"
-            if isinstance(self.scope, ClassScope)
-            else "__annotate__",
+            (
+                "__annotate_func__"
+                if isinstance(self.scope, ClassScope)
+                else "__annotate__"
+            ),
         )
 
         if need_separate_block:
@@ -7287,6 +6312,84 @@ class CodeGenerator315(CodeGenerator314):
                 self.emit("POP_TOP", 0)
         super().emit_prologue()
 
+    def emit_function_annotations(
+        self, loc: AST | SrcLocation, args: ast.arguments, returns: ast.expr | None
+    ) -> bool:
+        scope = self.scopes.get(args)
+        if not scope:
+            return False
+        assert isinstance(scope, AnnotationScope)
+        if not scope.annotations_used:
+            return False
+
+        ann_gen = self.setup_annotations(loc, args, scope)
+
+        # CPython 3.15 changed the order: posonlyargs before args
+        count = ann_gen.emit_argannotations(args.posonlyargs, loc)
+        count += ann_gen.emit_argannotations(args.args, loc)
+        if args.vararg and args.vararg.annotation is not None:
+            ann_gen.emit_argannotation(args.vararg.arg, args.vararg.annotation, loc)
+            count += 1
+        count += ann_gen.emit_argannotations(args.kwonlyargs, loc)
+        if args.kwarg and args.kwarg.annotation is not None:
+            ann_gen.emit_argannotation(args.kwarg.arg, args.kwarg.annotation, loc)
+            count += 1
+        if returns is not None:
+            ann_gen.emit_argannotation("return", returns, loc)
+            count += 1
+
+        ann_gen.graph.emit_with_loc("BUILD_MAP", count, loc)
+        ann_gen.graph.emit_with_loc("RETURN_VALUE", 0, loc)
+        self.leave_annotations(ann_gen)
+        return True
+
+    def emit_get_awaitable(self, kind: AwaitableKind) -> None:
+        super().emit_get_awaitable(kind)
+        self.emit("PUSH_NULL")
+
+    def visitYieldFrom(self, node: ast.YieldFrom) -> None:
+        if not isinstance(
+            self.tree,
+            (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.GeneratorExp),
+        ):
+            raise self.syntax_error("'yield from' outside function", node)
+        elif self.scope.coroutine:
+            raise self.syntax_error("'yield from' inside async function", node)
+
+        self.visit(node.value)
+        self.emit("GET_ITER", 1)
+        self.emit("LOAD_CONST", None)
+        self.emit_yield_from()
+
+    def wrap_in_stopiteration_handler(self) -> None:
+        insts = self.graph.entry.insts
+        has_gen_expr_start = any(
+            inst.opname == "RESUME" and inst.ioparg == int(ResumeOparg.GenExprStart)
+            for inst in insts
+        )
+        if not has_gen_expr_start:
+            return super().wrap_in_stopiteration_handler()
+
+        handler = self.newBlock("handler")
+        handler.is_exc_handler = True
+
+        setup = Instruction("SETUP_CLEANUP", handler, target=handler)
+        i = 0
+        while i < len(insts) and insts[i].opname != "RETURN_GENERATOR":
+            i += 1
+        i += 1
+        assert i < len(insts) and insts[i].opname == "POP_TOP"
+        i += 1
+        insts.insert(i, setup)
+
+        self.emit_noline("LOAD_CONST", None)
+        self.emit_noline("RETURN_VALUE")
+
+        self.nextBlock(handler)
+        self.graph.set_pos(NO_LOCATION)
+        self.emit_call_intrinsic_1("INTRINSIC_STOPITERATION_ERROR")
+        self.emit("RERAISE", 1)
+
     SUPPORTED_FUNCTION_CALL_OPS: tuple[str, ...] = (
         "all",
         "any",
@@ -7363,7 +6466,6 @@ class CodeGenerator315(CodeGenerator314):
             name = alias.name
             asname = alias.asname
             if name == "*":
-                # pyre-fixme[16] This field does not appear to be used.
                 self.namespace = 0
                 self.emit_import_star()
                 # There can only be one name w/ from ... import *
@@ -7397,6 +6499,7 @@ class CodeGenerator315(CodeGenerator314):
         val: ast.expr | None,
         opcode: str | None,
         oparg: object = 0,
+        avoid_creation: bool = False,
     ) -> None:
         self.check_async_comprehension(node)
 
@@ -7416,9 +6519,14 @@ class CodeGenerator315(CodeGenerator314):
         else:
             gen = cast(CodeGenerator312, self.make_comprehension_codegen(node, name))
             if isinstance(node, ast.GeneratorExp):
-                # Insert GET_ITER before RETURN_GENERATOR.
+                # Insert RESUME + GET_ITER before RETURN_GENERATOR.
                 # https://docs.python.org/3/reference/expressions.html#generator-expressions
                 gen.graph.entry.insts[0:0] = [
+                    Instruction(
+                        "RESUME",
+                        int(ResumeOparg.GenExprStart),
+                        int(ResumeOparg.GenExprStart),
+                    ),
                     Instruction("LOAD_FAST", 0, 0, outermost.iter),
                     Instruction(
                         "GET_AITER" if outermost.is_async else "GET_ITER",
@@ -7434,13 +6542,19 @@ class CodeGenerator315(CodeGenerator314):
         start = gen.newBlock("start")
         gen.setups.append(Entry(STOP_ITERATION, start, None, None))
         if opcode:
-            gen.emit(opcode, oparg)
-            if scope.inlined:
-                gen.emit("SWAP", 2)
+            if avoid_creation:
+                # gh-issue-151907: no collection is built; COPY 1 keeps a dummy
+                # value in the result slot so the inlined-comprehension stack
+                # layout (and its cleanup) is unchanged.
+                gen.emit("COPY", 1)
+            else:
+                gen.emit(opcode, oparg)
+                if scope.inlined:
+                    gen.emit("SWAP", 2)
 
         assert isinstance(gen, CodeGenerator312)
         gen.compile_comprehension_generator(
-            node, 0, 0, elt, val, type(node), iter_state
+            node, 0, 0, elt, val, type(node), iter_state, avoid_creation
         )
         if inlined_state is not None:
             self.pop_fblock(STOP_ITERATION)
@@ -7464,6 +6578,7 @@ class CodeGenerator315(CodeGenerator314):
         val: ast.expr | None,
         type: type[ast.AST],
         iter_on_stack: IterStackState,
+        avoid_creation: bool = False,
     ) -> None:
         start = self.newBlock("start")
         except_ = self.newBlock("except")
@@ -7483,6 +6598,7 @@ class CodeGenerator315(CodeGenerator314):
         self.nextBlock(start)
         self.emit("SETUP_FINALLY", except_)
         self.emit("GET_ANEXT")
+        self.emit("PUSH_NULL")
         self.emit("LOAD_CONST", None)
         self.nextBlock(send)
         self.emit_yield_from(await_=True)
@@ -7498,21 +6614,51 @@ class CodeGenerator315(CodeGenerator314):
         elt_loc = elt
         if gen_index < len(comp.generators):
             self.compile_comprehension_generator(
-                comp, gen_index, depth, elt, val, type, IterStackState.IterableInLocal
+                comp,
+                gen_index,
+                depth,
+                elt,
+                val,
+                type,
+                IterStackState.IterableInLocal,
+                avoid_creation,
             )
         elif type is ast.GeneratorExp:
-            self.visit(elt)
-            self.set_pos(elt)
-            self.emit_yield(self.scopes[comp])
-            self.emit("POP_TOP")
+            if isinstance(elt, ast.Starred):
+                self.compile_unpack_starred(comp, elt, yield_=True)
+            else:
+                self.visit(elt)
+                self.set_pos(elt)
+                self.emit_yield(self.scopes[comp])
+                self.emit("POP_TOP")
         elif type is ast.ListComp:
-            self.visit(elt)
-            self.set_pos(elt)
-            self.emit("LIST_APPEND", depth + 1)
+            if avoid_creation:
+                # gh-issue-151907: result discarded.
+                if isinstance(elt, ast.Starred):
+                    self.compile_unpack_starred(comp, elt, yield_=False)
+                else:
+                    self.visit(elt)
+                    self.set_pos(elt)
+                    self.emit("POP_TOP")
+            elif isinstance(elt, ast.Starred):
+                # PEP 798: [*x for ...] extends the result list.
+                self.visit(elt.value)
+                self.set_pos(elt)
+                self.emit("LIST_EXTEND", depth + 1)
+            else:
+                self.visit(elt)
+                self.set_pos(elt)
+                self.emit("LIST_APPEND", depth + 1)
         elif type is ast.SetComp:
-            self.visit(elt)
-            self.set_pos(elt)
-            self.emit("SET_ADD", depth + 1)
+            if isinstance(elt, ast.Starred):
+                # PEP 798: {*x for ...} updates the result set.
+                self.visit(elt.value)
+                self.set_pos(elt)
+                self.emit("SET_UPDATE", depth + 1)
+            else:
+                self.visit(elt)
+                self.set_pos(elt)
+                self.emit("SET_ADD", depth + 1)
         elif type is ast.DictComp:
             assert val is not None
             self.compile_dictcomp_element(elt, val)
@@ -7544,6 +6690,7 @@ class CodeGenerator315(CodeGenerator314):
         val: ast.expr | None,
         type: type[ast.AST],
         iter_on_stack: IterStackState,
+        avoid_creation: bool = False,
     ) -> None:
         start = self.newBlock("start")
         skip = self.newBlock("skip")
@@ -7586,22 +6733,52 @@ class CodeGenerator315(CodeGenerator314):
         elt_loc = elt
         if gen_index < len(comp.generators):
             self.compile_comprehension_generator(
-                comp, gen_index, depth, elt, val, type, IterStackState.IterableInLocal
+                comp,
+                gen_index,
+                depth,
+                elt,
+                val,
+                type,
+                IterStackState.IterableInLocal,
+                avoid_creation,
             )
         else:
             if type is ast.GeneratorExp:
-                self.set_pos(elt)
-                self.visit(elt)
-                self.emit_yield(self.scopes[comp])
-                self.emit("POP_TOP")
+                if isinstance(elt, ast.Starred):
+                    self.compile_unpack_starred(comp, elt, yield_=True)
+                else:
+                    self.set_pos(elt)
+                    self.visit(elt)
+                    self.emit_yield(self.scopes[comp])
+                    self.emit("POP_TOP")
             elif type is ast.ListComp:
-                self.visit(elt)
-                self.set_pos(elt)
-                self.emit("LIST_APPEND", depth + 1)
+                if avoid_creation:
+                    # gh-issue-151907: result discarded.
+                    if isinstance(elt, ast.Starred):
+                        self.compile_unpack_starred(comp, elt, yield_=False)
+                    else:
+                        self.visit(elt)
+                        self.set_pos(elt)
+                        self.emit("POP_TOP")
+                elif isinstance(elt, ast.Starred):
+                    # PEP 798: [*x for ...] extends the result list.
+                    self.visit(elt.value)
+                    self.set_pos(elt)
+                    self.emit("LIST_EXTEND", depth + 1)
+                else:
+                    self.visit(elt)
+                    self.set_pos(elt)
+                    self.emit("LIST_APPEND", depth + 1)
             elif type is ast.SetComp:
-                self.set_pos(elt)
-                self.visit(elt)
-                self.emit("SET_ADD", depth + 1)
+                if isinstance(elt, ast.Starred):
+                    # PEP 798: {*x for ...} updates the result set.
+                    self.visit(elt.value)
+                    self.set_pos(elt)
+                    self.emit("SET_UPDATE", depth + 1)
+                else:
+                    self.set_pos(elt)
+                    self.visit(elt)
+                    self.emit("SET_ADD", depth + 1)
             elif type is ast.DictComp:
                 assert elt is not None and val is not None
                 self.compile_dictcomp_element(elt, val)
@@ -7625,6 +6802,40 @@ class CodeGenerator315(CodeGenerator314):
             self.set_pos(comp)
             self.emit_end_for()
 
+    def visitAsyncFor(self, node: ast.AsyncFor) -> None:
+        with self.conditional_block():
+            start = self.newBlock("async_for_try")
+            except_ = self.newBlock("except")
+            end = self.newBlock("end")
+            send = self.newBlock("send")
+
+            self.visit(node.iter)
+            self.graph.emit_with_loc("GET_AITER", 0, node.iter)
+
+            self.nextBlock(start)
+
+            self.push_async_for_loop(start, end)
+            self.emit("SETUP_FINALLY", except_)
+            self.emit("GET_ANEXT")
+            self.emit("PUSH_NULL")
+            self.emit("LOAD_CONST", None)
+            self.nextBlock(send)
+            self.emit_yield_from(await_=True)
+            self.emit("POP_BLOCK")
+            self.emit("NOT_TAKEN")
+            self.visit(node.target)
+            self.visitStatements(node.body)
+            self.set_no_pos()
+            self.emitJump(start)
+            self.pop_async_for_loop()
+
+            self.nextBlock(except_)
+            self.set_pos(node.iter)
+            self.emit("END_ASYNC_FOR", send)
+            if node.orelse:
+                self.visitStatements(node.orelse)
+            self.nextBlock(end)
+
     def compile_comprehension_iter(self, gen: ast.comprehension) -> None:
         self.visit(gen.iter)
 
@@ -7643,91 +6854,87 @@ class CodeGenerator315(CodeGenerator314):
         self.emit("LIST_APPEND", 3)
 
 
-class CinderCodeGenerator310(CinderCodeGenBase, CodeGenerator310):
-    flow_graph = PyFlowGraphCinder310
-    _SymbolVisitor = CinderSymbolVisitor
+class CodeGenerator316(CodeGenerator315):
+    flow_graph = PyFlowGraph316
+    # gh-issue-151907: 3.16 skips building a list for a list comprehension whose
+    # result is discarded (used as an expression statement).
+    _unused_listcomp_avoids_creation: bool = True
 
-    def compile_comprehension(
-        self,
-        node: CompNode,
-        name: str,
-        elt: ast.expr,
-        val: ast.expr | None,
-        opcode: str | None,
-        oparg: object = 0,
-    ) -> None:
-        self.check_async_comprehension(node)
+    @staticmethod
+    def _call_stack_use(nargs: int, nkwds: int) -> int:
+        # gh-155141: 3.16 counts keyword arguments once, plus one slot for
+        # the names tuple (CALL_STACK_USE in CPython's codegen.c), so
+        # pure-keyword calls with 16 to 29 kwargs compile to CALL_KW.
+        return nargs + nkwds + (1 if nkwds else 0)
 
-        # fetch the scope that corresponds to comprehension
-        scope = self.scopes[node]
-        assert isinstance(scope, GenExprScope)
+    def emit_add_conditional_annotation(self) -> None:
+        # gh-154902: 3.16 registers a conditional annotation's index via the new
+        # INTRINSIC_ADD_CONDITIONAL_ANNOTATION binary intrinsic instead of SET_ADD.
+        self.emit_call_intrinsic_2("INTRINSIC_ADD_CONDITIONAL_ANNOTATION")
 
-        if scope.inlined:
-            # for inlined comprehension process with current generator
-            gen = self
-        else:
-            gen = cast(
-                CinderCodeGenerator310, self.make_comprehension_codegen(node, name)
-            )
-        gen.set_pos(node)
+    def make_annotations_code_holder(self, code_gen: CodeGenerator) -> CodeHolder:
+        # 3.16 extended the ".format" -> "format" rename to the
+        # typevar-bound/default and type-alias-value scopes (CPython's
+        # codegen_rename_annotations_format_param is now also called from
+        # codegen_type_param_bound_or_default and codegen_typealias_body).
+        return AnnotationsCodeHolder(code_gen)
 
-        if opcode:
-            gen.emit(opcode, oparg)
+    # 3.16 also optimizes frozenset(...) calls (gh-150027).
+    SUPPORTED_FUNCTION_CALL_OPS: tuple[str, ...] = (
+        CodeGenerator315.SUPPORTED_FUNCTION_CALL_OPS + ("frozenset",)
+    )
 
-        assert isinstance(gen, CinderCodeGenerator310)
-        gen.compile_comprehension_generator(
-            node, 0, 0, elt, val, type(node), not scope.inlined
-        )
-
-        if scope.inlined:
-            # collect list of defs that were introduced by comprehension
-            # note that we need to exclude:
-            # - .0 parameter since it is used
-            # - non-local names (typically named expressions), they are
-            #   defined in enclosing scope and thus should not be deleted
-            parent = scope.parent
-            assert parent
-
-            to_delete = [
-                v
-                for v in scope.defs
-                if v != ".0" and v not in scope.nonlocals and v not in parent.cells
-            ]
-            # sort names to have deterministic deletion order
-            to_delete.sort()
-            for v in to_delete:
-                self.delName(v)
+    def visitAttribute(self, node: ast.Attribute) -> None:
+        # 3.16 (gh-145855) removed DELETE_ATTR; `del obj.attr` now compiles to
+        # PUSH_NULL; <owner>; STORE_ATTR, where storing NULL performs the delete.
+        # Emit it here (PUSH_NULL before the owner) to byte-match CPython's
+        # codegen exactly; Load/Store are unchanged.
+        if isinstance(node.ctx, ast.Del):
+            self.maybe_add_static_attribute_to_class(node)
+            self.emit("PUSH_NULL")
+            self.visit(node.value)
+            loc = self.compute_start_location_to_match_attr(node, node)
+            self.graph.emit_with_loc("STORE_ATTR", self.mangle(node.attr), loc)
             return
+        super().visitAttribute(node)
 
-        if not isinstance(node, ast.GeneratorExp):
-            gen.emit("RETURN_VALUE")
+    def maybe_optimize_function_call(self, node: ast.Call) -> bool:
+        # frozenset({...}) / frozenset({... comprehension}) builds the set then
+        # converts it via INTRINSIC_BUILD_FROZENSET, guarded by an identity check
+        # that `frozenset` is still the builtin. The genexpr form is handled by
+        # the shared implementation via SUPPORTED_FUNCTION_CALL_OPS.
+        if (
+            isinstance(node.func, ast.Name)
+            and node.func.id == "frozenset"
+            and len(node.args) == 1
+            and not node.keywords
+            and isinstance(node.args[0], (ast.Set, ast.SetComp))
+        ):
+            return self.optimize_frozenset_literal_call(node)
+        return super().maybe_optimize_function_call(node)
 
-        gen.finish_function()
+    def optimize_frozenset_literal_call(self, node: ast.Call) -> bool:
+        end = self.newBlock("end")
+        skip_optimization = self.newBlock("skip_optimization")
+        loc = self.graph.loc
+        self.visit(node.func)
+        self.set_pos(node.func)
+        self.emit("COPY", 1)
+        self.emit("LOAD_COMMON_CONSTANT", frozenset)
+        self.emit("IS_OP", 0)
+        self.emit("POP_JUMP_IF_FALSE", skip_optimization)
+        self.nextBlock()
+        self.emit("POP_TOP")
+        self.visit(node.args[0])
+        self.emit_call_intrinsic_1("INTRINSIC_BUILD_FROZENSET")
+        self.emit("JUMP", end)
 
-        self.finish_comprehension(gen, node)
-
-    def emit_super_attribute(self, node: ast.Attribute) -> None:
-        call = node.value
-        assert isinstance(call, ast.Call)
-        self.emit("LOAD_GLOBAL", "super")
-        load_arg = self._emit_args_for_super(call, node.attr)
-        self.emit("LOAD_ATTR_SUPER", load_arg)
-
-    def cx_super_attribute(self, node: ast.Attribute) -> None:
-        self.emit_super_attribute(node)
-
-    def cx_super_call(self, node: ast.Call) -> None:
-        attr = node.func
-        assert isinstance(attr, ast.Attribute)
-        self.emit("LOAD_GLOBAL", "super")
-
-        call = attr.value
-        assert isinstance(call, ast.Call)
-        load_arg = self._emit_args_for_super(call, attr.attr)
-        self.emit("LOAD_METHOD_SUPER", load_arg)
-        for arg in node.args:
-            self.visit(arg)
-        self.emit("CALL_METHOD", len(node.args))
+        self.nextBlock(skip_optimization)
+        self.set_pos(loc)
+        self.graph.emit_with_loc("PUSH_NULL", 0, node.func)
+        self._call_helper(0, node, node.args, node.keywords)
+        self.nextBlock(end)
+        return True
 
 
 class CinderCodeGenerator312(CinderCodeGenBase, CodeGenerator312):
@@ -7751,26 +6958,28 @@ class CinderCodeGenerator315(CinderCodeGenerator312, CodeGenerator315):
     flow_graph = PyFlowGraph315
 
 
+class CinderCodeGenerator316(CinderCodeGenerator312, CodeGenerator316):
+    flow_graph = PyFlowGraph316
+
+
 def get_default_cinder_generator() -> type[CodeGenerator]:
+    if sys.version_info >= (3, 16):
+        return CinderCodeGenerator316
     if sys.version_info >= (3, 15):
         return CinderCodeGenerator315
     if sys.version_info >= (3, 14):
         return CinderCodeGenerator314
-    elif sys.version_info >= (3, 12):
-        return CinderCodeGenerator312
-
-    return CinderCodeGenerator310
+    return CinderCodeGenerator312
 
 
 def get_default_cpython_generator() -> type[CodeGenerator]:
+    if sys.version_info >= (3, 16):
+        return CodeGenerator316
     if sys.version_info >= (3, 15):
         return CodeGenerator315
     if sys.version_info >= (3, 14):
         return CodeGenerator314
-    elif sys.version_info >= (3, 12):
-        return CodeGenerator312
-
-    return CodeGenerator310
+    return CodeGenerator312
 
 
 def get_default_generator() -> type[CodeGenerator]:
@@ -7827,7 +7036,10 @@ class AnnotationsCodeHolder(CodeHolder):
         # different name (.format) in the symtable; if the name
         # "format" appears in the annotations, it doesn't get clobbered
         # by this name.
-        return code.replace(co_varnames=("format",))
+        varnames = code.co_varnames
+        if varnames and varnames[0] == ".format":
+            code = code.replace(co_varnames=("format",) + varnames[1:])
+        return code
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@
 #include "cinderx/Jit/elf/string.h"
 #include "cinderx/Jit/elf/symbol.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <iosfwd>
@@ -18,7 +19,7 @@
 #include <string>
 #include <vector>
 
-namespace jit::elf {
+namespace cinderx::jit::elf {
 
 // Section header indices / ordering.
 enum class SectionIdx : uint32_t {
@@ -109,4 +110,4 @@ struct CodeEntry {
 // The output ELF file is always a shared library.
 void writeEntries(std::ostream& os, const std::vector<CodeEntry>& entries);
 
-} // namespace jit::elf
+} // namespace cinderx::jit::elf

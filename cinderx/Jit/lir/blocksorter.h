@@ -2,14 +2,14 @@
 
 #pragma once
 
-#include "cinderx/Jit/containers.h"
+#include "cinderx/Common/containers.h"
 #include "cinderx/Jit/lir/block.h"
 
 #include <memory>
 #include <unordered_map>
 #include <vector>
 
-namespace jit::lir {
+namespace cinderx::jit::lir {
 
 // this struct represents a group of basic blocks that
 // are strongly conncted to each other.
@@ -27,11 +27,19 @@ struct SCCBasicBlocks {
 
 class BasicBlockSorter {
  public:
-  // The first entry of blocks is the entry block, and the last entry is the
-  // exit block. The position of both will be maintained after sorting.
-  explicit BasicBlockSorter(const std::vector<BasicBlock*>& blocks);
+  struct SortResult {
+    std::vector<BasicBlock*> sorted_blocks;
+    UnorderedSet<BasicBlock*> pruned_blocks;
+  };
 
-  std::vector<BasicBlock*> getSortedBlocks();
+  // The first entry of blocks is the entry block. The exit block is specified
+  // explicitly rather than assumed to be back(), since block allocation order
+  // may not match the logical exit.
+  explicit BasicBlockSorter(
+      const std::vector<BasicBlock*>& blocks,
+      BasicBlock* exit_block);
+
+  SortResult sort();
 
  private:
   BasicBlockSorter(const UnorderedSet<BasicBlock*>& blocks, BasicBlock* entry);
@@ -51,6 +59,7 @@ class BasicBlockSorter {
 
   UnorderedMap<BasicBlock*, SCCBasicBlocks*> block_to_scc_map_;
   std::vector<std::unique_ptr<SCCBasicBlocks>> scc_blocks_;
+  UnorderedSet<BasicBlock*> pruned_blocks_;
   void calculateSCC();
   int dfsSearch(BasicBlock* block);
 
@@ -58,4 +67,4 @@ class BasicBlockSorter {
   void sortRPO();
 };
 
-} // namespace jit::lir
+} // namespace cinderx::jit::lir

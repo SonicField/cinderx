@@ -2,11 +2,14 @@
 
 #include "cinderx/Jit/hir/guard_removal.h"
 
+#include "cinderx/Common/log.h"
 #include "cinderx/Jit/hir/analysis.h"
 #include "cinderx/Jit/hir/copy_propagation.h"
 #include "cinderx/Jit/hir/printer.h"
 
-namespace jit::hir {
+#define TRACE(...) JIT_LOGIF(getConfig().log.debug_guard_removal, __VA_ARGS__)
+
+namespace cinderx::jit::hir {
 
 namespace {
 
@@ -32,16 +35,16 @@ bool guardNeeded(const RegUses& uses, Register* new_reg, Type relaxed_type) {
       continue;
     }
     for (const Instr* instr : new_reg_uses->second) {
-      for (std::size_t i = 0; i < instr->NumOperands(); i++) {
-        if (instr->GetOperand(i) == new_reg) {
+      for (std::size_t i = 0; i < instr->numOperands(); i++) {
+        if (instr->getOperand(i) == new_reg) {
           if ((instr->output() != nullptr) &&
-              (instr->IsPhi() || isPassthrough(*instr))) {
+              (instr->isPhi() || isPassthrough(*instr))) {
             Register* passthrough_output = instr->output();
             Type passthrough_type = outputType(*instr, [&](std::size_t ind) {
               if (ind == i) {
                 return relaxed_type;
               }
-              return instr->GetOperand(ind)->type();
+              return instr->getOperand(ind)->type();
             });
             if (seen_state[passthrough_output]
                     .insert(passthrough_type)
@@ -49,18 +52,18 @@ bool guardNeeded(const RegUses& uses, Register* new_reg, Type relaxed_type) {
               worklist.emplace(passthrough_output, passthrough_type);
             }
           }
-          OperandType expected_type = instr->GetOperandType(i);
+          OperandType expected_type = instr->getOperandType(i);
           // TASK(T106726658): We should be able to remove GuardTypes if we ever
           // add a matching constraint for non-Primitive types, and our
           // GuardType adds an unnecessary refinement. Since we cannot guard on
           // primitive types yet, this should never happen
           if (operandsMustMatch(expected_type)) {
-            JIT_DLOG(
+            TRACE(
                 "'{}' kept alive by primitive '{}'", *new_reg->instr(), *instr);
             return true;
           }
           if (!registerTypeMatches(relaxed_type, expected_type)) {
-            JIT_DLOG("'{}' kept alive by '{}'", *new_reg->instr(), *instr);
+            TRACE("'{}' kept alive by '{}'", *new_reg->instr(), *instr);
             return true;
           }
         }
@@ -72,7 +75,7 @@ bool guardNeeded(const RegUses& uses, Register* new_reg, Type relaxed_type) {
 
 } // namespace
 
-void GuardTypeRemoval::Run(Function& func) {
+void GuardTypeRemoval::run(Function& func) {
   RegUses reg_uses = collectDirectRegUses(func);
   std::vector<std::unique_ptr<Instr>> removed_guards;
   for (auto& block : func.cfg.blocks) {
@@ -80,23 +83,23 @@ void GuardTypeRemoval::Run(Function& func) {
       auto& instr = *it;
       ++it;
 
-      if (!instr.IsGuardType()) {
+      if (!instr.isGuardType()) {
         continue;
       }
 
       Register* guard_out = instr.output();
-      Register* guard_in = instr.GetOperand(0);
+      Register* guard_in = instr.getOperand(0);
       if (!guardNeeded(reg_uses, guard_out, guard_in->type())) {
         auto assign = Assign::create(guard_out, guard_in);
         assign->copyBytecodeOffset(instr);
-        instr.ReplaceWith(*assign);
+        instr.replaceWith(*assign);
         removed_guards.emplace_back(&instr);
       }
     }
   }
 
-  CopyPropagation{}.Run(func);
+  CopyPropagation{}.run(func);
   reflowTypes(func);
 }
 
-} // namespace jit::hir
+} // namespace cinderx::jit::hir

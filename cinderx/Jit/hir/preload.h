@@ -4,71 +4,72 @@
 
 #include "cinderx/python.h"
 
-#include "cinderx/Common/log.h"
 #include "cinderx/Common/ref.h"
+#include "cinderx/Common/sorted_vec_map.h"
 #include "cinderx/Jit/hir/annotation_index.h"
 #include "cinderx/Jit/hir/function.h"
-#include "cinderx/Jit/hir/hir.h"
 #include "cinderx/Jit/hir/type.h"
 #include "cinderx/StaticPython/typed-args-info.h"
 
-#include <map>
+#include <memory>
+#include <string>
 #include <unordered_map>
 #include <utility>
 
-namespace jit::hir {
+namespace cinderx::jit::hir {
 
-using ArgToType = std::map<long, Type>;
-using GlobalNamesMap = std::unordered_map<int, BorrowedRef<>>;
+// Maps keyed on local indices or name indices.  Keys are small dense integers,
+// so a sorted vector is cheaper than a hash table or tree.
+using ArgTypeMap = SortedVecMap<int, Type>;
+using GlobalNamesMap = SortedVecMap<int, BorrowedRef<>>;
+using GlobalsCacheMap = SortedVecMap<int, PyObject**>;
+
+// A map keyed by type descr tuples.
+template <class T>
+using DescrMap = std::unordered_map<BorrowedRef<>, T>;
 
 struct FieldInfo {
   Py_ssize_t offset;
   Type type;
   BorrowedRef<PyUnicodeObject> name;
+  std::string name_str;
 };
 
 // The target of an INVOKE_FUNCTION or INVOKE_METHOD
 struct InvokeTarget {
   BorrowedRef<PyFunctionObject> func() const;
 
+  bool isBuiltin() const;
+  bool isFunction() const;
+
   // Vector-callable Python object
   Ref<> callable;
   // python-level return type (None for void/error-code builtins)
   Type return_type{TObject};
+  // Strong reference keeping return_type's spec PyTypeObject alive for the
+  // lifetime of this target (which spans compilation).  return_type only holds
+  // a borrowed reference, so without this the type could be freed by the
+  // interpreter mid-compile -- a use-after-free during a background compile.
+  OwnedType return_type_owned;
   // map argnum to primitive type code for primitive args only
-  ArgToType primitive_arg_types;
-  // container is immutable (target is not patchable)
-  bool container_is_immutable{false};
+  ArgTypeMap primitive_arg_types;
   // patching indirection, nullptr if container_is_immutable
   PyObject** indirect_ptr{nullptr};
   // vtable slot number (LOAD_METHOD_STATIC only)
   Py_ssize_t slot{-1};
-  // is a CI_CO_STATICALLY_COMPILED Python function or METH_TYPED builtin
-  bool is_statically_typed{false};
-  // is PyFunctionObject
-  bool is_function{false};
-  // is PyMethodDescrObject or PyCFunction (has a PyMethodDef)
-  bool is_builtin{false};
-  // needs the function object available at runtime (e.g. for freevars)
-  bool uses_runtime_func{
-#if PY_VERSION_HEX < 0x030C0000
-      false
-#else
-      true
-#endif
-  };
   // underlying C function implementation for builtins
   void* builtin_c_func{nullptr};
   // expected nargs for builtin; if matched, can x64 invoke even if untyped
-  long builtin_expected_nargs{-1};
+  int builtin_expected_nargs{-1};
+  // container is immutable (target is not patchable)
+  bool container_is_immutable{false};
+  // is a CI_CO_STATICALLY_COMPILED Python function or METH_TYPED builtin
+  bool is_statically_typed{false};
   // is a METH_TYPED builtin that returns void
   bool builtin_returns_void{false};
   // is a METH_TYPED builtin that returns integer error code
   bool builtin_returns_error_code{false};
 };
-
-using InvokeTargetMap =
-    std::unordered_map<PyObject*, std::unique_ptr<InvokeTarget>>;
 
 // The target of an INVOKE_NATIVE
 struct NativeTarget {
@@ -77,7 +78,7 @@ struct NativeTarget {
   // return type (must be a primitive int for native calls)
   Type return_type{TObject};
   // map argnum to primitive type code for primitive args only
-  ArgToType primitive_arg_types;
+  ArgTypeMap primitive_arg_types;
 };
 
 // Preloads all globals and classloader type descrs referenced by a code object.
@@ -89,120 +90,96 @@ class Preloader {
   Preloader(Preloader&&) = default;
   Preloader() = default;
 
-  static std::unique_ptr<Preloader> makePreloader(
+  static std::unique_ptr<Preloader> make(
       BorrowedRef<PyFunctionObject> func,
-      Ref<> reifier = nullptr) {
-    return makePreloader(
-        func->func_code,
-        func->func_builtins,
-        func->func_globals,
-        AnnotationIndex::from_function(func),
-        funcFullname(func),
-        std::move(reifier));
-  }
+      Ref<> reifier = nullptr);
 
-  static std::unique_ptr<Preloader> makePreloader(
+  static std::unique_ptr<Preloader> make(
       BorrowedRef<PyCodeObject> code,
       BorrowedRef<PyDictObject> builtins,
       BorrowedRef<PyDictObject> globals,
+      BorrowedRef<> module,
       std::unique_ptr<AnnotationIndex> annotations,
       const std::string& fullname,
-      Ref<> reifier = nullptr) {
-    auto preloader = std::unique_ptr<Preloader>(new Preloader(
-        code,
-        builtins,
-        globals,
-        std::move(annotations),
-        fullname,
-        std::move(reifier)));
-    bool success = preloader->preload();
-    JIT_DCHECK(
-        success != static_cast<bool>(PyErr_Occurred()),
-        "Expecting Python exception only when preloading fails, preloading "
-        "result: {}",
-        success);
-    return success ? std::move(preloader) : nullptr;
-  }
+      Ref<> reifier = nullptr);
 
-  Type type(BorrowedRef<> descr) const;
-  int primitiveTypecode(BorrowedRef<> descr) const;
-  BorrowedRef<PyTypeObject> pyType(BorrowedRef<> descr) const;
-  const OwnedType& preloadedType(BorrowedRef<> descr) const;
+  // Fetch the type represented by a type descr tuple.
+  const OwnedType* preloadedType(BorrowedRef<> descr) const;
 
-  const FieldInfo& fieldInfo(BorrowedRef<> descr) const;
+  const FieldInfo* fieldInfo(BorrowedRef<> descr) const;
 
   const InvokeTarget& invokeFunctionTarget(BorrowedRef<> descr) const;
   const InvokeTarget& invokeMethodTarget(BorrowedRef<> descr) const;
   const NativeTarget& invokeNativeTarget(BorrowedRef<> target) const;
 
-  const InvokeTargetMap& invokeFunctionTargets() const {
-    return func_targets_;
-  }
+  // All functions (not methods) invoked by the code object.
+  const DescrMap<std::unique_ptr<InvokeTarget>>& invokeFunctionTargets() const;
 
-  const GlobalNamesMap& globalNames() const {
-    return global_names_;
-  }
+  // All global names used by the code object.
+  const GlobalNamesMap& globalNames() const;
 
-  // get the type from argument check info for the given locals index, or
-  // TObject
-  Type checkArgType(long local_idx) const;
+  // Precomputed UTF-8 names from co_names, for use during HIR building without
+  // GIL.
+  const std::vector<std::string>& names() const;
+  const std::string& name(Py_ssize_t idx) const;
 
-  // get value for global at given name index
+  // Get the type from argument check info for the given locals index.  Will
+  // return TObject for untyped values.
+  Type checkArgType(int local_idx) const;
+
+  // Locals index -> declared type, for the Static Python locals that hold an
+  // unboxed primitive.
+  const ArgTypeMap& primitiveLocalTypes() const;
+
+  // Get the global value at a given name index.
   BorrowedRef<> global(int name_idx) const;
+
+  // Get the global cache at a given name index
+  PyObject** globalCache(int name_idx) const;
 
   std::unique_ptr<Function> makeFunction() const;
 
-  BorrowedRef<PyCodeObject> code() const {
-    return code_;
-  }
+  BorrowedRef<PyCodeObject> code() const;
+  BorrowedRef<PyDictObject> globals() const;
+  BorrowedRef<PyDictObject> builtins() const;
 
-  BorrowedRef<PyDictObject> globals() const {
-    return globals_;
-  }
+  AnnotationIndex* annotations() const;
 
-  BorrowedRef<PyDictObject> builtins() const {
-    return builtins_;
-  }
+  const std::string& fullname() const;
 
-  AnnotationIndex* annotations() const {
-    return annotations_.get();
-  }
+  // Return type of the function.  Object for untyped Python functions, can only
+  // be a more specific type for Static Python functions.
+  Type returnType() const;
 
-  const std::string& fullname() const {
-    return fullname_;
-  }
+  int numArgs() const;
 
-  Type returnType() const {
-    return return_type_;
-  }
+  bool hasPrimitiveArgs() const;
 
-  int numArgs() const {
-    if (code_ == nullptr) {
-      // code_ might be null if we parsed from textual ir
-      return 0;
-    }
-    return code_->co_argcount + code_->co_kwonlyargcount +
-        bool(code_->co_flags & CO_VARARGS) +
-        bool(code_->co_flags & CO_VARKEYWORDS);
-  }
-
-  bool hasPrimitiveArgs() const {
-    return has_primitive_args_;
-  }
-
-  std::unique_ptr<InvokeTarget> resolve_target_descr(
-      BorrowedRef<> descr,
-      int opcode);
-
-  BorrowedRef<> reifier() const {
-    return reifier_;
-  }
+  BorrowedRef<> reifier() const;
 
  private:
+  explicit Preloader(
+      BorrowedRef<PyCodeObject> code,
+      BorrowedRef<PyDictObject> builtins,
+      BorrowedRef<PyDictObject> globals,
+      std::unique_ptr<AnnotationIndex> annotations,
+      const std::string& fullname,
+      Ref<> reifier);
+
+  static std::unique_ptr<Preloader> makeImpl(
+      BorrowedRef<PyCodeObject> code,
+      BorrowedRef<PyDictObject> builtins,
+      BorrowedRef<PyDictObject> globals,
+      BorrowedRef<> module,
+      std::unique_ptr<AnnotationIndex> annotations,
+      const std::string& fullname,
+      Ref<> reifier,
+      bool register_code);
+
   BorrowedRef<> constArg(BytecodeInstruction& bc_instr) const;
   PyObject** getGlobalCache(BorrowedRef<> name) const;
   bool canCacheGlobals() const;
-  bool preload();
+  bool preload(BorrowedRef<> module, bool register_code);
 
   // Preload information only relevant to Static Python functions.
   bool preloadStatic();
@@ -210,43 +187,42 @@ class Preloader {
   // Check if a code object is for the top-level code in a module.
   bool isModuleCodeObject() const;
 
-  explicit Preloader(
-      BorrowedRef<PyCodeObject> code,
-      BorrowedRef<PyDictObject> builtins,
-      BorrowedRef<PyDictObject> globals,
-      std::unique_ptr<AnnotationIndex> annotations,
-      const std::string& fullname,
-      Ref<> reifier)
-      : code_(Ref<>::create(code)),
-        builtins_(Ref<>::create(builtins)),
-        globals_(Ref<>::create(globals)),
-        annotations_(std::move(annotations)),
-        fullname_(fullname),
-        reifier_(std::move(reifier)) {
-    JIT_CHECK(PyCode_Check(code_), "Expected PyCodeObject");
-  }
+  std::unique_ptr<InvokeTarget> resolveTargetDescr(
+      BorrowedRef<> descr,
+      int opcode);
 
   Ref<PyCodeObject> code_;
   Ref<PyDictObject> builtins_;
   Ref<PyDictObject> globals_;
   std::unique_ptr<AnnotationIndex> annotations_;
-  const std::string fullname_;
+  std::string fullname_;
   Ref<> reifier_;
+  std::vector<std::string> names_;
 
-  // keyed by type descr tuple identity (they are interned in code objects)
-  std::unordered_map<PyObject*, OwnedType> types_;
-  std::unordered_map<PyObject*, FieldInfo> fields_;
-  InvokeTargetMap func_targets_;
-  InvokeTargetMap meth_targets_;
-  std::unordered_map<PyObject*, std::unique_ptr<NativeTarget>> native_targets_;
-  // keyed by locals index
-  std::unordered_map<long, Type> check_arg_types_;
-  std::map<long, OwnedType> check_arg_pytypes_;
-  // keyed by name index, names borrowed from code object
+  DescrMap<OwnedType> types_;
+  DescrMap<FieldInfo> fields_;
+  DescrMap<std::unique_ptr<InvokeTarget>> func_targets_;
+  DescrMap<std::unique_ptr<InvokeTarget>> meth_targets_;
+  DescrMap<std::unique_ptr<NativeTarget>> native_targets_;
+
+  // Keyed by locals index.
+  SortedVecMap<int, OwnedType> check_arg_types_;
+  // Keyed by locals index, primitive-typed locals only.
+  ArgTypeMap primitive_local_types_;
+  // Keyed by name index, names borrowed from code object.
   GlobalNamesMap global_names_;
-  Type return_type_{TObject};
-  bool has_primitive_args_{false};
-  bool has_primitive_first_arg_{false};
+  // keyed by name index; stable GlobalCache value slots captured during
+  // preload (while the GIL is held).  Preloader::global() reads these slots
+  // directly during HIR building rather than re-entering the
+  // GlobalCacheManager, which is unsafe with the GIL released in a background
+  // compile.
+  GlobalsCacheMap global_caches_;
+  // Strong references to global values preloaded during LOAD_GLOBAL handling.
+  // Keeps the values alive during background compilation even if the Python
+  // dict deletes them, avoiding UAF when the compiler infers types via
+  // Type::fromObject. See test_delete_global_during_background_compile.
+  SortedVecMap<int, Ref<>> global_values_;
+  OwnedType return_type_;
   // for primitive args only, null unless has_primitive_args_
   Ref<_PyTypedArgsInfo> prim_args_info_;
 };
@@ -271,10 +247,18 @@ class PreloaderManager {
 
   size_t size() const;
 
-  bool isGlobalManager() const;
-
   // Clear out all preloaders.
   void clear();
+
+  // Move all preloaders out of this manager, leaving it empty.  Used to hand
+  // ownership of a set of preloaders to a background compilation thread.
+  PreloaderMap extract();
+
+  // Take ownership of a set of preloaders, replacing any current contents.
+  // Used by a background compilation thread to re-install preloaders that were
+  // created on the GIL-holding thread, so the inliner can find dependent
+  // preloaders during compilation.
+  void install(PreloaderMap preloaders);
 
  private:
   PreloaderMap preloaders_;
@@ -282,6 +266,11 @@ class PreloaderManager {
 
 // Get the global PreloaderManager object.
 PreloaderManager& preloaderManager();
+
+// Set the thread-local preloader manager to a specific manager. This is used
+// to share an isolated manager with worker threads during multi-threaded
+// compile.
+void setThreadLocalPreloaderManager(PreloaderManager* mgr);
 
 // RAII device for isolating preloaders state.
 // Uses thread-local storage to give each thread its own PreloaderManager
@@ -291,9 +280,12 @@ class IsolatedPreloaders {
   IsolatedPreloaders();
   ~IsolatedPreloaders();
 
+  PreloaderManager* manager();
+  const PreloaderManager* manager() const;
+
  private:
   PreloaderManager local_manager_;
   PreloaderManager* prev_manager_;
 };
 
-} // namespace jit::hir
+} // namespace cinderx::jit::hir

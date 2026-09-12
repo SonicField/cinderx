@@ -2,6 +2,9 @@
 
 #include "cinderx/Jit/hir/type.h"
 
+#include "cinderx/Common/define.h"
+#include "cinderx/Jit/compilation_lock.h"
+#include "cinderx/Jit/threaded_compile.h"
 #include "cinderx/StaticPython/static_array.h"
 #include "cinderx/StaticPython/type_code.h"
 
@@ -10,11 +13,13 @@
 #include <fmt/ranges.h>
 
 #include <algorithm>
+#include <bit>
 #include <cstring>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
-namespace jit::hir {
+namespace cinderx::jit::hir {
 
 static_assert(sizeof(Type) == 16, "Type should fit in two registers");
 static_assert(sizeof(intptr_t) == sizeof(int64_t), "Expected 64-bit pointers");
@@ -44,9 +49,6 @@ const std::unordered_map<Type, PyTypeObject*>& typeToPyType() {
         {TTuple, &PyTuple_Type},
         {TType, &PyType_Type},
         {TUnicode, &PyUnicode_Type},
-#if PY_VERSION_HEX < 0x030C0000
-        {TWaitHandle, &Ci_PyWaitHandle_Type},
-#endif
         {TNoneType, Py_TYPE(Py_None)},
     };
 
@@ -283,7 +285,7 @@ static auto makeSortedBits() {
 
   // Sort the vector so types with the most bits set show up first.
   auto pred = [](auto& a, auto& b) {
-    return popcount(a.first) > popcount(b.first);
+    return std::popcount(a.first) > std::popcount(b.first);
   };
   std::sort(vec.begin(), vec.end(), pred);
   JIT_CHECK(
@@ -386,15 +388,9 @@ Type Type::fromTypeImpl(PyTypeObject* type, bool exact) {
     return TArray;
   }
 
-  {
-    ThreadedCompileSerialize guard;
-    if (type->tp_mro == nullptr && !(type->tp_flags & Py_TPFLAGS_READY)) {
-      PyType_Ready(type);
-    }
-  }
   JIT_CHECK(
-      type->tp_mro != nullptr,
-      "Type {}({}) has a null mro",
+      type->tp_mro != nullptr && type->tp_flags & Py_TPFLAGS_READY,
+      "Type {}({}) has a null mro or isn't ready",
       type->tp_name,
       reinterpret_cast<void*>(type));
 
@@ -425,18 +421,18 @@ Type Type::fromObject(PyObject* obj) {
   if (obj == Py_None) {
     // There's only one value of type NoneType, so we don't need the result to
     // be specialized and it's always immortal.
-    if constexpr (PY_VERSION_HEX >= 0x030C0000) {
-      return TImmortalNoneType;
-    }
-    return TNoneType;
+    return TImmortalNoneType;
   }
 
   bits_t lifetime = [&]() {
     // Serialize to silence TSAN errors about accessing the reference count of
-    // which can change during compliation. However, this is really a false
+    // which can change during compilation. However, this is really a false
     // positive as the mortality of an object should not change during
     // compilation.
-    ThreadedCompileSerialize guard;
+    std::optional<ThreadedCompileGILHolder> guard;
+    if constexpr (kTsanEnabled) {
+      guard.emplace();
+    }
     return _Py_IsImmortal(obj) ? kLifetimeImmortal : kLifetimeMortal;
   }();
   return Type{fromTypeExact(Py_TYPE(obj)).bits_, lifetime, obj};
@@ -688,6 +684,14 @@ unsigned int Type::sizeInBytes() const {
   JIT_ABORT("Unexpected type {}", *this);
 }
 
+bool Type::isLeafScalar() const {
+  // bool is included because it cannot be subclassed; TNullptr allows the same
+  // reasoning to apply to XDecref of an optional value.
+  static const Type kLeafScalarTypes =
+      TLongExact | TFloatExact | TUnicodeExact | TBytesExact | TBool | TNullptr;
+  return *this <= kLeafScalarTypes;
+}
+
 Type OwnedType::toHir() const {
   int prim_type = _PyClassLoader_GetTypeCode(type);
   if (prim_type != TYPED_OBJECT) {
@@ -734,4 +738,20 @@ Type prim_type_to_type(int prim_type) {
   }
 }
 
-} // namespace jit::hir
+Type primitiveZero(Type type) {
+  if (type <= TCDouble) {
+    return Type::fromCDouble(0.0);
+  }
+  if (type <= TCBool) {
+    return Type::fromCBool(false);
+  }
+  if (type <= TCSigned) {
+    return Type::fromCInt(0, type);
+  }
+  if (type <= TCUnsigned) {
+    return Type::fromCUInt(0, type);
+  }
+  JIT_THROW("No zero value for type {}", type);
+}
+
+} // namespace cinderx::jit::hir

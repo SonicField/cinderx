@@ -4,18 +4,18 @@
 
 #include "cinderx/Jit/hir/pass.h"
 
-namespace jit::hir {
+namespace cinderx::jit::hir {
 
 // Eliminate Assign instructions by propagating copies.
-class CopyPropagation : public Pass {
+class CopyPropagation final : public Pass {
  public:
   CopyPropagation() : Pass("CopyPropagation") {}
 
-  void Run(Function& irfunc) override;
+  void run(Function& irfunc) override;
 
-  static std::unique_ptr<CopyPropagation> Factory() {
+  static std::unique_ptr<CopyPropagation> factory() {
     return std::make_unique<CopyPropagation>();
   }
 };
 
-} // namespace jit::hir
+} // namespace cinderx::jit::hir

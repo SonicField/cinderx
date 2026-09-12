@@ -7,8 +7,11 @@
 #include "cinderx/Jit/hir/printer.h"
 #include "cinderx/RuntimeTests/fixtures.h"
 
-using jit::BCOffset;
-using namespace jit::hir;
+namespace cinderx {
+
+using cinderx::jit::BCOffset;
+
+using namespace cinderx::jit::hir;
 
 class FrameStateCreationTest : public RuntimeTest {};
 
@@ -21,7 +24,7 @@ TEST_F(FrameStateCreationTest, InitialInstrOffset) {
   {                                                                         \
     ASSERT_TRUE(irfunc != nullptr);                                         \
     EXPECT_EQ(                                                              \
-        HIRPrinter{}.setFullSnapshots(true).ToString(*(irfunc)), expected); \
+        HIRPrinter{}.setFullSnapshots(true).toString(*(irfunc)), expected); \
   }
 
 TEST_F(FrameStateCreationTest, LoadGlobal) {
@@ -31,10 +34,98 @@ def test():
 )";
   std::unique_ptr<Function> irfunc;
   CompileToHIR(src, "test", irfunc);
-#if PY_VERSION_HEX >= 0x030C0000
+#if PY_VERSION_HEX >= 0x030F0000
   const char* expected = R"(fun jittestmodule:test {
   bb 0 {
     v0 = LoadCurrentFunc
+    LoadFrame
+    Snapshot {
+      CurInstrOffset 0
+    }
+    v1 = LoadEvalBreaker
+    CondBranch<2, 1> v1
+  }
+
+  bb 2 (preds 0) {
+    Snapshot {
+      CurInstrOffset 0
+    }
+    v2 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
+    Snapshot {
+      CurInstrOffset 4
+    }
+    v3 = LoadGlobalCached<0; "foo">
+    Guard v3 {
+      FrameState {
+        CurInstrOffset 4
+      }
+    }
+    v3 = RefineType<Object> v3
+    Snapshot {
+      CurInstrOffset 14
+      Stack<1> v3
+    }
+    Return v3
+  }
+}
+)";
+#elif PY_VERSION_HEX >= 0x030E0000 && defined(Py_GIL_DISABLED)
+  const char* expected = R"(fun jittestmodule:test {
+  bb 0 {
+    v0 = LoadCurrentFunc
+    LoadFrame
+    Snapshot {
+      CurInstrOffset 0
+    }
+    AtQuiescentState
+    v1 = LoadEvalBreaker
+    CondBranch<2, 1> v1
+  }
+
+  bb 2 (preds 0) {
+    Snapshot {
+      CurInstrOffset 0
+    }
+    v2 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
+    Snapshot {
+      CurInstrOffset 2
+    }
+    v3 = LoadGlobalCached<0; "foo">
+    Guard v3 {
+      FrameState {
+        CurInstrOffset 2
+      }
+    }
+    v3 = RefineType<Object> v3
+    Snapshot {
+      CurInstrOffset 12
+      Stack<1> v3
+    }
+    Return v3
+  }
+}
+)";
+#else
+  const char* expected = R"(fun jittestmodule:test {
+  bb 0 {
+    v0 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
     }
@@ -58,35 +149,18 @@ def test():
     Snapshot {
       CurInstrOffset 2
     }
-    v3 = LoadGlobal<0; "foo"> {
+    v3 = LoadGlobalCached<0; "foo">
+    Guard v3 {
       FrameState {
         CurInstrOffset 2
       }
     }
+    v3 = RefineType<Object> v3
     Snapshot {
       CurInstrOffset 12
       Stack<1> v3
     }
     Return v3
-  }
-}
-)";
-#else
-  const char* expected = R"(fun jittestmodule:test {
-  bb 0 {
-    Snapshot {
-      CurInstrOffset 0
-    }
-    v0 = LoadGlobal<0; "foo"> {
-      FrameState {
-        CurInstrOffset 0
-      }
-    }
-    Snapshot {
-      CurInstrOffset 2
-      Stack<1> v0
-    }
-    Return v0
   }
 }
 )";
@@ -107,6 +181,7 @@ def test(fs):
   bb 0 {
     v0 = LoadArg<0; "fs">
     v2 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<2> v0 v1
@@ -131,48 +206,173 @@ def test(fs):
 
   bb 5 (preds 0, 6) {
     Snapshot {
-      CurInstrOffset 2
+      CurInstrOffset 4
       Locals<2> v0 v1
     }
-    v5 = LoadGlobal<0; "xs"> {
+    v5 = LoadGlobalCached<0; "xs">
+    Guard v5 {
       FrameState {
-        CurInstrOffset 2
+        CurInstrOffset 4
         Locals<2> v0 v1
       }
     }
+    v5 = RefineType<Object> v5
     Snapshot {
-      CurInstrOffset 12
+      CurInstrOffset 14
       Locals<2> v0 v1
       Stack<1> v5
     }
     v6 = GetIter v5 {
       FrameState {
-        CurInstrOffset 12
+        CurInstrOffset 14
         Locals<2> v0 v1
       }
     }
     v7 = LoadConst<Nullptr>
-    v3 = Assign v6
-    v4 = Assign v7
+    v8 = Assign v6
+    v9 = Assign v7
     Branch<7>
   }
 
   bb 7 (preds 2, 5) {
-    v10 = LoadEvalBreaker
-    CondBranch<8, 1> v10
+    v13 = LoadEvalBreaker
+    CondBranch<8, 1> v13
+  }
+
+  bb 8 (preds 7) {
+    Snapshot {
+      CurInstrOffset 18
+      Locals<2> v0 v1
+      Stack<2> v8 v9
+    }
+    v14 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 18
+        Locals<2> v0 v1
+        Stack<2> v8 v9
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 7, 8) {
+    Snapshot {
+      CurInstrOffset 18
+      Locals<2> v0 v1
+      Stack<2> v8 v9
+    }
+    v10 = InvokeIterNext v8 {
+      FrameState {
+        CurInstrOffset 18
+        Locals<2> v0 v1
+        Stack<2> v8 v9
+      }
+    }
+    v11 = Assign v10
+    CondBranchIterNotDone<2, 4> v11
+  }
+
+  bb 2 (preds 1) {
+    Snapshot {
+      CurInstrOffset 22
+      Locals<2> v0 v1
+      Stack<3> v8 v9 v11
+    }
+    v1 = Assign v11
+    Branch<7>
+  }
+
+  bb 4 (preds 1) {
+    Snapshot {
+      CurInstrOffset 30
+      Locals<2> v0 v1
+      Stack<2> v8 v9
+    }
+    v12 = LoadConst<ImmortalNoneType>
+    Snapshot {
+      CurInstrOffset 34
+      Locals<2> v0 v1
+      Stack<1> v12
+    }
+    Return v12
+  }
+}
+)";
+#elif PY_VERSION_HEX >= 0x030E0000 && defined(Py_GIL_DISABLED)
+  const char* expected = R"(fun jittestmodule:test {
+  bb 0 {
+    v0 = LoadArg<0; "fs">
+    v2 = LoadCurrentFunc
+    LoadFrame
+    v3 = TagIfDeferred v0
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v3 v1
+    }
+    AtQuiescentState
+    v4 = LoadEvalBreaker
+    CondBranch<6, 5> v4
+  }
+
+  bb 6 (preds 0) {
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v3 v1
+    }
+    v5 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+        Locals<2> v3 v1
+      }
+    }
+    Branch<5>
+  }
+
+  bb 5 (preds 0, 6) {
+    Snapshot {
+      CurInstrOffset 2
+      Locals<2> v3 v1
+    }
+    v6 = LoadGlobalCached<0; "xs">
+    Guard v6 {
+      FrameState {
+        CurInstrOffset 2
+        Locals<2> v3 v1
+      }
+    }
+    v6 = RefineType<Object> v6
+    Snapshot {
+      CurInstrOffset 12
+      Locals<2> v3 v1
+      Stack<1> v6
+    }
+    v7 = GetIter v6 {
+      FrameState {
+        CurInstrOffset 12
+        Locals<2> v3 v1
+      }
+    }
+    v8 = Assign v7
+    Branch<7>
+  }
+
+  bb 7 (preds 2, 5) {
+    AtQuiescentState
+    v12 = LoadEvalBreaker
+    CondBranch<8, 1> v12
   }
 
   bb 8 (preds 7) {
     Snapshot {
       CurInstrOffset 14
-      Locals<2> v0 v1
-      Stack<2> v3 v4
+      Locals<2> v3 v1
+      Stack<1> v8
     }
-    v11 = RunPeriodicTasks {
+    v13 = RunPeriodicTasks {
       FrameState {
         CurInstrOffset 14
-        Locals<2> v0 v1
-        Stack<2> v3 v4
+        Locals<2> v3 v1
+        Stack<1> v8
       }
     }
     Branch<1>
@@ -181,38 +381,38 @@ def test(fs):
   bb 1 (preds 7, 8) {
     Snapshot {
       CurInstrOffset 14
-      Locals<2> v0 v1
-      Stack<2> v3 v4
+      Locals<2> v3 v1
+      Stack<1> v8
     }
-    v8 = InvokeIterNext v3 {
+    v9 = InvokeIterNext v8 {
       FrameState {
         CurInstrOffset 14
-        Locals<2> v0 v1
-        Stack<2> v3 v4
+        Locals<2> v3 v1
+        Stack<1> v8
       }
     }
-    v5 = Assign v8
-    CondBranchIterNotDone<2, 4> v5
+    v10 = Assign v9
+    CondBranchIterNotDone<2, 4> v10
   }
 
   bb 2 (preds 1) {
     Snapshot {
       CurInstrOffset 18
-      Locals<2> v0 v1
-      Stack<3> v3 v4 v5
+      Locals<2> v3 v1
+      Stack<2> v8 v10
     }
-    v1 = Assign v5
+    v1 = Assign v10
     Branch<7>
   }
 
   bb 4 (preds 1) {
     Snapshot {
       CurInstrOffset 26
-      Locals<2> v0 v1
-      Stack<2> v3 v4
+      Locals<2> v3 v1
+      Stack<1> v8
     }
-    v9 = LoadConst<ImmortalNoneType>
-    Return v9
+    v11 = LoadConst<ImmortalNoneType>
+    Return v11
   }
 }
 )";
@@ -221,6 +421,7 @@ def test(fs):
   bb 0 {
     v0 = LoadArg<0; "fs">
     v2 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<2> v0 v1
@@ -248,12 +449,14 @@ def test(fs):
       CurInstrOffset 2
       Locals<2> v0 v1
     }
-    v5 = LoadGlobal<0; "xs"> {
+    v5 = LoadGlobalCached<0; "xs">
+    Guard v5 {
       FrameState {
         CurInstrOffset 2
         Locals<2> v0 v1
       }
     }
+    v5 = RefineType<Object> v5
     Snapshot {
       CurInstrOffset 12
       Locals<2> v0 v1
@@ -265,26 +468,26 @@ def test(fs):
         Locals<2> v0 v1
       }
     }
-    v3 = Assign v6
+    v7 = Assign v6
     Branch<7>
   }
 
   bb 7 (preds 2, 5) {
-    v9 = LoadEvalBreaker
-    CondBranch<8, 1> v9
+    v11 = LoadEvalBreaker
+    CondBranch<8, 1> v11
   }
 
   bb 8 (preds 7) {
     Snapshot {
       CurInstrOffset 14
       Locals<2> v0 v1
-      Stack<1> v3
+      Stack<1> v7
     }
-    v10 = RunPeriodicTasks {
+    v12 = RunPeriodicTasks {
       FrameState {
         CurInstrOffset 14
         Locals<2> v0 v1
-        Stack<1> v3
+        Stack<1> v7
       }
     }
     Branch<1>
@@ -294,26 +497,26 @@ def test(fs):
     Snapshot {
       CurInstrOffset 14
       Locals<2> v0 v1
-      Stack<1> v3
+      Stack<1> v7
     }
-    v7 = InvokeIterNext v3 {
+    v8 = InvokeIterNext v7 {
       FrameState {
         CurInstrOffset 14
         Locals<2> v0 v1
-        Stack<1> v3
+        Stack<1> v7
       }
     }
-    v4 = Assign v7
-    CondBranchIterNotDone<2, 4> v4
+    v9 = Assign v8
+    CondBranchIterNotDone<2, 4> v9
   }
 
   bb 2 (preds 1) {
     Snapshot {
       CurInstrOffset 18
       Locals<2> v0 v1
-      Stack<2> v3 v4
+      Stack<2> v7 v9
     }
-    v1 = Assign v4
+    v1 = Assign v9
     Branch<7>
   }
 
@@ -321,18 +524,19 @@ def test(fs):
     Snapshot {
       CurInstrOffset 26
       Locals<2> v0 v1
-      Stack<1> v3
+      Stack<1> v7
     }
-    v8 = LoadConst<ImmortalNoneType>
-    Return v8
+    v10 = LoadConst<ImmortalNoneType>
+    Return v10
   }
 }
 )";
-#elif PY_VERSION_HEX >= 0x030C0000
+#else
   const char* expected = R"(fun jittestmodule:test {
   bb 0 {
     v0 = LoadArg<0; "fs">
     v2 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<2> v0 v1
@@ -360,12 +564,14 @@ def test(fs):
       CurInstrOffset 2
       Locals<2> v0 v1
     }
-    v5 = LoadGlobal<0; "xs"> {
+    v5 = LoadGlobalCached<0; "xs">
+    Guard v5 {
       FrameState {
         CurInstrOffset 2
         Locals<2> v0 v1
       }
     }
+    v5 = RefineType<Object> v5
     Snapshot {
       CurInstrOffset 12
       Locals<2> v0 v1
@@ -377,26 +583,26 @@ def test(fs):
         Locals<2> v0 v1
       }
     }
-    v3 = Assign v6
+    v7 = Assign v6
     Branch<7>
   }
 
   bb 7 (preds 2, 5) {
-    v9 = LoadEvalBreaker
-    CondBranch<8, 1> v9
+    v11 = LoadEvalBreaker
+    CondBranch<8, 1> v11
   }
 
   bb 8 (preds 7) {
     Snapshot {
       CurInstrOffset 14
       Locals<2> v0 v1
-      Stack<1> v3
+      Stack<1> v7
     }
-    v10 = RunPeriodicTasks {
+    v12 = RunPeriodicTasks {
       FrameState {
         CurInstrOffset 14
         Locals<2> v0 v1
-        Stack<1> v3
+        Stack<1> v7
       }
     }
     Branch<1>
@@ -406,26 +612,26 @@ def test(fs):
     Snapshot {
       CurInstrOffset 14
       Locals<2> v0 v1
-      Stack<1> v3
+      Stack<1> v7
     }
-    v7 = InvokeIterNext v3 {
+    v8 = InvokeIterNext v7 {
       FrameState {
         CurInstrOffset 14
         Locals<2> v0 v1
-        Stack<1> v3
+        Stack<1> v7
       }
     }
-    v4 = Assign v7
-    CondBranchIterNotDone<2, 4> v4
+    v9 = Assign v8
+    CondBranchIterNotDone<2, 4> v9
   }
 
   bb 2 (preds 1) {
     Snapshot {
       CurInstrOffset 18
       Locals<2> v0 v1
-      Stack<2> v3 v4
+      Stack<2> v7 v9
     }
-    v1 = Assign v4
+    v1 = Assign v9
     Branch<7>
   }
 
@@ -434,96 +640,9 @@ def test(fs):
       CurInstrOffset 24
       Locals<2> v0 v1
     }
-    v8 = LoadConst<ImmortalNoneType>
-    v8 = RefineType<ImmortalNoneType> v8
-    Return<ImmortalNoneType> v8
-  }
-}
-)";
-#else
-  const char* expected = R"(fun jittestmodule:test {
-  bb 0 {
-    v0 = LoadArg<0; "fs">
-    Snapshot {
-      CurInstrOffset 0
-      Locals<2> v0 v1
-    }
-    v2 = LoadGlobal<0; "xs"> {
-      FrameState {
-        CurInstrOffset 0
-        Locals<2> v0 v1
-      }
-    }
-    Snapshot {
-      CurInstrOffset 2
-      Locals<2> v0 v1
-      Stack<1> v2
-    }
-    v3 = GetIter v2 {
-      FrameState {
-        CurInstrOffset 2
-        Locals<2> v0 v1
-      }
-    }
-    v2 = Assign v3
-    Branch<4>
-  }
-
-  bb 4 (preds 0, 2) {
-    v6 = LoadEvalBreaker
-    CondBranch<5, 1> v6
-  }
-
-  bb 5 (preds 4) {
-    Snapshot {
-      CurInstrOffset 4
-      Locals<2> v0 v1
-      Stack<1> v2
-    }
-    v7 = RunPeriodicTasks {
-      FrameState {
-        CurInstrOffset 4
-        Locals<2> v0 v1
-        Stack<1> v2
-      }
-    }
-    Branch<1>
-  }
-
-  bb 1 (preds 4, 5) {
-    Snapshot {
-      CurInstrOffset 4
-      Locals<2> v0 v1
-      Stack<1> v2
-    }
-    v4 = InvokeIterNext v2 {
-      FrameState {
-        CurInstrOffset 4
-        Locals<2> v0 v1
-        Stack<1> v2
-      }
-    }
-    v3 = Assign v4
-    CondBranchIterNotDone<2, 3> v3
-  }
-
-  bb 2 (preds 1) {
-    Snapshot {
-      CurInstrOffset 6
-      Locals<2> v0 v1
-      Stack<2> v2 v3
-    }
-    v1 = Assign v3
-    Branch<4>
-  }
-
-  bb 3 (preds 1) {
-    Snapshot {
-      CurInstrOffset 10
-      Locals<2> v0 v1
-    }
-    v5 = LoadConst<NoneType>
-    Return v5
+    v10 = LoadConst<ImmortalNoneType>
+    v10 = RefineType<ImmortalNoneType> v10
+    Return<ImmortalNoneType> v10
   }
 }
 )";
@@ -541,12 +660,162 @@ def test(x, y):
   std::unique_ptr<Function> irfunc;
   CompileToHIR(src, "test", irfunc);
 
-#if PY_VERSION_HEX >= 0x030E0000
+#if PY_VERSION_HEX >= 0x030E0000 && defined(Py_GIL_DISABLED)
   const char* expected = R"(fun jittestmodule:test {
   bb 0 {
     v0 = LoadArg<0; "x">
     v1 = LoadArg<1; "y">
     v2 = LoadCurrentFunc
+    LoadFrame
+    v3 = TagIfDeferred v0
+    v4 = TagIfDeferred v1
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v3 v4
+    }
+    AtQuiescentState
+    v5 = LoadEvalBreaker
+    CondBranch<4, 3> v5
+  }
+
+  bb 4 (preds 0) {
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v3 v4
+    }
+    v6 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+        Locals<2> v3 v4
+      }
+    }
+    Branch<3>
+  }
+
+  bb 3 (preds 0, 4) {
+    Snapshot {
+      CurInstrOffset 2
+      Locals<2> v3 v4
+    }
+    v7 = IsTruthy v3 {
+      FrameState {
+        CurInstrOffset 6
+        Locals<2> v3 v4
+        Stack<1> v3
+      }
+    }
+    v8 = PrimitiveBoxBool v7
+    Snapshot {
+      CurInstrOffset 14
+      Locals<2> v3 v4
+      Stack<2> v3 v8
+    }
+    v10 = LoadConst<ImmortalBool[True]>
+    v9 = PrimitiveCompare<Equal> v8 v10
+    v11 = Assign v3
+    CondBranch<1, 2> v9
+  }
+
+  bb 1 (preds 3) {
+    Snapshot {
+      CurInstrOffset 20
+      Locals<2> v3 v4
+      Stack<1> v11
+    }
+    v11 = Assign v4
+    Branch<2>
+  }
+
+  bb 2 (preds 1, 3) {
+    Snapshot {
+      CurInstrOffset 24
+      Locals<2> v3 v4
+      Stack<1> v11
+    }
+    Return v11
+  }
+}
+)";
+#elif PY_VERSION_HEX >= 0x030F0000
+  const char* expected = R"(fun jittestmodule:test {
+  bb 0 {
+    v0 = LoadArg<0; "x">
+    v1 = LoadArg<1; "y">
+    v2 = LoadCurrentFunc
+    LoadFrame
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v0 v1
+    }
+    v3 = LoadEvalBreaker
+    CondBranch<4, 3> v3
+  }
+
+  bb 4 (preds 0) {
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v0 v1
+    }
+    v4 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+        Locals<2> v0 v1
+      }
+    }
+    Branch<3>
+  }
+
+  bb 3 (preds 0, 4) {
+    Snapshot {
+      CurInstrOffset 4
+      Locals<2> v0 v1
+    }
+    v5 = IsTruthy v0 {
+      FrameState {
+        CurInstrOffset 8
+        Locals<2> v0 v1
+        Stack<1> v0
+      }
+    }
+    v6 = PrimitiveBoxBool v5
+    Snapshot {
+      CurInstrOffset 16
+      Locals<2> v0 v1
+      Stack<2> v0 v6
+    }
+    v8 = LoadConst<ImmortalBool[True]>
+    v7 = PrimitiveCompare<Equal> v6 v8
+    v9 = Assign v0
+    CondBranch<1, 2> v7
+  }
+
+  bb 1 (preds 3) {
+    Snapshot {
+      CurInstrOffset 22
+      Locals<2> v0 v1
+      Stack<1> v9
+    }
+    v9 = Assign v1
+    Branch<2>
+  }
+
+  bb 2 (preds 1, 3) {
+    Snapshot {
+      CurInstrOffset 26
+      Locals<2> v0 v1
+      Stack<1> v9
+    }
+    Return v9
+  }
+}
+)";
+#elif PY_VERSION_HEX >= 0x030E0000
+  const char* expected = R"(fun jittestmodule:test {
+  bb 0 {
+    v0 = LoadArg<0; "x">
+    v1 = LoadArg<1; "y">
+    v2 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<2> v0 v1
@@ -589,7 +858,7 @@ def test(x, y):
     }
     v8 = LoadConst<ImmortalBool[True]>
     v7 = PrimitiveCompare<Equal> v6 v8
-    v3 = Assign v0
+    v9 = Assign v0
     CondBranch<1, 2> v7
   }
 
@@ -597,9 +866,9 @@ def test(x, y):
     Snapshot {
       CurInstrOffset 20
       Locals<2> v0 v1
-      Stack<1> v3
+      Stack<1> v9
     }
-    v3 = Assign v1
+    v9 = Assign v1
     Branch<2>
   }
 
@@ -607,18 +876,19 @@ def test(x, y):
     Snapshot {
       CurInstrOffset 24
       Locals<2> v0 v1
-      Stack<1> v3
+      Stack<1> v9
     }
-    Return v3
+    Return v9
   }
 }
 )";
-#elif PY_VERSION_HEX >= 0x030C0000
+#else
   const char* expected = R"(fun jittestmodule:test {
   bb 0 {
     v0 = LoadArg<0; "x">
     v1 = LoadArg<1; "y">
     v2 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<2> v0 v1
@@ -653,7 +923,7 @@ def test(x, y):
         Stack<1> v0
       }
     }
-    v3 = Assign v0
+    v6 = Assign v0
     CondBranch<1, 2> v5
   }
 
@@ -661,9 +931,9 @@ def test(x, y):
     Snapshot {
       CurInstrOffset 8
       Locals<2> v0 v1
-      Stack<1> v3
+      Stack<1> v6
     }
-    v3 = Assign v1
+    v6 = Assign v1
     Branch<2>
   }
 
@@ -671,60 +941,9 @@ def test(x, y):
     Snapshot {
       CurInstrOffset 12
       Locals<2> v0 v1
-      Stack<1> v3
+      Stack<1> v6
     }
-    Return v3
-  }
-}
-)";
-#else
-  const char* expected = R"(fun jittestmodule:test {
-  bb 0 {
-    v0 = LoadArg<0; "x">
-    v1 = LoadArg<1; "y">
-    Snapshot {
-      CurInstrOffset 0
-      Locals<2> v0 v1
-    }
-    v0 = CheckVar<"x"> v0 {
-      FrameState {
-        CurInstrOffset 0
-        Locals<2> v0 v1
-      }
-    }
-    v2 = IsTruthy v0 {
-      FrameState {
-        CurInstrOffset 2
-        Locals<2> v0 v1
-        Stack<1> v0
-      }
-    }
-    v3 = Assign v0
-    CondBranch<1, 2> v2
-  }
-
-  bb 1 (preds 0) {
-    Snapshot {
-      CurInstrOffset 4
-      Locals<2> v0 v1
-    }
-    v1 = CheckVar<"y"> v1 {
-      FrameState {
-        CurInstrOffset 4
-        Locals<2> v0 v1
-      }
-    }
-    v3 = Assign v1
-    Branch<2>
-  }
-
-  bb 2 (preds 0, 1) {
-    Snapshot {
-      CurInstrOffset 6
-      Locals<2> v0 v1
-      Stack<1> v3
-    }
-    Return v3
+    Return v6
   }
 }
 )";
@@ -742,12 +961,162 @@ def test(x, y):
   std::unique_ptr<Function> irfunc;
   CompileToHIR(src, "test", irfunc);
 
-#if PY_VERSION_HEX >= 0x030E0000
+#if PY_VERSION_HEX >= 0x030E0000 && defined(Py_GIL_DISABLED)
   const char* expected = R"(fun jittestmodule:test {
   bb 0 {
     v0 = LoadArg<0; "x">
     v1 = LoadArg<1; "y">
     v2 = LoadCurrentFunc
+    LoadFrame
+    v3 = TagIfDeferred v0
+    v4 = TagIfDeferred v1
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v3 v4
+    }
+    AtQuiescentState
+    v5 = LoadEvalBreaker
+    CondBranch<4, 3> v5
+  }
+
+  bb 4 (preds 0) {
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v3 v4
+    }
+    v6 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+        Locals<2> v3 v4
+      }
+    }
+    Branch<3>
+  }
+
+  bb 3 (preds 0, 4) {
+    Snapshot {
+      CurInstrOffset 2
+      Locals<2> v3 v4
+    }
+    v7 = IsTruthy v3 {
+      FrameState {
+        CurInstrOffset 6
+        Locals<2> v3 v4
+        Stack<1> v3
+      }
+    }
+    v8 = PrimitiveBoxBool v7
+    Snapshot {
+      CurInstrOffset 14
+      Locals<2> v3 v4
+      Stack<2> v3 v8
+    }
+    v10 = LoadConst<ImmortalBool[True]>
+    v9 = PrimitiveCompare<Equal> v8 v10
+    v11 = Assign v3
+    CondBranch<2, 1> v9
+  }
+
+  bb 1 (preds 3) {
+    Snapshot {
+      CurInstrOffset 20
+      Locals<2> v3 v4
+      Stack<1> v11
+    }
+    v11 = Assign v4
+    Branch<2>
+  }
+
+  bb 2 (preds 1, 3) {
+    Snapshot {
+      CurInstrOffset 24
+      Locals<2> v3 v4
+      Stack<1> v11
+    }
+    Return v11
+  }
+}
+)";
+#elif PY_VERSION_HEX >= 0x030F0000
+  const char* expected = R"(fun jittestmodule:test {
+  bb 0 {
+    v0 = LoadArg<0; "x">
+    v1 = LoadArg<1; "y">
+    v2 = LoadCurrentFunc
+    LoadFrame
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v0 v1
+    }
+    v3 = LoadEvalBreaker
+    CondBranch<4, 3> v3
+  }
+
+  bb 4 (preds 0) {
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v0 v1
+    }
+    v4 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+        Locals<2> v0 v1
+      }
+    }
+    Branch<3>
+  }
+
+  bb 3 (preds 0, 4) {
+    Snapshot {
+      CurInstrOffset 4
+      Locals<2> v0 v1
+    }
+    v5 = IsTruthy v0 {
+      FrameState {
+        CurInstrOffset 8
+        Locals<2> v0 v1
+        Stack<1> v0
+      }
+    }
+    v6 = PrimitiveBoxBool v5
+    Snapshot {
+      CurInstrOffset 16
+      Locals<2> v0 v1
+      Stack<2> v0 v6
+    }
+    v8 = LoadConst<ImmortalBool[True]>
+    v7 = PrimitiveCompare<Equal> v6 v8
+    v9 = Assign v0
+    CondBranch<2, 1> v7
+  }
+
+  bb 1 (preds 3) {
+    Snapshot {
+      CurInstrOffset 22
+      Locals<2> v0 v1
+      Stack<1> v9
+    }
+    v9 = Assign v1
+    Branch<2>
+  }
+
+  bb 2 (preds 1, 3) {
+    Snapshot {
+      CurInstrOffset 26
+      Locals<2> v0 v1
+      Stack<1> v9
+    }
+    Return v9
+  }
+}
+)";
+#elif PY_VERSION_HEX >= 0x030E0000
+  const char* expected = R"(fun jittestmodule:test {
+  bb 0 {
+    v0 = LoadArg<0; "x">
+    v1 = LoadArg<1; "y">
+    v2 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<2> v0 v1
@@ -790,7 +1159,7 @@ def test(x, y):
     }
     v8 = LoadConst<ImmortalBool[True]>
     v7 = PrimitiveCompare<Equal> v6 v8
-    v3 = Assign v0
+    v9 = Assign v0
     CondBranch<2, 1> v7
   }
 
@@ -798,9 +1167,9 @@ def test(x, y):
     Snapshot {
       CurInstrOffset 20
       Locals<2> v0 v1
-      Stack<1> v3
+      Stack<1> v9
     }
-    v3 = Assign v1
+    v9 = Assign v1
     Branch<2>
   }
 
@@ -808,18 +1177,19 @@ def test(x, y):
     Snapshot {
       CurInstrOffset 24
       Locals<2> v0 v1
-      Stack<1> v3
+      Stack<1> v9
     }
-    Return v3
+    Return v9
   }
 }
 )";
-#elif PY_VERSION_HEX >= 0x030C0000
+#else
   const char* expected = R"(fun jittestmodule:test {
   bb 0 {
     v0 = LoadArg<0; "x">
     v1 = LoadArg<1; "y">
     v2 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<2> v0 v1
@@ -854,7 +1224,7 @@ def test(x, y):
         Stack<1> v0
       }
     }
-    v3 = Assign v0
+    v6 = Assign v0
     CondBranch<2, 1> v5
   }
 
@@ -862,9 +1232,9 @@ def test(x, y):
     Snapshot {
       CurInstrOffset 8
       Locals<2> v0 v1
-      Stack<1> v3
+      Stack<1> v6
     }
-    v3 = Assign v1
+    v6 = Assign v1
     Branch<2>
   }
 
@@ -872,60 +1242,9 @@ def test(x, y):
     Snapshot {
       CurInstrOffset 12
       Locals<2> v0 v1
-      Stack<1> v3
+      Stack<1> v6
     }
-    Return v3
-  }
-}
-)";
-#else
-  const char* expected = R"(fun jittestmodule:test {
-  bb 0 {
-    v0 = LoadArg<0; "x">
-    v1 = LoadArg<1; "y">
-    Snapshot {
-      CurInstrOffset 0
-      Locals<2> v0 v1
-    }
-    v0 = CheckVar<"x"> v0 {
-      FrameState {
-        CurInstrOffset 0
-        Locals<2> v0 v1
-      }
-    }
-    v2 = IsTruthy v0 {
-      FrameState {
-        CurInstrOffset 2
-        Locals<2> v0 v1
-        Stack<1> v0
-      }
-    }
-    v3 = Assign v0
-    CondBranch<2, 1> v2
-  }
-
-  bb 1 (preds 0) {
-    Snapshot {
-      CurInstrOffset 4
-      Locals<2> v0 v1
-    }
-    v1 = CheckVar<"y"> v1 {
-      FrameState {
-        CurInstrOffset 4
-        Locals<2> v0 v1
-      }
-    }
-    v3 = Assign v1
-    Branch<2>
-  }
-
-  bb 2 (preds 0, 1) {
-    Snapshot {
-      CurInstrOffset 6
-      Locals<2> v0 v1
-      Stack<1> v3
-    }
-    Return v3
+    Return v6
   }
 }
 )";
@@ -940,12 +1259,116 @@ def test(f, a):
 )";
   std::unique_ptr<Function> irfunc;
   CompileToHIR(src, "test", irfunc);
-#if PY_VERSION_HEX >= 0x030E0000
+#if PY_VERSION_HEX >= 0x030E0000 && defined(Py_GIL_DISABLED)
   const char* expected = R"(fun jittestmodule:test {
   bb 0 {
     v0 = LoadArg<0; "f">
     v1 = LoadArg<1; "a">
     v2 = LoadCurrentFunc
+    LoadFrame
+    v3 = TagIfDeferred v0
+    v4 = TagIfDeferred v1
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v3 v4
+    }
+    AtQuiescentState
+    v5 = LoadEvalBreaker
+    CondBranch<2, 1> v5
+  }
+
+  bb 2 (preds 0) {
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v3 v4
+    }
+    v6 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+        Locals<2> v3 v4
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
+    Snapshot {
+      CurInstrOffset 2
+      Locals<2> v3 v4
+    }
+    v7 = LoadConst<Nullptr>
+    v8 = CallMethod<3> v3 v7 v4 {
+      FrameState {
+        CurInstrOffset 8
+        Locals<2> v3 v4
+      }
+    }
+    Snapshot {
+      CurInstrOffset 16
+      Locals<2> v3 v4
+      Stack<1> v8
+    }
+    Return v8
+  }
+}
+)";
+#elif PY_VERSION_HEX >= 0x030F0000
+  const char* expected = R"(fun jittestmodule:test {
+  bb 0 {
+    v0 = LoadArg<0; "f">
+    v1 = LoadArg<1; "a">
+    v2 = LoadCurrentFunc
+    LoadFrame
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v0 v1
+    }
+    v3 = LoadEvalBreaker
+    CondBranch<2, 1> v3
+  }
+
+  bb 2 (preds 0) {
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v0 v1
+    }
+    v4 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+        Locals<2> v0 v1
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
+    Snapshot {
+      CurInstrOffset 4
+      Locals<2> v0 v1
+    }
+    v5 = LoadConst<Nullptr>
+    v6 = CallMethod<3> v0 v5 v1 {
+      FrameState {
+        CurInstrOffset 10
+        Locals<2> v0 v1
+      }
+    }
+    Snapshot {
+      CurInstrOffset 18
+      Locals<2> v0 v1
+      Stack<1> v6
+    }
+    Return v6
+  }
+}
+)";
+#elif PY_VERSION_HEX >= 0x030E0000
+  const char* expected = R"(fun jittestmodule:test {
+  bb 0 {
+    v0 = LoadArg<0; "f">
+    v1 = LoadArg<1; "a">
+    v2 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<2> v0 v1
@@ -989,12 +1412,13 @@ def test(f, a):
   }
 }
 )";
-#elif PY_VERSION_HEX >= 0x030C0000
+#else
   const char* expected = R"(fun jittestmodule:test {
   bb 0 {
     v0 = LoadArg<0; "f">
     v1 = LoadArg<1; "a">
     v2 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<2> v0 v1
@@ -1038,43 +1462,6 @@ def test(f, a):
   }
 }
 )";
-#else
-  const char* expected = R"(fun jittestmodule:test {
-  bb 0 {
-    v0 = LoadArg<0; "f">
-    v1 = LoadArg<1; "a">
-    Snapshot {
-      CurInstrOffset 0
-      Locals<2> v0 v1
-    }
-    v0 = CheckVar<"f"> v0 {
-      FrameState {
-        CurInstrOffset 0
-        Locals<2> v0 v1
-      }
-    }
-    v1 = CheckVar<"a"> v1 {
-      FrameState {
-        CurInstrOffset 2
-        Locals<2> v0 v1
-        Stack<1> v0
-      }
-    }
-    v2 = VectorCall<1> v0 v1 {
-      FrameState {
-        CurInstrOffset 4
-        Locals<2> v0 v1
-      }
-    }
-    Snapshot {
-      CurInstrOffset 6
-      Locals<2> v0 v1
-      Stack<1> v2
-    }
-    Return v2
-  }
-}
-)";
 #endif
   EXPECT_HIR_EQ(irfunc, expected);
 }
@@ -1086,12 +1473,138 @@ def test(f, a):
 )";
   std::unique_ptr<Function> irfunc;
   CompileToHIR(src, "test", irfunc);
-#if PY_VERSION_HEX >= 0x030C0000
+#if PY_VERSION_HEX >= 0x030E0000 && defined(Py_GIL_DISABLED)
   const char* expected = R"(fun jittestmodule:test {
   bb 0 {
     v0 = LoadArg<0; "f">
     v1 = LoadArg<1; "a">
     v2 = LoadCurrentFunc
+    LoadFrame
+    v3 = TagIfDeferred v0
+    v4 = TagIfDeferred v1
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v3 v4
+    }
+    AtQuiescentState
+    v5 = LoadEvalBreaker
+    CondBranch<2, 1> v5
+  }
+
+  bb 2 (preds 0) {
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v3 v4
+    }
+    v6 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+        Locals<2> v3 v4
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
+    Snapshot {
+      CurInstrOffset 2
+      Locals<2> v3 v4
+    }
+    v7 = LoadMethod<0; "bar"> v3 {
+      FrameState {
+        CurInstrOffset 4
+        Locals<2> v3 v4
+      }
+    }
+    v8 = GetSecondOutput<OptObject> v7
+    Snapshot {
+      CurInstrOffset 24
+      Locals<2> v3 v4
+      Stack<2> v7 v8
+    }
+    v9 = CallMethod<3> v7 v8 v4 {
+      FrameState {
+        CurInstrOffset 26
+        Locals<2> v3 v4
+      }
+    }
+    Snapshot {
+      CurInstrOffset 34
+      Locals<2> v3 v4
+      Stack<1> v9
+    }
+    Return v9
+  }
+}
+)";
+#elif PY_VERSION_HEX >= 0x030F0000
+  const char* expected = R"(fun jittestmodule:test {
+  bb 0 {
+    v0 = LoadArg<0; "f">
+    v1 = LoadArg<1; "a">
+    v2 = LoadCurrentFunc
+    LoadFrame
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v0 v1
+    }
+    v3 = LoadEvalBreaker
+    CondBranch<2, 1> v3
+  }
+
+  bb 2 (preds 0) {
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v0 v1
+    }
+    v4 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+        Locals<2> v0 v1
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
+    Snapshot {
+      CurInstrOffset 4
+      Locals<2> v0 v1
+    }
+    v5 = LoadMethod<0; "bar"> v0 {
+      FrameState {
+        CurInstrOffset 6
+        Locals<2> v0 v1
+      }
+    }
+    v6 = GetSecondOutput<OptObject> v5
+    Snapshot {
+      CurInstrOffset 26
+      Locals<2> v0 v1
+      Stack<2> v5 v6
+    }
+    v7 = CallMethod<3> v5 v6 v1 {
+      FrameState {
+        CurInstrOffset 28
+        Locals<2> v0 v1
+      }
+    }
+    Snapshot {
+      CurInstrOffset 36
+      Locals<2> v0 v1
+      Stack<1> v7
+    }
+    Return v7
+  }
+}
+)";
+#else
+  const char* expected = R"(fun jittestmodule:test {
+  bb 0 {
+    v0 = LoadArg<0; "f">
+    v1 = LoadArg<1; "a">
+    v2 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<2> v0 v1
@@ -1146,55 +1659,6 @@ def test(f, a):
   }
 }
 )";
-#else
-  const char* expected = R"(fun jittestmodule:test {
-  bb 0 {
-    v0 = LoadArg<0; "f">
-    v1 = LoadArg<1; "a">
-    Snapshot {
-      CurInstrOffset 0
-      Locals<2> v0 v1
-    }
-    v0 = CheckVar<"f"> v0 {
-      FrameState {
-        CurInstrOffset 0
-        Locals<2> v0 v1
-      }
-    }
-    v2 = LoadMethod<0; "bar"> v0 {
-      FrameState {
-        CurInstrOffset 2
-        Locals<2> v0 v1
-      }
-    }
-    v3 = GetSecondOutput<OptObject> v2
-    Snapshot {
-      CurInstrOffset 4
-      Locals<2> v0 v1
-      Stack<2> v2 v3
-    }
-    v1 = CheckVar<"a"> v1 {
-      FrameState {
-        CurInstrOffset 4
-        Locals<2> v0 v1
-        Stack<2> v2 v3
-      }
-    }
-    v4 = CallMethod<3> v2 v3 v1 {
-      FrameState {
-        CurInstrOffset 6
-        Locals<2> v0 v1
-      }
-    }
-    Snapshot {
-      CurInstrOffset 8
-      Locals<2> v0 v1
-      Stack<1> v4
-    }
-    Return v4
-  }
-}
-)";
 #endif
   EXPECT_HIR_EQ(irfunc, expected);
 }
@@ -1206,11 +1670,132 @@ def test(f):
 )";
   std::unique_ptr<Function> irfunc;
   CompileToHIR(src, "test", irfunc);
-#if PY_VERSION_HEX >= 0x030C0000
+#if PY_VERSION_HEX >= 0x030E0000 && defined(Py_GIL_DISABLED)
   const char* expected = R"(fun jittestmodule:test {
   bb 0 {
     v0 = LoadArg<0; "f">
     v1 = LoadCurrentFunc
+    LoadFrame
+    v2 = TagIfDeferred v0
+    Snapshot {
+      CurInstrOffset 0
+      Locals<1> v2
+    }
+    AtQuiescentState
+    v3 = LoadEvalBreaker
+    CondBranch<2, 1> v3
+  }
+
+  bb 2 (preds 0) {
+    Snapshot {
+      CurInstrOffset 0
+      Locals<1> v2
+    }
+    v4 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+        Locals<1> v2
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
+    Snapshot {
+      CurInstrOffset 2
+      Locals<1> v2
+    }
+    v5 = LoadAttr<0; "a"> v2 {
+      FrameState {
+        CurInstrOffset 4
+        Locals<1> v2
+      }
+    }
+    Snapshot {
+      CurInstrOffset 24
+      Locals<1> v2
+      Stack<1> v5
+    }
+    v6 = LoadAttr<1; "b"> v5 {
+      FrameState {
+        CurInstrOffset 24
+        Locals<1> v2
+      }
+    }
+    Snapshot {
+      CurInstrOffset 44
+      Locals<1> v2
+      Stack<1> v6
+    }
+    Return v6
+  }
+}
+)";
+#elif PY_VERSION_HEX >= 0x030F0000
+  const char* expected = R"(fun jittestmodule:test {
+  bb 0 {
+    v0 = LoadArg<0; "f">
+    v1 = LoadCurrentFunc
+    LoadFrame
+    Snapshot {
+      CurInstrOffset 0
+      Locals<1> v0
+    }
+    v2 = LoadEvalBreaker
+    CondBranch<2, 1> v2
+  }
+
+  bb 2 (preds 0) {
+    Snapshot {
+      CurInstrOffset 0
+      Locals<1> v0
+    }
+    v3 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+        Locals<1> v0
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
+    Snapshot {
+      CurInstrOffset 4
+      Locals<1> v0
+    }
+    v4 = LoadAttr<0; "a"> v0 {
+      FrameState {
+        CurInstrOffset 6
+        Locals<1> v0
+      }
+    }
+    Snapshot {
+      CurInstrOffset 26
+      Locals<1> v0
+      Stack<1> v4
+    }
+    v5 = LoadAttr<1; "b"> v4 {
+      FrameState {
+        CurInstrOffset 26
+        Locals<1> v0
+      }
+    }
+    Snapshot {
+      CurInstrOffset 46
+      Locals<1> v0
+      Stack<1> v5
+    }
+    Return v5
+  }
+}
+)";
+#else
+  const char* expected = R"(fun jittestmodule:test {
+  bb 0 {
+    v0 = LoadArg<0; "f">
+    v1 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<1> v0
@@ -1264,46 +1849,6 @@ def test(f):
   }
 }
 )";
-#else
-  const char* expected = R"(fun jittestmodule:test {
-  bb 0 {
-    v0 = LoadArg<0; "f">
-    Snapshot {
-      CurInstrOffset 0
-      Locals<1> v0
-    }
-    v0 = CheckVar<"f"> v0 {
-      FrameState {
-        CurInstrOffset 0
-        Locals<1> v0
-      }
-    }
-    v1 = LoadAttr<0; "a"> v0 {
-      FrameState {
-        CurInstrOffset 2
-        Locals<1> v0
-      }
-    }
-    Snapshot {
-      CurInstrOffset 4
-      Locals<1> v0
-      Stack<1> v1
-    }
-    v2 = LoadAttr<1; "b"> v1 {
-      FrameState {
-        CurInstrOffset 4
-        Locals<1> v0
-      }
-    }
-    Snapshot {
-      CurInstrOffset 6
-      Locals<1> v0
-      Stack<1> v2
-    }
-    Return v2
-  }
-}
-)";
 #endif
   EXPECT_HIR_EQ(irfunc, expected);
 }
@@ -1315,12 +1860,123 @@ def test(x, y):
 )";
   std::unique_ptr<Function> irfunc;
   CompileToHIR(src, "test", irfunc);
-#if PY_VERSION_HEX >= 0x030E0000
+#if PY_VERSION_HEX >= 0x030E0000 && defined(Py_GIL_DISABLED)
   const char* expected = R"(fun jittestmodule:test {
   bb 0 {
     v0 = LoadArg<0; "x">
     v1 = LoadArg<1; "y">
     v2 = LoadCurrentFunc
+    LoadFrame
+    v3 = TagIfDeferred v0
+    v4 = TagIfDeferred v1
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v3 v4
+    }
+    AtQuiescentState
+    v5 = LoadEvalBreaker
+    CondBranch<2, 1> v5
+  }
+
+  bb 2 (preds 0) {
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v3 v4
+    }
+    v6 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+        Locals<2> v3 v4
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
+    Snapshot {
+      CurInstrOffset 2
+      Locals<2> v3 v4
+    }
+    v7 = InPlaceOp<Xor> v3 v4 {
+      FrameState {
+        CurInstrOffset 4
+        Locals<2> v3 v4
+      }
+    }
+    Snapshot {
+      CurInstrOffset 16
+      Locals<2> v3 v4
+      Stack<1> v7
+    }
+    v3 = Assign v7
+    v8 = LoadConst<ImmortalNoneType>
+    Return v8
+  }
+}
+)";
+#elif PY_VERSION_HEX >= 0x030F0000
+  const char* expected = R"(fun jittestmodule:test {
+  bb 0 {
+    v0 = LoadArg<0; "x">
+    v1 = LoadArg<1; "y">
+    v2 = LoadCurrentFunc
+    LoadFrame
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v0 v1
+    }
+    v3 = LoadEvalBreaker
+    CondBranch<2, 1> v3
+  }
+
+  bb 2 (preds 0) {
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v0 v1
+    }
+    v4 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+        Locals<2> v0 v1
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
+    Snapshot {
+      CurInstrOffset 4
+      Locals<2> v0 v1
+    }
+    v5 = InPlaceOp<Xor> v0 v1 {
+      FrameState {
+        CurInstrOffset 6
+        Locals<2> v0 v1
+      }
+    }
+    Snapshot {
+      CurInstrOffset 18
+      Locals<2> v0 v1
+      Stack<1> v5
+    }
+    v0 = Assign v5
+    v6 = LoadConst<ImmortalNoneType>
+    Snapshot {
+      CurInstrOffset 22
+      Locals<2> v0 v1
+      Stack<1> v6
+    }
+    Return v6
+  }
+}
+)";
+#elif PY_VERSION_HEX >= 0x030E0000
+  const char* expected = R"(fun jittestmodule:test {
+  bb 0 {
+    v0 = LoadArg<0; "x">
+    v1 = LoadArg<1; "y">
+    v2 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<2> v0 v1
@@ -1365,12 +2021,13 @@ def test(x, y):
   }
 }
 )";
-#elif PY_VERSION_HEX >= 0x030C0000
+#else
   const char* expected = R"(fun jittestmodule:test {
   bb 0 {
     v0 = LoadArg<0; "x">
     v1 = LoadArg<1; "y">
     v2 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<2> v0 v1
@@ -1416,45 +2073,6 @@ def test(x, y):
   }
 }
 )";
-#else
-  const char* expected = R"(fun jittestmodule:test {
-  bb 0 {
-    v0 = LoadArg<0; "x">
-    v1 = LoadArg<1; "y">
-    Snapshot {
-      CurInstrOffset 0
-      Locals<2> v0 v1
-    }
-    v0 = CheckVar<"x"> v0 {
-      FrameState {
-        CurInstrOffset 0
-        Locals<2> v0 v1
-      }
-    }
-    v1 = CheckVar<"y"> v1 {
-      FrameState {
-        CurInstrOffset 2
-        Locals<2> v0 v1
-        Stack<1> v0
-      }
-    }
-    v2 = InPlaceOp<Xor> v0 v1 {
-      FrameState {
-        CurInstrOffset 4
-        Locals<2> v0 v1
-      }
-    }
-    Snapshot {
-      CurInstrOffset 6
-      Locals<2> v0 v1
-      Stack<1> v2
-    }
-    v0 = Assign v2
-    v3 = LoadConst<NoneType>
-    Return v3
-  }
-}
-)";
 #endif
   EXPECT_HIR_EQ(irfunc, expected);
 }
@@ -1466,12 +2084,114 @@ def test(x, y):
 )";
   std::unique_ptr<Function> irfunc;
   CompileToHIR(src, "test", irfunc);
-#if PY_VERSION_HEX >= 0x030E0000
+#if PY_VERSION_HEX >= 0x030E0000 && defined(Py_GIL_DISABLED)
   const char* expected = R"(fun jittestmodule:test {
   bb 0 {
     v0 = LoadArg<0; "x">
     v1 = LoadArg<1; "y">
     v2 = LoadCurrentFunc
+    LoadFrame
+    v3 = TagIfDeferred v0
+    v4 = TagIfDeferred v1
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v3 v4
+    }
+    AtQuiescentState
+    v5 = LoadEvalBreaker
+    CondBranch<2, 1> v5
+  }
+
+  bb 2 (preds 0) {
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v3 v4
+    }
+    v6 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+        Locals<2> v3 v4
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
+    Snapshot {
+      CurInstrOffset 2
+      Locals<2> v3 v4
+    }
+    v7 = BinaryOp<Add> v3 v4 {
+      FrameState {
+        CurInstrOffset 4
+        Locals<2> v3 v4
+      }
+    }
+    Snapshot {
+      CurInstrOffset 16
+      Locals<2> v3 v4
+      Stack<1> v7
+    }
+    Return v7
+  }
+}
+)";
+#elif PY_VERSION_HEX >= 0x030F0000
+  const char* expected = R"(fun jittestmodule:test {
+  bb 0 {
+    v0 = LoadArg<0; "x">
+    v1 = LoadArg<1; "y">
+    v2 = LoadCurrentFunc
+    LoadFrame
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v0 v1
+    }
+    v3 = LoadEvalBreaker
+    CondBranch<2, 1> v3
+  }
+
+  bb 2 (preds 0) {
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v0 v1
+    }
+    v4 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+        Locals<2> v0 v1
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
+    Snapshot {
+      CurInstrOffset 4
+      Locals<2> v0 v1
+    }
+    v5 = BinaryOp<Add> v0 v1 {
+      FrameState {
+        CurInstrOffset 6
+        Locals<2> v0 v1
+      }
+    }
+    Snapshot {
+      CurInstrOffset 18
+      Locals<2> v0 v1
+      Stack<1> v5
+    }
+    Return v5
+  }
+}
+)";
+#elif PY_VERSION_HEX >= 0x030E0000
+  const char* expected = R"(fun jittestmodule:test {
+  bb 0 {
+    v0 = LoadArg<0; "x">
+    v1 = LoadArg<1; "y">
+    v2 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<2> v0 v1
@@ -1514,12 +2234,13 @@ def test(x, y):
   }
 }
 )";
-#elif PY_VERSION_HEX >= 0x030C0000
+#else
   const char* expected = R"(fun jittestmodule:test {
   bb 0 {
     v0 = LoadArg<0; "x">
     v1 = LoadArg<1; "y">
     v2 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<2> v0 v1
@@ -1562,43 +2283,6 @@ def test(x, y):
   }
 }
 )";
-#else
-  const char* expected = R"(fun jittestmodule:test {
-  bb 0 {
-    v0 = LoadArg<0; "x">
-    v1 = LoadArg<1; "y">
-    Snapshot {
-      CurInstrOffset 0
-      Locals<2> v0 v1
-    }
-    v0 = CheckVar<"x"> v0 {
-      FrameState {
-        CurInstrOffset 0
-        Locals<2> v0 v1
-      }
-    }
-    v1 = CheckVar<"y"> v1 {
-      FrameState {
-        CurInstrOffset 2
-        Locals<2> v0 v1
-        Stack<1> v0
-      }
-    }
-    v2 = BinaryOp<Add> v0 v1 {
-      FrameState {
-        CurInstrOffset 4
-        Locals<2> v0 v1
-      }
-    }
-    Snapshot {
-      CurInstrOffset 6
-      Locals<2> v0 v1
-      Stack<1> v2
-    }
-    Return v2
-  }
-}
-)";
 #endif
   EXPECT_HIR_EQ(irfunc, expected);
 }
@@ -1610,11 +2294,134 @@ def test(x):
 )";
   std::unique_ptr<Function> irfunc;
   CompileToHIR(src, "test", irfunc);
-#if PY_VERSION_HEX >= 0x030E0000
+#if PY_VERSION_HEX >= 0x030E0000 && defined(Py_GIL_DISABLED)
   const char* expected = R"(fun jittestmodule:test {
   bb 0 {
     v0 = LoadArg<0; "x">
     v1 = LoadCurrentFunc
+    LoadFrame
+    v2 = TagIfDeferred v0
+    Snapshot {
+      CurInstrOffset 0
+      Locals<1> v2
+    }
+    AtQuiescentState
+    v3 = LoadEvalBreaker
+    CondBranch<2, 1> v3
+  }
+
+  bb 2 (preds 0) {
+    Snapshot {
+      CurInstrOffset 0
+      Locals<1> v2
+    }
+    v4 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+        Locals<1> v2
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
+    Snapshot {
+      CurInstrOffset 2
+      Locals<1> v2
+    }
+    v5 = IsTruthy v2 {
+      FrameState {
+        CurInstrOffset 4
+        Locals<1> v2
+      }
+    }
+    v6 = PrimitiveBoxBool v5
+    Snapshot {
+      CurInstrOffset 12
+      Locals<1> v2
+      Stack<1> v6
+    }
+    v7 = UnaryOp<Not> v6 {
+      FrameState {
+        CurInstrOffset 12
+        Locals<1> v2
+      }
+    }
+    Snapshot {
+      CurInstrOffset 14
+      Locals<1> v2
+      Stack<1> v7
+    }
+    Return v7
+  }
+}
+)";
+#elif PY_VERSION_HEX >= 0x030F0000
+  const char* expected = R"(fun jittestmodule:test {
+  bb 0 {
+    v0 = LoadArg<0; "x">
+    v1 = LoadCurrentFunc
+    LoadFrame
+    Snapshot {
+      CurInstrOffset 0
+      Locals<1> v0
+    }
+    v2 = LoadEvalBreaker
+    CondBranch<2, 1> v2
+  }
+
+  bb 2 (preds 0) {
+    Snapshot {
+      CurInstrOffset 0
+      Locals<1> v0
+    }
+    v3 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+        Locals<1> v0
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
+    Snapshot {
+      CurInstrOffset 4
+      Locals<1> v0
+    }
+    v4 = IsTruthy v0 {
+      FrameState {
+        CurInstrOffset 6
+        Locals<1> v0
+      }
+    }
+    v5 = PrimitiveBoxBool v4
+    Snapshot {
+      CurInstrOffset 14
+      Locals<1> v0
+      Stack<1> v5
+    }
+    v6 = UnaryOp<Not> v5 {
+      FrameState {
+        CurInstrOffset 14
+        Locals<1> v0
+      }
+    }
+    Snapshot {
+      CurInstrOffset 16
+      Locals<1> v0
+      Stack<1> v6
+    }
+    Return v6
+  }
+}
+)";
+#elif PY_VERSION_HEX >= 0x030E0000
+  const char* expected = R"(fun jittestmodule:test {
+  bb 0 {
+    v0 = LoadArg<0; "x">
+    v1 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<1> v0
@@ -1654,23 +2461,27 @@ def test(x):
       Locals<1> v0
       Stack<1> v5
     }
-    v7 = LoadConst<ImmortalBool[False]>
-    v6 = PrimitiveCompare<Equal> v7 v5
-    v8 = PrimitiveBoxBool v6
+    v6 = UnaryOp<Not> v5 {
+      FrameState {
+        CurInstrOffset 12
+        Locals<1> v0
+      }
+    }
     Snapshot {
       CurInstrOffset 14
       Locals<1> v0
-      Stack<1> v8
+      Stack<1> v6
     }
-    Return v8
+    Return v6
   }
 }
 )";
-#elif PY_VERSION_HEX >= 0x030C0000
+#else
   const char* expected = R"(fun jittestmodule:test {
   bb 0 {
     v0 = LoadArg<0; "x">
     v1 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<1> v0
@@ -1713,35 +2524,6 @@ def test(x):
   }
 }
 )";
-#else
-  const char* expected = R"(fun jittestmodule:test {
-  bb 0 {
-    v0 = LoadArg<0; "x">
-    Snapshot {
-      CurInstrOffset 0
-      Locals<1> v0
-    }
-    v0 = CheckVar<"x"> v0 {
-      FrameState {
-        CurInstrOffset 0
-        Locals<1> v0
-      }
-    }
-    v1 = UnaryOp<Not> v0 {
-      FrameState {
-        CurInstrOffset 2
-        Locals<1> v0
-      }
-    }
-    Snapshot {
-      CurInstrOffset 4
-      Locals<1> v0
-      Stack<1> v1
-    }
-    Return v1
-  }
-}
-)";
 #endif
   EXPECT_HIR_EQ(irfunc, expected);
 }
@@ -1753,12 +2535,119 @@ def test(x, y):
 )";
   std::unique_ptr<Function> irfunc;
   CompileToHIR(src, "test", irfunc);
-#if PY_VERSION_HEX >= 0x030E0000
+#if PY_VERSION_HEX >= 0x030E0000 && defined(Py_GIL_DISABLED)
   const char* expected = R"(fun jittestmodule:test {
   bb 0 {
     v0 = LoadArg<0; "x">
     v1 = LoadArg<1; "y">
     v2 = LoadCurrentFunc
+    LoadFrame
+    v3 = TagIfDeferred v0
+    v4 = TagIfDeferred v1
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v3 v4
+    }
+    AtQuiescentState
+    v5 = LoadEvalBreaker
+    CondBranch<2, 1> v5
+  }
+
+  bb 2 (preds 0) {
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v3 v4
+    }
+    v6 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+        Locals<2> v3 v4
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
+    Snapshot {
+      CurInstrOffset 2
+      Locals<2> v3 v4
+    }
+    StoreAttr<0; "foo"> v3 v4 {
+      FrameState {
+        CurInstrOffset 4
+        Locals<2> v3 v4
+      }
+    }
+    Snapshot {
+      CurInstrOffset 14
+      Locals<2> v3 v4
+    }
+    v7 = LoadConst<ImmortalNoneType>
+    Return v7
+  }
+}
+)";
+#elif PY_VERSION_HEX >= 0x030F0000
+  const char* expected = R"(fun jittestmodule:test {
+  bb 0 {
+    v0 = LoadArg<0; "x">
+    v1 = LoadArg<1; "y">
+    v2 = LoadCurrentFunc
+    LoadFrame
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v0 v1
+    }
+    v3 = LoadEvalBreaker
+    CondBranch<2, 1> v3
+  }
+
+  bb 2 (preds 0) {
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v0 v1
+    }
+    v4 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+        Locals<2> v0 v1
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
+    Snapshot {
+      CurInstrOffset 4
+      Locals<2> v0 v1
+    }
+    StoreAttr<0; "foo"> v0 v1 {
+      FrameState {
+        CurInstrOffset 6
+        Locals<2> v0 v1
+      }
+    }
+    Snapshot {
+      CurInstrOffset 16
+      Locals<2> v0 v1
+    }
+    v5 = LoadConst<ImmortalNoneType>
+    Snapshot {
+      CurInstrOffset 18
+      Locals<2> v0 v1
+      Stack<1> v5
+    }
+    Return v5
+  }
+}
+)";
+#elif PY_VERSION_HEX >= 0x030E0000
+  const char* expected = R"(fun jittestmodule:test {
+  bb 0 {
+    v0 = LoadArg<0; "x">
+    v1 = LoadArg<1; "y">
+    v2 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<2> v0 v1
@@ -1801,12 +2690,13 @@ def test(x, y):
   }
 }
 )";
-#elif PY_VERSION_HEX >= 0x030C0000
+#else
   const char* expected = R"(fun jittestmodule:test {
   bb 0 {
     v0 = LoadArg<0; "x">
     v1 = LoadArg<1; "y">
     v2 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<2> v0 v1
@@ -1850,43 +2740,6 @@ def test(x, y):
   }
 }
 )";
-#else
-  const char* expected = R"(fun jittestmodule:test {
-  bb 0 {
-    v0 = LoadArg<0; "x">
-    v1 = LoadArg<1; "y">
-    Snapshot {
-      CurInstrOffset 0
-      Locals<2> v0 v1
-    }
-    v1 = CheckVar<"y"> v1 {
-      FrameState {
-        CurInstrOffset 0
-        Locals<2> v0 v1
-      }
-    }
-    v0 = CheckVar<"x"> v0 {
-      FrameState {
-        CurInstrOffset 2
-        Locals<2> v0 v1
-        Stack<1> v1
-      }
-    }
-    StoreAttr<0; "foo"> v0 v1 {
-      FrameState {
-        CurInstrOffset 4
-        Locals<2> v0 v1
-      }
-    }
-    Snapshot {
-      CurInstrOffset 6
-      Locals<2> v0 v1
-    }
-    v2 = LoadConst<NoneType>
-    Return v2
-  }
-}
-)";
 #endif
   EXPECT_HIR_EQ(irfunc, expected);
 }
@@ -1898,12 +2751,131 @@ def test(x, y):
 )";
   std::unique_ptr<Function> irfunc;
   CompileToHIR(src, "test", irfunc);
-#if PY_VERSION_HEX >= 0x030E0000
+#if PY_VERSION_HEX >= 0x030E0000 && defined(Py_GIL_DISABLED)
   const char* expected = R"(fun jittestmodule:test {
   bb 0 {
     v0 = LoadArg<0; "x">
     v1 = LoadArg<1; "y">
     v2 = LoadCurrentFunc
+    LoadFrame
+    v3 = TagIfDeferred v0
+    v4 = TagIfDeferred v1
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v3 v4
+    }
+    AtQuiescentState
+    v5 = LoadEvalBreaker
+    CondBranch<2, 1> v5
+  }
+
+  bb 2 (preds 0) {
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v3 v4
+    }
+    v6 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+        Locals<2> v3 v4
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
+    Snapshot {
+      CurInstrOffset 2
+      Locals<2> v3 v4
+    }
+    v7 = LoadConst<ImmortalLongExact[1]>
+    Snapshot {
+      CurInstrOffset 6
+      Locals<2> v3 v4
+      Stack<3> v4 v3 v7
+    }
+    StoreSubscr v3 v7 v4 {
+      FrameState {
+        CurInstrOffset 6
+        Locals<2> v3 v4
+      }
+    }
+    Snapshot {
+      CurInstrOffset 10
+      Locals<2> v3 v4
+    }
+    v8 = LoadConst<ImmortalNoneType>
+    Return v8
+  }
+}
+)";
+#elif PY_VERSION_HEX >= 0x030F0000
+  const char* expected = R"(fun jittestmodule:test {
+  bb 0 {
+    v0 = LoadArg<0; "x">
+    v1 = LoadArg<1; "y">
+    v2 = LoadCurrentFunc
+    LoadFrame
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v0 v1
+    }
+    v3 = LoadEvalBreaker
+    CondBranch<2, 1> v3
+  }
+
+  bb 2 (preds 0) {
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v0 v1
+    }
+    v4 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+        Locals<2> v0 v1
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
+    Snapshot {
+      CurInstrOffset 4
+      Locals<2> v0 v1
+    }
+    v5 = LoadConst<ImmortalLongExact[1]>
+    Snapshot {
+      CurInstrOffset 8
+      Locals<2> v0 v1
+      Stack<3> v1 v0 v5
+    }
+    StoreSubscr v0 v5 v1 {
+      FrameState {
+        CurInstrOffset 8
+        Locals<2> v0 v1
+      }
+    }
+    Snapshot {
+      CurInstrOffset 12
+      Locals<2> v0 v1
+    }
+    v6 = LoadConst<ImmortalNoneType>
+    Snapshot {
+      CurInstrOffset 14
+      Locals<2> v0 v1
+      Stack<1> v6
+    }
+    Return v6
+  }
+}
+)";
+#elif PY_VERSION_HEX >= 0x030E0000
+  const char* expected = R"(fun jittestmodule:test {
+  bb 0 {
+    v0 = LoadArg<0; "x">
+    v1 = LoadArg<1; "y">
+    v2 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<2> v0 v1
@@ -1952,12 +2924,13 @@ def test(x, y):
   }
 }
 )";
-#elif PY_VERSION_HEX >= 0x030C0000
+#else
   const char* expected = R"(fun jittestmodule:test {
   bb 0 {
     v0 = LoadArg<0; "x">
     v1 = LoadArg<1; "y">
     v2 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<2> v0 v1
@@ -2002,44 +2975,6 @@ def test(x, y):
   }
 }
 )";
-#else
-  const char* expected = R"(fun jittestmodule:test {
-  bb 0 {
-    v0 = LoadArg<0; "x">
-    v1 = LoadArg<1; "y">
-    Snapshot {
-      CurInstrOffset 0
-      Locals<2> v0 v1
-    }
-    v1 = CheckVar<"y"> v1 {
-      FrameState {
-        CurInstrOffset 0
-        Locals<2> v0 v1
-      }
-    }
-    v0 = CheckVar<"x"> v0 {
-      FrameState {
-        CurInstrOffset 2
-        Locals<2> v0 v1
-        Stack<1> v1
-      }
-    }
-    v2 = LoadConst<ImmortalLongExact[1]>
-    StoreSubscr v0 v2 v1 {
-      FrameState {
-        CurInstrOffset 6
-        Locals<2> v0 v1
-      }
-    }
-    Snapshot {
-      CurInstrOffset 8
-      Locals<2> v0 v1
-    }
-    v3 = LoadConst<NoneType>
-    Return v3
-  }
-}
-)";
 #endif
   EXPECT_HIR_EQ(irfunc, expected);
 }
@@ -2051,12 +2986,148 @@ def test(x, y):
 )";
   std::unique_ptr<Function> irfunc;
   CompileToHIR(src, "test", irfunc);
-#if PY_VERSION_HEX >= 0x030E0000
+#if PY_VERSION_HEX >= 0x030E0000 && defined(Py_GIL_DISABLED)
   const char* expected = R"(fun jittestmodule:test {
   bb 0 {
     v0 = LoadArg<0; "x">
     v1 = LoadArg<1; "y">
     v2 = LoadCurrentFunc
+    LoadFrame
+    v3 = TagIfDeferred v0
+    v4 = TagIfDeferred v1
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v3 v4
+    }
+    AtQuiescentState
+    v5 = LoadEvalBreaker
+    CondBranch<2, 1> v5
+  }
+
+  bb 2 (preds 0) {
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v3 v4
+    }
+    v6 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+        Locals<2> v3 v4
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
+    Snapshot {
+      CurInstrOffset 2
+      Locals<2> v3 v4
+    }
+    v7 = LoadConst<ImmortalUnicodeExact["x"]>
+    v8 = LoadConst<ImmortalUnicodeExact["y"]>
+    v9 = MakeDict<2> {
+      FrameState {
+        CurInstrOffset 10
+        Locals<2> v3 v4
+        Stack<4> v7 v3 v8 v4
+      }
+    }
+    v10 = SetDictItem v9 v7 v3 {
+      FrameState {
+        CurInstrOffset 10
+        Locals<2> v3 v4
+        Stack<4> v7 v3 v8 v4
+      }
+    }
+    v11 = SetDictItem v9 v8 v4 {
+      FrameState {
+        CurInstrOffset 10
+        Locals<2> v3 v4
+        Stack<4> v7 v3 v8 v4
+      }
+    }
+    Snapshot {
+      CurInstrOffset 12
+      Locals<2> v3 v4
+      Stack<1> v9
+    }
+    Return v9
+  }
+}
+)";
+#elif PY_VERSION_HEX >= 0x030F0000
+  const char* expected = R"(fun jittestmodule:test {
+  bb 0 {
+    v0 = LoadArg<0; "x">
+    v1 = LoadArg<1; "y">
+    v2 = LoadCurrentFunc
+    LoadFrame
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v0 v1
+    }
+    v3 = LoadEvalBreaker
+    CondBranch<2, 1> v3
+  }
+
+  bb 2 (preds 0) {
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v0 v1
+    }
+    v4 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+        Locals<2> v0 v1
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
+    Snapshot {
+      CurInstrOffset 4
+      Locals<2> v0 v1
+    }
+    v5 = LoadConst<ImmortalUnicodeExact["x"]>
+    v6 = LoadConst<ImmortalUnicodeExact["y"]>
+    v7 = MakeDict<2> {
+      FrameState {
+        CurInstrOffset 12
+        Locals<2> v0 v1
+        Stack<4> v5 v0 v6 v1
+      }
+    }
+    v8 = SetDictItem v7 v5 v0 {
+      FrameState {
+        CurInstrOffset 12
+        Locals<2> v0 v1
+        Stack<4> v5 v0 v6 v1
+      }
+    }
+    v9 = SetDictItem v7 v6 v1 {
+      FrameState {
+        CurInstrOffset 12
+        Locals<2> v0 v1
+        Stack<4> v5 v0 v6 v1
+      }
+    }
+    Snapshot {
+      CurInstrOffset 14
+      Locals<2> v0 v1
+      Stack<1> v7
+    }
+    Return v7
+  }
+}
+)";
+#elif PY_VERSION_HEX >= 0x030E0000
+  const char* expected = R"(fun jittestmodule:test {
+  bb 0 {
+    v0 = LoadArg<0; "x">
+    v1 = LoadArg<1; "y">
+    v2 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<2> v0 v1
@@ -2116,12 +3187,13 @@ def test(x, y):
   }
 }
 )";
-#elif PY_VERSION_HEX >= 0x030C0000
+#else
   const char* expected = R"(fun jittestmodule:test {
   bb 0 {
     v0 = LoadArg<0; "x">
     v1 = LoadArg<1; "y">
     v2 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<2> v0 v1
@@ -2182,61 +3254,6 @@ def test(x, y):
   }
 }
 )";
-#else
-  const char* expected = R"(fun jittestmodule:test {
-  bb 0 {
-    v0 = LoadArg<0; "x">
-    v1 = LoadArg<1; "y">
-    Snapshot {
-      CurInstrOffset 0
-      Locals<2> v0 v1
-    }
-    v0 = CheckVar<"x"> v0 {
-      FrameState {
-        CurInstrOffset 0
-        Locals<2> v0 v1
-      }
-    }
-    v1 = CheckVar<"y"> v1 {
-      FrameState {
-        CurInstrOffset 2
-        Locals<2> v0 v1
-        Stack<1> v0
-      }
-    }
-    v2 = LoadConst<MortalTupleExact[tuple:0xdeadbeef]>
-    v3 = MakeDict<2> {
-      FrameState {
-        CurInstrOffset 6
-        Locals<2> v0 v1
-        Stack<3> v0 v1 v2
-      }
-    }
-    v4 = LoadTupleItem<0> v2
-    v5 = SetDictItem v3 v4 v0 {
-      FrameState {
-        CurInstrOffset 6
-        Locals<2> v0 v1
-        Stack<2> v0 v1
-      }
-    }
-    v6 = LoadTupleItem<1> v2
-    v7 = SetDictItem v3 v6 v1 {
-      FrameState {
-        CurInstrOffset 6
-        Locals<2> v0 v1
-        Stack<2> v0 v1
-      }
-    }
-    Snapshot {
-      CurInstrOffset 8
-      Locals<2> v0 v1
-      Stack<1> v3
-    }
-    Return v3
-  }
-}
-)";
 #endif
   EXPECT_HIR_EQ(irfunc, expected);
 }
@@ -2248,12 +3265,67 @@ def test(x, y):
 )";
   std::unique_ptr<Function> irfunc;
   CompileToHIR(src, "test", irfunc);
-#if PY_VERSION_HEX >= 0x030E0000
+#if PY_VERSION_HEX >= 0x030E0000 && defined(Py_GIL_DISABLED)
   const char* expected = R"(fun jittestmodule:test {
   bb 0 {
     v0 = LoadArg<0; "x">
     v1 = LoadArg<1; "y">
     v2 = LoadCurrentFunc
+    LoadFrame
+    v3 = TagIfDeferred v0
+    v4 = TagIfDeferred v1
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v3 v4
+    }
+    AtQuiescentState
+    v5 = LoadEvalBreaker
+    CondBranch<2, 1> v5
+  }
+
+  bb 2 (preds 0) {
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v3 v4
+    }
+    v6 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+        Locals<2> v3 v4
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
+    Snapshot {
+      CurInstrOffset 2
+      Locals<2> v3 v4
+    }
+    v7 = MakeList<2> {
+      FrameState {
+        CurInstrOffset 4
+        Locals<2> v3 v4
+        Stack<2> v3 v4
+      }
+    }
+    InitListElements<2> v7 v3 v4
+    Snapshot {
+      CurInstrOffset 6
+      Locals<2> v3 v4
+      Stack<1> v7
+    }
+    Return v7
+  }
+}
+)";
+#elif PY_VERSION_HEX >= 0x030F0000
+  const char* expected = R"(fun jittestmodule:test {
+  bb 0 {
+    v0 = LoadArg<0; "x">
+    v1 = LoadArg<1; "y">
+    v2 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<2> v0 v1
@@ -2278,18 +3350,19 @@ def test(x, y):
 
   bb 1 (preds 0, 2) {
     Snapshot {
-      CurInstrOffset 2
+      CurInstrOffset 4
       Locals<2> v0 v1
     }
-    v5 = MakeList<2> v0 v1 {
+    v5 = MakeList<2> {
       FrameState {
-        CurInstrOffset 4
+        CurInstrOffset 6
         Locals<2> v0 v1
         Stack<2> v0 v1
       }
     }
+    InitListElements<2> v5 v0 v1
     Snapshot {
-      CurInstrOffset 6
+      CurInstrOffset 8
       Locals<2> v0 v1
       Stack<1> v5
     }
@@ -2297,12 +3370,13 @@ def test(x, y):
   }
 }
 )";
-#elif PY_VERSION_HEX >= 0x030C0000
+#elif PY_VERSION_HEX >= 0x030E0000
   const char* expected = R"(fun jittestmodule:test {
   bb 0 {
     v0 = LoadArg<0; "x">
     v1 = LoadArg<1; "y">
     v2 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<2> v0 v1
@@ -2330,15 +3404,16 @@ def test(x, y):
       CurInstrOffset 2
       Locals<2> v0 v1
     }
-    v5 = MakeList<2> v0 v1 {
+    v5 = MakeList<2> {
       FrameState {
-        CurInstrOffset 6
+        CurInstrOffset 4
         Locals<2> v0 v1
         Stack<2> v0 v1
       }
     }
+    InitListElements<2> v5 v0 v1
     Snapshot {
-      CurInstrOffset 8
+      CurInstrOffset 6
       Locals<2> v0 v1
       Stack<1> v5
     }
@@ -2351,36 +3426,49 @@ def test(x, y):
   bb 0 {
     v0 = LoadArg<0; "x">
     v1 = LoadArg<1; "y">
+    v2 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<2> v0 v1
     }
-    v0 = CheckVar<"x"> v0 {
+    v3 = LoadEvalBreaker
+    CondBranch<2, 1> v3
+  }
+
+  bb 2 (preds 0) {
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v0 v1
+    }
+    v4 = RunPeriodicTasks {
       FrameState {
         CurInstrOffset 0
         Locals<2> v0 v1
       }
     }
-    v1 = CheckVar<"y"> v1 {
-      FrameState {
-        CurInstrOffset 2
-        Locals<2> v0 v1
-        Stack<1> v0
-      }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
+    Snapshot {
+      CurInstrOffset 2
+      Locals<2> v0 v1
     }
-    v2 = MakeList<2> v0 v1 {
+    v5 = MakeList<2> {
       FrameState {
-        CurInstrOffset 4
+        CurInstrOffset 6
         Locals<2> v0 v1
         Stack<2> v0 v1
       }
     }
+    InitListElements<2> v5 v0 v1
     Snapshot {
-      CurInstrOffset 6
+      CurInstrOffset 8
       Locals<2> v0 v1
-      Stack<1> v2
+      Stack<1> v5
     }
-    Return v2
+    Return v5
   }
 }
 )";
@@ -2395,12 +3483,67 @@ def test(x, y):
 )";
   std::unique_ptr<Function> irfunc;
   CompileToHIR(src, "test", irfunc);
-#if PY_VERSION_HEX >= 0x030E0000
+#if PY_VERSION_HEX >= 0x030E0000 && defined(Py_GIL_DISABLED)
   const char* expected = R"(fun jittestmodule:test {
   bb 0 {
     v0 = LoadArg<0; "x">
     v1 = LoadArg<1; "y">
     v2 = LoadCurrentFunc
+    LoadFrame
+    v3 = TagIfDeferred v0
+    v4 = TagIfDeferred v1
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v3 v4
+    }
+    AtQuiescentState
+    v5 = LoadEvalBreaker
+    CondBranch<2, 1> v5
+  }
+
+  bb 2 (preds 0) {
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v3 v4
+    }
+    v6 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+        Locals<2> v3 v4
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
+    Snapshot {
+      CurInstrOffset 2
+      Locals<2> v3 v4
+    }
+    v7 = MakeTuple<2> {
+      FrameState {
+        CurInstrOffset 4
+        Locals<2> v3 v4
+        Stack<2> v3 v4
+      }
+    }
+    InitTupleElements<2> v7 v3 v4
+    Snapshot {
+      CurInstrOffset 6
+      Locals<2> v3 v4
+      Stack<1> v7
+    }
+    Return v7
+  }
+}
+)";
+#elif PY_VERSION_HEX >= 0x030F0000
+  const char* expected = R"(fun jittestmodule:test {
+  bb 0 {
+    v0 = LoadArg<0; "x">
+    v1 = LoadArg<1; "y">
+    v2 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<2> v0 v1
@@ -2425,18 +3568,19 @@ def test(x, y):
 
   bb 1 (preds 0, 2) {
     Snapshot {
-      CurInstrOffset 2
+      CurInstrOffset 4
       Locals<2> v0 v1
     }
-    v5 = MakeTuple<2> v0 v1 {
+    v5 = MakeTuple<2> {
       FrameState {
-        CurInstrOffset 4
+        CurInstrOffset 6
         Locals<2> v0 v1
         Stack<2> v0 v1
       }
     }
+    InitTupleElements<2> v5 v0 v1
     Snapshot {
-      CurInstrOffset 6
+      CurInstrOffset 8
       Locals<2> v0 v1
       Stack<1> v5
     }
@@ -2444,12 +3588,13 @@ def test(x, y):
   }
 }
 )";
-#elif PY_VERSION_HEX >= 0x030C0000
+#elif PY_VERSION_HEX >= 0x030E0000
   const char* expected = R"(fun jittestmodule:test {
   bb 0 {
     v0 = LoadArg<0; "x">
     v1 = LoadArg<1; "y">
     v2 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<2> v0 v1
@@ -2477,15 +3622,16 @@ def test(x, y):
       CurInstrOffset 2
       Locals<2> v0 v1
     }
-    v5 = MakeTuple<2> v0 v1 {
+    v5 = MakeTuple<2> {
       FrameState {
-        CurInstrOffset 6
+        CurInstrOffset 4
         Locals<2> v0 v1
         Stack<2> v0 v1
       }
     }
+    InitTupleElements<2> v5 v0 v1
     Snapshot {
-      CurInstrOffset 8
+      CurInstrOffset 6
       Locals<2> v0 v1
       Stack<1> v5
     }
@@ -2498,36 +3644,49 @@ def test(x, y):
   bb 0 {
     v0 = LoadArg<0; "x">
     v1 = LoadArg<1; "y">
+    v2 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<2> v0 v1
     }
-    v0 = CheckVar<"x"> v0 {
+    v3 = LoadEvalBreaker
+    CondBranch<2, 1> v3
+  }
+
+  bb 2 (preds 0) {
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v0 v1
+    }
+    v4 = RunPeriodicTasks {
       FrameState {
         CurInstrOffset 0
         Locals<2> v0 v1
       }
     }
-    v1 = CheckVar<"y"> v1 {
-      FrameState {
-        CurInstrOffset 2
-        Locals<2> v0 v1
-        Stack<1> v0
-      }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
+    Snapshot {
+      CurInstrOffset 2
+      Locals<2> v0 v1
     }
-    v2 = MakeTuple<2> v0 v1 {
+    v5 = MakeTuple<2> {
       FrameState {
-        CurInstrOffset 4
+        CurInstrOffset 6
         Locals<2> v0 v1
         Stack<2> v0 v1
       }
     }
+    InitTupleElements<2> v5 v0 v1
     Snapshot {
-      CurInstrOffset 6
+      CurInstrOffset 8
       Locals<2> v0 v1
-      Stack<1> v2
+      Stack<1> v5
     }
-    Return v2
+    Return v5
   }
 }
 )";
@@ -2544,11 +3703,156 @@ def test(x):
 )";
   std::unique_ptr<Function> irfunc;
   CompileToHIR(src, "test", irfunc);
-#if PY_VERSION_HEX >= 0x030E0000
+#if PY_VERSION_HEX >= 0x030E0000 && defined(Py_GIL_DISABLED)
   const char* expected = R"(fun jittestmodule:test {
   bb 0 {
     v0 = LoadArg<0; "x">
     v2 = LoadCurrentFunc
+    LoadFrame
+    v3 = TagIfDeferred v0
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v3 v1
+    }
+    AtQuiescentState
+    v4 = LoadEvalBreaker
+    CondBranch<2, 1> v4
+  }
+
+  bb 2 (preds 0) {
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v3 v1
+    }
+    v5 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+        Locals<2> v3 v1
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
+    Snapshot {
+      CurInstrOffset 2
+      Locals<2> v3 v1
+    }
+    v6 = MakeTuple<1> {
+      FrameState {
+        CurInstrOffset 4
+        Locals<2> v3 v1
+        Stack<1> v3
+      }
+    }
+    InitTupleElements<1> v6 v3
+    Snapshot {
+      CurInstrOffset 6
+      Locals<2> v3 v1
+      Stack<1> v6
+    }
+    v7 = LoadConst<MortalCode["foo"]>
+    v9 = LoadConst<Nullptr>
+    v8 = MakeFunction v7 v9 {
+      FrameState {
+        CurInstrOffset 8
+        Locals<2> v3 v1
+        Stack<1> v6
+      }
+    }
+    Snapshot {
+      CurInstrOffset 10
+      Locals<2> v3 v1
+      Stack<2> v6 v8
+    }
+    SetFunctionAttr<func_defaults> v6 v8
+    Snapshot {
+      CurInstrOffset 12
+      Locals<2> v3 v1
+      Stack<1> v8
+    }
+    v1 = Assign v8
+    Return v1
+  }
+}
+)";
+#elif PY_VERSION_HEX >= 0x030F0000
+  const char* expected = R"(fun jittestmodule:test {
+  bb 0 {
+    v0 = LoadArg<0; "x">
+    v2 = LoadCurrentFunc
+    LoadFrame
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v0 v1
+    }
+    v3 = LoadEvalBreaker
+    CondBranch<2, 1> v3
+  }
+
+  bb 2 (preds 0) {
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v0 v1
+    }
+    v4 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+        Locals<2> v0 v1
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
+    Snapshot {
+      CurInstrOffset 4
+      Locals<2> v0 v1
+    }
+    v5 = MakeTuple<1> {
+      FrameState {
+        CurInstrOffset 6
+        Locals<2> v0 v1
+        Stack<1> v0
+      }
+    }
+    InitTupleElements<1> v5 v0
+    Snapshot {
+      CurInstrOffset 8
+      Locals<2> v0 v1
+      Stack<1> v5
+    }
+    v6 = LoadConst<MortalCode["foo"]>
+    v8 = LoadConst<Nullptr>
+    v7 = MakeFunction v6 v8 {
+      FrameState {
+        CurInstrOffset 10
+        Locals<2> v0 v1
+        Stack<1> v5
+      }
+    }
+    Snapshot {
+      CurInstrOffset 12
+      Locals<2> v0 v1
+      Stack<2> v5 v7
+    }
+    SetFunctionAttr<func_defaults> v5 v7
+    Snapshot {
+      CurInstrOffset 14
+      Locals<2> v0 v1
+      Stack<1> v7
+    }
+    v1 = Assign v7
+    Return v1
+  }
+}
+)";
+#elif PY_VERSION_HEX >= 0x030E0000
+  const char* expected = R"(fun jittestmodule:test {
+  bb 0 {
+    v0 = LoadArg<0; "x">
+    v2 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<2> v0 v1
@@ -2576,13 +3880,14 @@ def test(x):
       CurInstrOffset 2
       Locals<2> v0 v1
     }
-    v5 = MakeTuple<1> v0 {
+    v5 = MakeTuple<1> {
       FrameState {
         CurInstrOffset 4
         Locals<2> v0 v1
         Stack<1> v0
       }
     }
+    InitTupleElements<1> v5 v0
     Snapshot {
       CurInstrOffset 6
       Locals<2> v0 v1
@@ -2613,11 +3918,12 @@ def test(x):
   }
 }
 )";
-#elif PY_VERSION_HEX >= 0x030C0000
+#else
   const char* expected = R"(fun jittestmodule:test {
   bb 0 {
     v0 = LoadArg<0; "x">
     v2 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<2> v0 v1
@@ -2645,13 +3951,14 @@ def test(x):
       CurInstrOffset 2
       Locals<2> v0 v1
     }
-    v5 = MakeTuple<1> v0 {
+    v5 = MakeTuple<1> {
       FrameState {
         CurInstrOffset 4
         Locals<2> v0 v1
         Stack<1> v0
       }
     }
+    InitTupleElements<1> v5 v0
     Snapshot {
       CurInstrOffset 6
       Locals<2> v0 v1
@@ -2677,65 +3984,13 @@ def test(x):
   }
 }
 )";
-#else
-  const char* expected = R"(fun jittestmodule:test {
-  bb 0 {
-    v0 = LoadArg<0; "x">
-    Snapshot {
-      CurInstrOffset 0
-      Locals<2> v0 v1
-    }
-    v0 = CheckVar<"x"> v0 {
-      FrameState {
-        CurInstrOffset 0
-        Locals<2> v0 v1
-      }
-    }
-    v2 = MakeTuple<1> v0 {
-      FrameState {
-        CurInstrOffset 2
-        Locals<2> v0 v1
-        Stack<1> v0
-      }
-    }
-    Snapshot {
-      CurInstrOffset 4
-      Locals<2> v0 v1
-      Stack<1> v2
-    }
-    v3 = LoadConst<MortalCode["foo"]>
-    v4 = LoadConst<MortalUnicodeExact["test.<locals>.foo"]>
-    v5 = MakeFunction v3 v4 {
-      FrameState {
-        CurInstrOffset 8
-        Locals<2> v0 v1
-        Stack<1> v2
-      }
-    }
-    SetFunctionAttr<func_defaults> v2 v5
-    Snapshot {
-      CurInstrOffset 10
-      Locals<2> v0 v1
-      Stack<1> v5
-    }
-    v1 = Assign v5
-    v1 = CheckVar<"foo"> v1 {
-      FrameState {
-        CurInstrOffset 12
-        Locals<2> v0 v1
-      }
-    }
-    Return v1
-  }
-}
-)";
 #endif
   EXPECT_HIR_EQ(irfunc, expected);
 }
 
 TEST_F(FrameStateCreationTest, GetDominatingFrameState) {
   CFG cfg;
-  auto block = cfg.AllocateBlock();
+  auto block = cfg.allocateBlock();
   FrameState fs{BCOffset{10}};
   block->append<Snapshot>(fs);
 
@@ -2766,3 +4021,5 @@ TEST_F(FrameStateCreationTest, GetDominatingFrameState) {
   ASSERT_NE(i3_fs, nullptr);
   ASSERT_EQ(*i3_fs, fs2);
 }
+
+} // namespace cinderx

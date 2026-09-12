@@ -3,8 +3,9 @@
 #include "cinderx/Jit/code_runtime.h"
 
 #include "cinderx/Common/util.h"
+#include "cinderx/Jit/threaded_compile.h"
 
-namespace jit {
+namespace cinderx::jit {
 
 GenYieldPoint::GenYieldPoint(std::size_t deopt_idx, ptrdiff_t yield_from_offset)
     : deopt_idx_{deopt_idx}, yield_from_offset_{yield_from_offset} {}
@@ -29,24 +30,20 @@ ptrdiff_t GenYieldPoint::yieldFromOffset() const {
   return yield_from_offset_;
 }
 
-bool RuntimeFrameState::isGen() const {
+bool CodeRuntime::isGen() const {
   return code()->co_flags & kCoFlagsAnyGenerator;
 }
 
-BorrowedRef<PyCodeObject> RuntimeFrameState::code() const {
+BorrowedRef<PyCodeObject> CodeRuntime::code() const {
   return code_;
 }
 
-BorrowedRef<PyDictObject> RuntimeFrameState::builtins() const {
+BorrowedRef<PyDictObject> CodeRuntime::builtins() const {
   return builtins_;
 }
 
-BorrowedRef<PyDictObject> RuntimeFrameState::globals() const {
+BorrowedRef<PyDictObject> CodeRuntime::globals() const {
   return globals_;
-}
-
-BorrowedRef<PyFunctionObject> RuntimeFrameState::func() const {
-  return func_;
 }
 
 CodeRuntime::CodeRuntime(BorrowedRef<PyFunctionObject> func)
@@ -59,27 +56,41 @@ CodeRuntime::CodeRuntime(
     BorrowedRef<PyCodeObject> code,
     BorrowedRef<PyDictObject> builtins,
     BorrowedRef<PyDictObject> globals)
-    : frame_state_{code, builtins, globals} {
-  // Ensure code, globals, and builtins objects live as long as their compiled
-  // functions.
-  addReference(code);
-  addReference(builtins);
-  addReference(globals);
-}
+    : code_{code}, builtins_{builtins}, globals_{globals} {}
 
 void CodeRuntime::addReference(BorrowedRef<> obj) {
-  // Serialize as we modify the ref-count to obj which may be widely accessible.
-  ThreadedCompileSerialize guard;
-  references_.emplace(ThreadedRef<>::create(obj));
+  JIT_DCHECK(
+      ThreadedCompileContext::canAccessSharedData(), "lock should be held");
+  if (!_Py_IsImmortal(obj)) {
+    references_.emplace(Ref<>::create(obj));
+  }
+}
+
+void CodeRuntime::transferReferences(std::unordered_set<Ref<>>&& refs) {
+  JIT_DCHECK(
+      ThreadedCompileContext::canAccessSharedData(), "lock should be held");
+  references_.merge(std::move(refs));
 }
 
 void CodeRuntime::releaseReferences() {
-  // Serialize as we modify ref-counts which may be widely accessible.
-  ThreadedCompileSerialize guard;
-  references_.clear();
+  // We want to be careful here with the freeing of these references. Freeing
+  // the objects could cause our CompiledFunction to be freed as well so first
+  // we grab the references and then clear them.
+  JIT_DCHECK(
+      ThreadedCompileContext::canAccessSharedData(), "lock should be held");
+
+  std::unordered_set<Ref<>> refs;
 #if PY_VERSION_HEX >= 0x030E0000 && defined(ENABLE_LIGHTWEIGHT_FRAMES)
-  reifier_.reset(nullptr);
+  Ref<> tmp;
 #endif
+  {
+    refs = std::move(references_);
+    is_cleared_ = true;
+#if PY_VERSION_HEX >= 0x030E0000 && defined(ENABLE_LIGHTWEIGHT_FRAMES)
+    reifier_.reset(nullptr);
+#endif
+  }
+  // and then we let the dtors clean everything up
 }
 
 GenYieldPoint* CodeRuntime::addGenYieldPoint(GenYieldPoint&& gen_yield_point) {
@@ -87,7 +98,7 @@ GenYieldPoint* CodeRuntime::addGenYieldPoint(GenYieldPoint&& gen_yield_point) {
   return &gen_yield_points_.back();
 }
 
-std::size_t CodeRuntime::addDeoptMetadata(DeoptMetadata&& deopt_meta) {
+std::size_t CodeRuntime::addRawDeoptMetadata(DeoptMetadata&& deopt_meta) {
   deopt_metadatas_.emplace_back(std::move(deopt_meta));
   return deopt_metadatas_.size() - 1;
 }
@@ -104,20 +115,94 @@ const std::vector<DeoptMetadata>& CodeRuntime::deoptMetadatas() const {
   return deopt_metadatas_;
 }
 
-const RuntimeFrameState* CodeRuntime::frameState() const {
-  return &frame_state_;
-}
-
 int CodeRuntime::frameSize() const {
   return frame_size_;
 }
 
-void CodeRuntime::setFrameSize(int size) {
+void CodeRuntime::setFrameSize(int16_t size) {
   frame_size_ = size;
+}
+
+uint32_t CodeRuntime::spillSize() const {
+  return spill_size_;
+}
+
+void CodeRuntime::setSpillSize(uint32_t size) {
+  spill_size_ = size;
+}
+
+GenResumeFunc CodeRuntime::genResumeEntry() const {
+  return gen_resume_entry_;
+}
+
+void CodeRuntime::setGenResumeEntry(GenResumeFunc resume_entry) {
+  gen_resume_entry_ = resume_entry;
 }
 
 DebugInfo* CodeRuntime::debugInfo() {
   return &debug_info_;
 }
 
-} // namespace jit
+void** CodeRuntime::allocateTypeCheckJumpTable(size_t num_entries) {
+  type_check_jump_table_ = std::make_unique<void*[]>(num_entries);
+  return type_check_jump_table_.get();
+}
+
+bool CodeRuntime::isCleared() const {
+  return is_cleared_;
+}
+
+int CodeRuntime::traverse(visitproc visit, void* arg) {
+  // Only traverse objects that this CodeRuntime owns strong references to.
+  // The references_ set holds strong references.
+  // code_, builtins_, globals_ are BorrowedRef pointing to the same objects
+  // already in references_ - don't double-count.
+  for (const auto& ref : references_) {
+    Py_VISIT(ref.get());
+  }
+  if (auto ref = reifier()) {
+    Py_VISIT(ref.get());
+  }
+
+  return 0;
+}
+
+std::optional<uintptr_t> CodeRuntime::getCallsiteDeoptExit(
+    uintptr_t return_addr) const {
+  auto it = callsite_deopt_exits_.find(return_addr);
+  if (it != callsite_deopt_exits_.end()) {
+    return it->second;
+  }
+  return std::nullopt;
+}
+
+void CodeRuntime::addCallsiteDeoptExit(
+    uintptr_t return_addr,
+    uintptr_t deopt_exit_addr) {
+  callsite_deopt_exits_[return_addr] = deopt_exit_addr;
+}
+
+void CodeRuntime::setReifier([[maybe_unused]] Ref<>&& reifier) {
+#if PY_VERSION_HEX >= 0x030E0000 && defined(ENABLE_LIGHTWEIGHT_FRAMES)
+  reifier_ = std::move(reifier);
+#endif
+}
+
+BorrowedRef<> CodeRuntime::reifier() {
+#if PY_VERSION_HEX >= 0x030E0000 && defined(ENABLE_LIGHTWEIGHT_FRAMES)
+  return reifier_;
+#else
+  return nullptr;
+#endif
+}
+
+void CodeRuntime::setCompiledFunction(
+    BorrowedRef<CompiledFunction> compiled_func) {
+  compiled_function_ = compiled_func;
+}
+
+BorrowedRef<CompiledFunction> CodeRuntime::compiledFunction() const {
+  return compiled_function_;
+}
+
+} // namespace cinderx::jit

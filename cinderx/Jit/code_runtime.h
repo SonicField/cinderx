@@ -3,15 +3,20 @@
 #pragma once
 
 #include "cinderx/Common/ref.h"
+#include "cinderx/Common/util.h"
 #include "cinderx/Jit/debug_info.h"
 #include "cinderx/Jit/deopt.h"
 #include "cinderx/Jit/threaded_compile.h"
 
 #include <deque>
 #include <limits>
+#include <optional>
+#include <unordered_map>
 #include <unordered_set>
 
-namespace jit {
+namespace cinderx::jit {
+
+class CompiledFunction;
 
 constexpr ptrdiff_t kInvalidYieldFromOffset =
     std::numeric_limits<ptrdiff_t>::max();
@@ -39,70 +44,23 @@ class GenYieldPoint {
   const ptrdiff_t yield_from_offset_;
 };
 
-class alignas(16) RuntimeFrameState {
- public:
-  static constexpr int64_t codeOffset() {
-    return offsetof(RuntimeFrameState, code_);
-  }
-
-  RuntimeFrameState(
-      BorrowedRef<PyCodeObject> code,
-      BorrowedRef<PyDictObject> builtins,
-      BorrowedRef<PyDictObject> globals,
-      BorrowedRef<PyFunctionObject> func = nullptr)
-      : code_{code}, builtins_{builtins}, globals_{globals}, func_{func} {}
-
-  // Check if this is a generator frame.
-  bool isGen() const;
-
-  BorrowedRef<PyCodeObject> code() const;
-  BorrowedRef<PyDictObject> builtins() const;
-  BorrowedRef<PyDictObject> globals() const;
-  BorrowedRef<PyFunctionObject> func() const;
-
- private:
-  // All fields are owned by the CodeRuntime that owns this RuntimeFrameState.
-
-  BorrowedRef<PyCodeObject> code_;
-  BorrowedRef<PyDictObject> builtins_;
-  BorrowedRef<PyDictObject> globals_;
-  // The function is only set for inlined frames.
-  BorrowedRef<PyFunctionObject> func_;
-};
-
 // Runtime data for a PyCodeObject object, containing caches and any other data
 // associated with a JIT-compiled function.
 class alignas(16) CodeRuntime {
  public:
-  static constexpr int64_t frameStateOffset() {
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Winvalid-offsetof"
-    return offsetof(CodeRuntime, frame_state_);
-#pragma GCC diagnostic pop
-  }
-
-  static constexpr int64_t codeOffset() {
-    return CodeRuntime::frameStateOffset() + RuntimeFrameState::codeOffset();
-  }
-
   explicit CodeRuntime(BorrowedRef<PyFunctionObject> func);
   CodeRuntime(
       BorrowedRef<PyCodeObject> code,
       BorrowedRef<PyDictObject> builtins,
       BorrowedRef<PyDictObject> globals);
 
-  template <typename... Args>
-  RuntimeFrameState* allocateRuntimeFrameState(Args&&... args) {
-    return inlined_frame_states_
-        .emplace_back(
-            std::make_unique<RuntimeFrameState>(std::forward<Args>(args)...))
-        .get();
-  }
-
   // Ensure that this CodeRuntime owns a reference to the given borrowed
   // object, keeping it alive for use by the compiled code. Make CodeRuntime a
   // new owner of the object.
   void addReference(BorrowedRef<> obj);
+
+  // Transfer references to be owned by the CodeRuntime.
+  void transferReferences(std::unordered_set<Ref<>>&& refs);
 
   // Release any references this CodeRuntime holds to Python objects.
   void releaseReferences();
@@ -110,9 +68,10 @@ class alignas(16) CodeRuntime {
   // Store meta-data about generator yield point.
   GenYieldPoint* addGenYieldPoint(GenYieldPoint&& gen_yield_point);
 
-  // Add metadata used during a deopt.  Return an ID that can be used to fetch
-  // the metadata from generated code.
-  std::size_t addDeoptMetadata(DeoptMetadata&& deopt_meta);
+  // Add raw deopt metadata that was constructed without a DeoptBase, such as
+  // callsite live-value metadata for helper calls. This bypasses the
+  // instruction-based dedup cache.
+  std::size_t addRawDeoptMetadata(DeoptMetadata&& deopt_meta);
 
   // Get a reference to the DeoptMetadata with the given ID.
   DeoptMetadata& getDeoptMetadata(std::size_t id);
@@ -121,34 +80,59 @@ class alignas(16) CodeRuntime {
   // Get all deopt metadatas for the given CodeRuntime.
   const std::vector<DeoptMetadata>& deoptMetadatas() const;
 
-  // Get the top-level runtime frame state for this CodeRuntime's PyCodeObject.
-  const RuntimeFrameState* frameState() const;
+  // Check if this is a generator/coroutine/async generator.
+  bool isGen() const;
+
+  BorrowedRef<PyCodeObject> code() const;
+  BorrowedRef<PyDictObject> builtins() const;
+  BorrowedRef<PyDictObject> globals() const;
 
   // Get and set the total size of a stack frame for this compiled code object.
   int frameSize() const;
-  void setFrameSize(int size);
+  void setFrameSize(int16_t size);
+
+  // Get and set the number of spill bytes for generators.
+  uint32_t spillSize() const;
+  void setSpillSize(uint32_t size);
+
+  // Get and set the address a generator resumes execution at.  Only meaningful
+  // for generators, and only resolvable once code generation has bound the
+  // resume entry label to an address.
+  GenResumeFunc genResumeEntry() const;
+  void setGenResumeEntry(GenResumeFunc resume_entry);
 
   DebugInfo* debugInfo();
 
-#if PY_VERSION_HEX >= 0x030E0000 && defined(ENABLE_LIGHTWEIGHT_FRAMES)
-  void setReifier(BorrowedRef<> reifier) {
-    ThreadedCompileSerialize guard;
-    reifier_ = ThreadedRef<>::create(reifier);
-  }
-  BorrowedRef<> reifier() {
-    return reifier_;
-  }
-#else
-  BorrowedRef<> reifier() {
-    return nullptr;
-  }
-#endif
+  // Allocate a jump table for static type check dispatch.
+  // Returns a pointer to the table data (valid for the lifetime of this
+  // CodeRuntime).
+  void** allocateTypeCheckJumpTable(size_t num_entries);
+
+  // Traverse all GC-reachable objects held by this CodeRuntime.
+  int traverse(visitproc visit, void* arg);
+
+  // True if the references have been cleared
+  bool isCleared() const;
+
+  std::optional<uintptr_t> getCallsiteDeoptExit(uintptr_t return_addr) const;
+
+  void addCallsiteDeoptExit(uintptr_t return_addr, uintptr_t deopt_exit_addr);
+
+  void setReifier(Ref<>&& reifier);
+
+  BorrowedRef<> reifier();
+
+  void setCompiledFunction(BorrowedRef<CompiledFunction> compiled_func);
+
+  BorrowedRef<CompiledFunction> compiledFunction() const;
+
  private:
-  RuntimeFrameState frame_state_;
-  std::vector<std::unique_ptr<RuntimeFrameState>> inlined_frame_states_;
+  BorrowedRef<PyCodeObject> code_;
+  BorrowedRef<PyDictObject> builtins_;
+  BorrowedRef<PyDictObject> globals_;
 
   // References owned by this CodeRuntime.
-  std::unordered_set<ThreadedRef<PyObject>> references_;
+  std::unordered_set<Ref<PyObject>> references_;
 
   // Metadata about yield points. Deque so we can have raw pointers to content.
   std::deque<GenYieldPoint> gen_yield_points_;
@@ -158,11 +142,27 @@ class alignas(16) CodeRuntime {
   std::vector<DeoptMetadata> deopt_metadatas_;
 
 #if PY_VERSION_HEX >= 0x030E0000 && defined(ENABLE_LIGHTWEIGHT_FRAMES)
-  ThreadedRef<> reifier_;
+  Ref<> reifier_;
 #endif
 
-  int frame_size_{-1};
+  // Jump table for static type check dispatch (indexed by defaulted_arg_count).
+  // Entries are resolved to code addresses after code generation.
+  std::unique_ptr<void*[]> type_check_jump_table_;
+
+  // Map from call return addresses to post-call guard deopt exits.
+  // Built during codegen, used by deoptAllJitFramesOnStack().
+  std::unordered_map<uintptr_t, uintptr_t> callsite_deopt_exits_;
+
+  // Backpointer to the CompiledFunction that owns this CodeRuntime.
+  // Set after CompiledFunction::create() in makeCompiledFunction().
+  BorrowedRef<CompiledFunction> compiled_function_;
+
+  GenResumeFunc gen_resume_entry_{nullptr};
+
+  bool is_cleared_{false};
+  int16_t frame_size_{-1};
+  uint32_t spill_size_{0};
   DebugInfo debug_info_;
 };
 
-} // namespace jit
+} // namespace cinderx::jit

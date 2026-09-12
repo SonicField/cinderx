@@ -1,34 +1,24 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-strict
 
-import abc
-import ctypes
 import dis
 import functools
 import importlib
 import multiprocessing
 import os.path
+import platform
 import sys
+import sysconfig
 import tempfile
 import types
 import unittest
+import warnings
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Callable, Coroutine, Generator, Sequence, TypeVar
+from typing import Callable, Generator, Iterable, TypeVar
 
 import cinderx
 import cinderx.jit
-
-try:
-    import cinder
-
-    def hasCinderX() -> bool:
-        return True
-
-except ImportError:
-
-    def hasCinderX() -> bool:
-        return False
 
 
 # String encoding to use for subprocesses.
@@ -36,6 +26,8 @@ ENCODING: str = sys.stdout.encoding or sys.getdefaultencoding()
 
 # Hack to allow subprocesses to find where the cinderx module is.
 CINDERX_PATH: str = os.path.dirname(os.path.dirname(cinderx.__file__))
+
+FREE_THREADING_BUILD = bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
 
 
 def subprocess_env() -> dict[str, str]:
@@ -65,35 +57,6 @@ TSend = TypeVar("TSend")
 TReturn = TypeVar("TReturn")
 
 
-def get_await_stack(
-    coro: Coroutine[TYield, TSend, TReturn],
-) -> list[Coroutine[TYield, TSend, TReturn]]:
-    """Return the chain of coroutines reachable from coro via its awaiter"""
-
-    stack = []
-    awaiter = cinder._get_coro_awaiter(coro)
-    while awaiter is not None:
-        stack.append(awaiter)
-
-        # pyre-ignore[1001]
-        awaiter = cinder._get_coro_awaiter(awaiter)
-    return stack
-
-
-def verify_stack(
-    testcase: unittest.TestCase, stack: Sequence[str], expected: Sequence[str]
-) -> None:
-    n = len(expected)
-    frames = stack[-n:]
-    testcase.assertEqual(len(frames), n, "Callstack had less frames than expected")
-
-    for actual, exp in zip(frames, expected):
-        testcase.assertTrue(
-            actual.endswith(exp),
-            f"The actual frame {actual} doesn't refer to the expected function {exp}",
-        )
-
-
 def compiles_after_one_call() -> bool:
     """
     Check if CinderX will automatically compile functions after they are called once.
@@ -101,16 +64,49 @@ def compiles_after_one_call() -> bool:
     return cinderx.jit.get_compile_after_n_calls() == 0
 
 
+def is_jit_compiled_after_call(func: Callable[..., object]) -> bool:
+    """
+    Check if a function has been compiled by the calls made to it so far.
+
+    Background compilation runs on a worker thread, so the compile a call kicks
+    off is not necessarily finished by the time that call returns.
+    """
+    cinderx.jit.wait_for_background_compiles()
+    return cinderx.jit.is_jit_compiled(func)
+
+
+@contextmanager
+def no_background_compile() -> Generator[None, None, None]:
+    """
+    Compile on the calling thread rather than on the background worker.
+
+    For tests that need a function to be compiled by the time a call to it
+    returns, or that rely on the functions a compiled function calls being
+    compiled along with it, which the background worker doesn't do.
+    """
+    prev = cinderx.jit.get_background_compile()
+    cinderx.jit.background_compile(False)
+    try:
+        yield
+    finally:
+        cinderx.jit.background_compile(prev)
+
+
 _FT = TypeVar("_FT", bound=Callable[..., object])
 
 
-# pyre-ignore[34]: Type variable isn't present in parameters
 def passAlways(reason: str) -> Callable[[_FT], _FT]:
     """
-    Force a test to always pass.
-    Useful when `skip` is not desired
-    (e.g. intentionally skipping tests that shouldn't be deleted)
+    Pass a test without running it.
+
+    "Pass" means different things in internal Meta builds and external open
+    source builds.  Internally at Meta this tries to avoid skipping tests
+    because that leads to a lot of test infrastructure logging and noise.
+    Externally this will behave just like skip() as users expect.
     """
+
+    if is_oss():
+        return unittest.skip(reason)
 
     def decorator(test_item: object) -> object:
         if isinstance(test_item, type):
@@ -121,25 +117,26 @@ def passAlways(reason: str) -> Callable[[_FT], _FT]:
                     setattr(test_item, attr_name, passAlways(attr))
 
         else:
-
+            # pyrefly: ignore [bad-argument-type]
             @functools.wraps(test_item)
             def pass_wrapper(*args: object, **kwargs: object) -> None:
                 return
 
             test_item = pass_wrapper
 
+        # pyrefly: ignore [missing-attribute]
         test_item.__unittest_skip_why__ = reason
         return test_item
 
     if isinstance(reason, types.FunctionType):
         test_item = reason
         reason = ""
+        # pyrefly: ignore [bad-return]
         return decorator(test_item)
     # pyre-ignore[7]: bad return type
     return decorator
 
 
-# pyre-ignore[34]: Type variable isn't present in parameters
 def passIf(condition: object, reason: str) -> Callable[[_FT], _FT]:
     """
     Force a test to pass if the condition is true.
@@ -149,7 +146,6 @@ def passIf(condition: object, reason: str) -> Callable[[_FT], _FT]:
     return lambda obj: obj
 
 
-# pyre-ignore[34]: Type variable isn't present in parameters
 def passUnless(condition: object, reason: str) -> Callable[[_FT], _FT]:
     """
     Force a test to pass unless the condition is true.
@@ -161,6 +157,28 @@ def passUnless(condition: object, reason: str) -> Callable[[_FT], _FT]:
 
 def skip_if_jit(reason: str) -> Callable[[Callable[..., None]], Callable[..., None]]:
     return passIf(cinderx.jit.is_enabled(), reason)
+
+
+def skip_if_prefork(
+    reason: str = "Behavior intentionally differs in prefork builds (e.g. compiled functions are always immortalized)",
+) -> Callable[[Callable[..., None]], Callable[..., None]]:
+    return passIf(cinderx.is_prefork_build(), reason)
+
+
+def skip_if_ft(reason: str) -> Callable[[Callable[..., None]], Callable[..., None]]:
+    return passIf(FREE_THREADING_BUILD, reason)
+
+
+def skip_if_ft_macos(
+    reason: str,
+) -> Callable[[Callable[..., None]], Callable[..., None]]:
+    """
+    Skip a test on free-threaded macOS builds.
+
+    Narrower than skip_if_ft(): these are cases that hold on free-threaded
+    Linux but not on macOS, so gating all of free-threading would over-skip.
+    """
+    return passIf(FREE_THREADING_BUILD and sys.platform == "darwin", reason)
 
 
 def skip_unless_jit(
@@ -201,11 +219,15 @@ def failUnlessJITCompiled(func: Callable[..., TRet]) -> Callable[..., TRet]:
         # when wrapper() is eventually called.
         exc: RuntimeError = re
 
-        def wrapper(*args: ...) -> None:
+        def wrapper(*args: object) -> None:
             raise RuntimeError(
                 f"JIT compilation of {func.__qualname__} failed with {exc}"
             )
 
+        # pyrefly: ignore [missing-attribute]
+        wrapper.inner_function = func
+
+        # pyrefly: ignore [bad-return]
         return wrapper
 
     return func
@@ -214,7 +236,7 @@ def failUnlessJITCompiled(func: Callable[..., TRet]) -> Callable[..., TRet]:
 def fail_if_deopt(func: Callable[..., TRet]) -> Callable[..., TRet]:
     """
     Raise a RuntimeException if _any_ deopts occur during execution of the
-    wrapped function. Note deopts occuring in nested function calls will also
+    wrapped function. Note deopts occurring in nested function calls will also
     trigger this. Also, execution will run to completion - it won't stop at the
     point a deopt occurs.
     """
@@ -222,30 +244,103 @@ def fail_if_deopt(func: Callable[..., TRet]) -> Callable[..., TRet]:
     if not cinderx.jit.is_enabled():
         return func
 
-    def wrapper(*args: ..., **kwargs: ...) -> TRet:
+    def wrapper(*args: object, **kwargs: object) -> TRet:
         cinderx.jit.get_and_clear_runtime_stats()
         r = func(*args, **kwargs)
         # pyre-ignore[6]
         if len(deopts := cinderx.jit.get_and_clear_runtime_stats()["deopt"]):
-            raise RuntimeError(f"Deopt occured {deopts}")
+            raise RuntimeError(f"Deopt occurred {deopts}")
         return r
 
+    # pyrefly: ignore [missing-attribute]
     wrapper.inner_function = func
 
     return wrapper
 
 
-def is_asan_build() -> bool:
+def is_oss() -> bool:
+    """
+    Check if this is running in an open source environment.
+
+    Currently implemented as looking for the absence of the Meta Python runtime.
+    """
+    return "+meta" not in sys.version and "+cinder" not in sys.version
+
+
+def has_cpython_test_package() -> bool:
+    """
+    Check whether CPython's own `test` package is importable.
+
+    Test modules that borrow from CPython's suite have to ask this rather than
+    `is_oss()`.  The two used to coincide, but no longer do: the bundled Meta
+    runtimes ship `Lib/test`, and so does the platform Python up to 3.12, but
+    3.14 onwards drops it from the distribution.  A build can therefore be very
+    much not-OSS and still have no `test` package.
+    """
     try:
-        ctypes.pythonapi.__asan_init
-        return True
-    except AttributeError:
+        # pyre-ignore[21]: can't find test.support
+        import test.support  # noqa: F401
+    except ImportError:
         return False
+    return True
+
+
+def skip_test_if_oss(
+    reason: str,
+) -> Callable[[Callable[..., None]], Callable[..., None]]:
+    return passIf(is_oss(), reason)
+
+
+def skip_module_if_oss() -> None:
+    """
+    Skip a test module on OSS builds, i.e. ones that aren't built with Buck internally at Meta.
+
+    This is needed for modules whose imports are still expecting the internal layout, or those
+    that depend on internal testing modules in CPython.
+
+    Don't use this for specific features, those should be checked explicitly
+    (e.g. Meta Python's Lazy Imports).
+    """
+
+    if is_oss():
+        raise unittest.SkipTest("Module not compatible with OSS imports")
+
+
+def has_meta_lazy_imports() -> bool:
+    """
+    Check if the runtime has been built with Meta Python's Lazy Imports
+    implementation, i.e. not PEP 810.
+    """
+    return hasattr(importlib, "set_lazy_imports")
+
+
+def undo_fail_decorators(func: Callable[..., object]) -> Callable[..., object]:
+    """
+    Unravel "fail" decorators defined in this module off of a function.
+    """
+
+    while inner_func := getattr(func, "inner_function", None):
+        func = inner_func
+    return func
+
+
+def is_sanitizer_build() -> bool:
+    cflags = sysconfig.get_config_var("CFLAGS") or ""
+    config_args = sysconfig.get_config_var("CONFIG_ARGS") or ""
+    return (
+        cinderx.is_sanitizer_build()
+        or "-fsanitize=address" in cflags
+        or "--with-address-sanitizer" in config_args
+        or "-fsanitize=thread" in cflags
+        or "--with-thread-sanitizer" in config_args
+    )
 
 
 # This is long because ASAN + JIT + subprocess + the Python compiler can be
-# pretty slow in CI.
-SUBPROCESS_TIMEOUT_SEC = 100 if is_asan_build() else 5
+# pretty slow in CI. Also we run aarch64 tests in QEMU which is slow too.
+SUBPROCESS_TIMEOUT_SEC = (
+    100 if (is_sanitizer_build() or platform.processor() != platform.machine()) else 5
+)
 
 
 @contextmanager
@@ -267,11 +362,15 @@ class _ExceptionResult:
         self.exc = exc
 
 
-def run_in_subprocess(func: Callable[..., TRet]) -> Callable[..., TRet]:
+def run_in_subprocess(func: Callable[..., None]) -> Callable[..., None]:
     """
-    Run a function in a subprocess.  This enables modifying process state in a
-    test without affecting other test functions.
+    Run a test function in a subprocess.  This enables modifying process state
+    without affecting other test functions.  Pass the test without running it
+    when fork is unavailable.
     """
+
+    if "fork" not in multiprocessing.get_all_start_methods():
+        return passAlways(f"fork is unavailable on {platform.system()}")(func)
 
     queue: multiprocessing.Queue = multiprocessing.Queue()
 
@@ -282,43 +381,45 @@ def run_in_subprocess(func: Callable[..., TRet]) -> Callable[..., TRet]:
         except Exception as e:
             queue.put(_ExceptionResult(e), timeout=SUBPROCESS_TIMEOUT_SEC)
 
-    def wrapped(*args: object) -> TRet:
+    @functools.wraps(func)
+    def wrapped(*args: object) -> None:
         fork = multiprocessing.get_context("fork")
         p = fork.Process(target=wrapper, args=(queue, *args))
-        p.start()
-        value = queue.get(timeout=SUBPROCESS_TIMEOUT_SEC)
-        p.join(timeout=SUBPROCESS_TIMEOUT_SEC)
+
+        # Ignore warnings about running fork in a multi-threaded environment, they're
+        # not helpful.
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                category=DeprecationWarning,
+                message=r"This process.*is multi-threaded.*",
+            )
+
+            p.start()
+
+        try:
+            value = queue.get(timeout=SUBPROCESS_TIMEOUT_SEC)
+            p.join(timeout=SUBPROCESS_TIMEOUT_SEC)
+        finally:
+            if p.is_alive():
+                p.kill()
+                p.join()
+
         if isinstance(value, _ExceptionResult):
             raise value.exc
-        return value
 
     return wrapped
 
 
-class AssertBytecodeContainsMixin(abc.ABC):
-    @abc.abstractmethod
-    def assertIn(
-        self, expected: object, actual: Sequence[object], msg: str | None = None
-    ) -> None:
-        raise NotImplementedError
-
-    @abc.abstractmethod
-    def assertTrue(self, expr: object, msg: str | None = None) -> None:
-        raise NotImplementedError
-
+class CinderXTestCase(unittest.TestCase):
     def assertBytecodeContains(
         self,
         func: object,
         expected_opcode: str,
         expected_oparg: int | None = None,
     ) -> None:
-        try:
-            # pyre-ignore[16] - for things wrapped by fail_if_deopt()
-            inner_function = func.inner_function
-        except AttributeError:
-            pass
-        else:
-            func = inner_function
+        # pyre-ignore[6]: func isn't properly typed as a callable yet.
+        func = undo_fail_decorators(func)
 
         bytecode_instructions = dis.get_instructions(func)
 
@@ -339,3 +440,24 @@ class AssertBytecodeContainsMixin(abc.ABC):
                 len(matching_instructions) > 0,
                 f"{expected_opcode} opcode with oparg {expected_oparg} should be present in {func.__name__} bytecode",
             )
+
+    def assertHIROpcodes(
+        self,
+        func: Callable[..., object],
+        *,
+        present: Iterable[str] = (),
+        absent: Iterable[str] = (),
+    ) -> None:
+        present = tuple(present)
+        absent = tuple(absent)
+        if not present and not absent:
+            self.fail("Expected at least one HIR opcode assertion")
+
+        self.assertTrue(cinderx.jit.force_compile(func))
+        opcode_counts = cinderx.jit.get_function_hir_opcode_counts(func)
+        if opcode_counts is None:
+            self.fail(f"No HIR opcode counts for compiled {func.__name__}")
+        for opcode in present:
+            self.assertIn(opcode, opcode_counts)
+        for opcode in absent:
+            self.assertNotIn(opcode, opcode_counts)

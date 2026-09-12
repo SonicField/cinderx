@@ -6,7 +6,7 @@
 #include "cinderx/Jit/hir/printer.h"
 #include "cinderx/Jit/hir/ssa.h"
 
-using namespace jit::hir;
+using namespace cinderx::jit::hir;
 
 TEST(CopyPropagationTest, EliminatesCopies) {
   // This could be converted to a .txt-based pass test when we lower directly to
@@ -57,12 +57,12 @@ fun test {
 }
 )";
 
-  auto func = HIRParser().ParseHIR(hir_source);
+  auto func = HIRParser().parseHIR(hir_source);
   ASSERT_NE(func, nullptr);
   ASSERT_TRUE(checkFunc(*func, std::cout));
 
   CopyPropagation copy_prop;
-  copy_prop.Run(*func);
+  copy_prop.run(*func);
 
-  EXPECT_EQ(HIRPrinter().ToString(*func), expected_hir);
+  EXPECT_EQ(HIRPrinter().toString(*func), expected_hir);
 }

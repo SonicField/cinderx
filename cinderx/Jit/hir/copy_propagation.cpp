@@ -2,18 +2,18 @@
 
 #include "cinderx/Jit/hir/copy_propagation.h"
 
-namespace jit::hir {
+namespace cinderx::jit::hir {
 
-void CopyPropagation::Run(Function& irfunc) {
+void CopyPropagation::run(Function& irfunc) {
   std::vector<Instr*> assigns;
-  for (auto block : irfunc.cfg.GetRPOTraversal()) {
+  for (auto block : irfunc.cfg.getRPOTraversal()) {
     for (auto& instr : *block) {
       instr.visitUses([](Register*& reg) {
         reg = chaseAssignOperand(reg);
         return true;
       });
 
-      if (instr.IsAssign()) {
+      if (instr.isAssign()) {
         assigns.emplace_back(&instr);
       }
     }
@@ -25,4 +25,4 @@ void CopyPropagation::Run(Function& irfunc) {
   }
 }
 
-} // namespace jit::hir
+} // namespace cinderx::jit::hir

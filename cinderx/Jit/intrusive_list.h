@@ -9,108 +9,130 @@
 #include <iterator>
 
 /*
- * This file defines a simple, intrusive doubly-linked circular list.
+ * This file defines a simple intrusive doubly linked circular list.
  *
- * To make an object eligible to participate in an intrusive list one must
- * add a public `IntrusiveListNode` member for each list the object may
- * belong to.
+ * To store objects of type T in an IntrusiveList<T>, T must publicly inherit
+ * from IntrusiveListNode<T>.
  *
- * Then, each container is declared as `IntrusiveList<T, T::&member> list`.
+ * A tag allows an object to belong to multiple lists at the same time. Define
+ * a different tag for each list and inherit from IntrusiveListNode<T, Tag> for
+ * each tag. An object can belong to at most one list for each tag.
  *
- * For example,
+ * Example:
  *
- *     // Instances of entry may particpate in one intrusive list
- *     struct Entry {
- *         Entry(int value) : value(value), node() {}
+ *     struct Entry : public IntrusiveListNode<Entry> {
+ *       explicit Entry(int value) : value{value} {}
  *
- *         int value;
- *         IntrusiveListNode node;
+ *       int value;
  *     };
  *
- *     // Then one can declare and build a list of entries like so
- *     IntrusiveList<Entry, &Entry::node> entries;
+ *     IntrusiveList<Entry> entries;
+ *     Entry entry{100};
+ *     entries.pushBack(entry);
  *
- *     Entry entry1(100);
- *     entries.PushBack(entry1);
+ * Multiple-list example:
  *
- *     Entry entry2(200);
- *     entries.PushBack(entry2);
+ *     struct PendingTag {};
+ *     struct ReadyTag {};
  *
- *     // Prints 1 2
- *     for (auto entry : entries) {
- *         printf("%d ", entry.value);
- *     }
+ *     struct Task : public IntrusiveListNode<Task, PendingTag>,
+ *                   public IntrusiveListNode<Task, ReadyTag> {};
+ *
+ *     IntrusiveList<Task, PendingTag> pending;
+ *     IntrusiveList<Task, ReadyTag> ready;
+ *
+ *     Task task;
+ *     pending.pushBack(task);
+ *     ready.pushBack(task);
  */
 
-namespace jit {
+namespace cinderx::jit {
 
+template <class T, class Tag>
+class IntrusiveList;
+
+template <class T, class Tag, bool IsConst>
+class IntrusiveListIterator;
+
+template <class T, class Tag = void>
 class IntrusiveListNode {
  public:
   IntrusiveListNode() : prev_(this), next_(this) {}
 
-  IntrusiveListNode* prev() const {
-    return prev_;
-  }
-
-  void set_prev(IntrusiveListNode* prev) {
-    prev_ = prev;
-  }
-
-  IntrusiveListNode* next() const {
-    return next_;
-  }
-
-  void set_next(IntrusiveListNode* next) {
-    next_ = next;
-  }
-
-  void InsertBefore(IntrusiveListNode* node) {
-    JIT_DCHECK(!isLinked(), "Item is already in a list");
-    auto prev_node = node->prev();
-    prev_node->set_next(this);
-    set_prev(prev_node);
-    set_next(node);
-    node->set_prev(this);
-  }
-
-  void InsertAfter(IntrusiveListNode* node) {
-    JIT_DCHECK(!isLinked(), "Item is already in a list");
-    auto next_node = node->next();
-    next_node->set_prev(this);
-    set_next(next_node);
-    node->set_next(this);
-    set_prev(node);
-  }
-
-  void Unlink() {
-    JIT_DCHECK(isLinked(), "Item is not in a list");
-    prev()->set_next(next());
-    next()->set_prev(prev());
-    set_next(this);
-    set_prev(this);
-  }
+  IntrusiveListNode(const IntrusiveListNode&) = delete;
+  IntrusiveListNode& operator=(const IntrusiveListNode&) = delete;
 
   bool isLinked() const {
     return prev_ != this;
   }
 
  private:
-  DISALLOW_COPY_AND_ASSIGN(IntrusiveListNode);
+  friend class IntrusiveList<T, Tag>;
+  friend class IntrusiveListIterator<T, Tag, false>;
+  friend class IntrusiveListIterator<T, Tag, true>;
+  friend T;
+
+  IntrusiveListNode* prev() const {
+    return prev_;
+  }
+
+  IntrusiveListNode* next() const {
+    return next_;
+  }
+
+ private:
+  // Membership is only ever mutated by the owning IntrusiveList, so that the
+  // list can keep an accurate element count.  These low-level operations are
+  // private and reachable only through the container.
+  template <class T2, class Tag2>
+  friend class IntrusiveList;
+
+  void setPrev(IntrusiveListNode* prev) {
+    prev_ = prev;
+  }
+
+  void setNext(IntrusiveListNode* next) {
+    next_ = next;
+  }
+
+  void insertBefore(IntrusiveListNode* node) {
+    JIT_DCHECK(!isLinked(), "Item is already in a list");
+    auto prev_node = node->prev();
+    prev_node->setNext(this);
+    setPrev(prev_node);
+    setNext(node);
+    node->setPrev(this);
+  }
+
+  void insertAfter(IntrusiveListNode* node) {
+    JIT_DCHECK(!isLinked(), "Item is already in a list");
+    auto next_node = node->next();
+    next_node->setPrev(this);
+    setNext(next_node);
+    node->setNext(this);
+    setPrev(node);
+  }
+
+  void unlink() {
+    JIT_DCHECK(isLinked(), "Item is not in a list");
+    prev()->setNext(next());
+    next()->setPrev(prev());
+    setNext(this);
+    setPrev(this);
+  }
 
   IntrusiveListNode* prev_;
   IntrusiveListNode* next_;
 };
 
-template <class T, IntrusiveListNode T::* node_member, bool is_const>
-class IntrusiveListIterator;
-
-template <class T, IntrusiveListNode T::* node_member>
+template <class T, class Tag = void>
 class IntrusiveList {
  public:
   // Iterator typedefs
-  using iterator = IntrusiveListIterator<T, node_member, false>;
+  using NodeType = IntrusiveListNode<T, Tag>;
+  using iterator = IntrusiveListIterator<T, Tag, false>;
   using reverse_iterator = std::reverse_iterator<iterator>;
-  using const_iterator = IntrusiveListIterator<T, node_member, true>;
+  using const_iterator = IntrusiveListIterator<T, Tag, true>;
   using const_reverse_iterator = std::reverse_iterator<const_iterator>;
   using difference_type = std::ptrdiff_t;
   using size_type = std::size_t;
@@ -120,90 +142,83 @@ class IntrusiveList {
   using reference = T&;
   using const_reference = const T&;
 
-  IntrusiveList() : root_(), node_member_offset_(OffsetOfNode()) {}
+  IntrusiveList() = default;
 
-  bool IsEmpty() const {
+  bool isEmpty() const {
     return root_.next() == &root_;
   }
 
-  reference Front() {
-    JIT_DCHECK(!IsEmpty(), "list cannot be empty");
-    return *GetOwner(root_.next());
+  // Number of elements in the list, maintained in O(1).  All membership
+  // changes go through this container (the raw IntrusiveListNode operations are
+  // private to it), so the count is always accurate.
+  size_type size() const {
+    return size_;
   }
 
-  const_reference Front() const {
-    JIT_DCHECK(!IsEmpty(), "list cannot be empty");
-    return *GetOwner(root_.next());
+  reference front() {
+    JIT_DCHECK(!isEmpty(), "list cannot be empty");
+    return *getOwner(root_.next());
   }
 
-  void PushFront(reference node) {
-    (node.*node_member).InsertAfter(&root_);
+  const_reference front() const {
+    JIT_DCHECK(!isEmpty(), "list cannot be empty");
+    return *getOwner(root_.next());
   }
 
-  void PopFront() {
-    JIT_DCHECK(!IsEmpty(), "list cannot be empty");
-    root_.next()->Unlink();
+  void pushFront(reference node) {
+    node.NodeType::insertAfter(&root_);
+    ++size_;
   }
 
-  reference ExtractFront() {
-    JIT_DCHECK(!IsEmpty(), "list cannot be empty");
-    IntrusiveListNode* old_front = root_.next();
-    old_front->Unlink();
-    return *GetOwner(old_front);
+  void popFront() {
+    JIT_DCHECK(!isEmpty(), "list cannot be empty");
+    root_.next()->unlink();
+    --size_;
   }
 
-  reference Back() {
-    JIT_DCHECK(!IsEmpty(), "list cannot be empty");
-    return *GetOwner(root_.prev());
+  reference extractFront() {
+    JIT_DCHECK(!isEmpty(), "list cannot be empty");
+    NodeType* old_front = root_.next();
+    old_front->unlink();
+    --size_;
+    return *getOwner(old_front);
   }
 
-  const_reference Back() const {
-    JIT_DCHECK(!IsEmpty(), "list cannot be empty");
-    return *GetOwner(root_.prev());
+  reference back() {
+    JIT_DCHECK(!isEmpty(), "list cannot be empty");
+    return *getOwner(root_.prev());
   }
 
-  reference Next(reference node) {
-    return *GetOwner((node.*node_member).next());
+  const_reference back() const {
+    JIT_DCHECK(!isEmpty(), "list cannot be empty");
+    return *getOwner(root_.prev());
   }
 
-  const_reference Next(const_reference node) const {
-    return *GetOwner((node.*node_member).next());
+  reference next(reference node) {
+    return *getOwner(node.NodeType::next());
   }
 
-  void PushBack(reference node) {
-    (node.*node_member).InsertAfter(root_.prev());
+  const_reference next(const_reference node) const {
+    return *getOwner(node.NodeType::next());
   }
 
-  void PopBack() {
-    JIT_DCHECK(!IsEmpty(), "list cannot be empty");
-    root_.prev()->Unlink();
+  void pushBack(reference node) {
+    node.NodeType::insertAfter(root_.prev());
+    ++size_;
   }
 
-  reference ExtractBack() {
-    JIT_DCHECK(!IsEmpty(), "list cannot be empty");
-    IntrusiveListNode* old_back = root_.prev();
-    old_back->Unlink();
-    return *GetOwner(old_back);
+  void popBack() {
+    JIT_DCHECK(!isEmpty(), "list cannot be empty");
+    root_.prev()->unlink();
+    --size_;
   }
 
-  void spliceAfter(reference node, IntrusiveList& other) {
-    IntrusiveListNode* lnode = &(node.*node_member);
-    if (lnode->next() == &other.root_) {
-      // node is the last element in other, or other is empty
-      return;
-    }
-    IntrusiveListNode* other_root = &(other.root_);
-    IntrusiveListNode* spliced_head = lnode->next();
-    IntrusiveListNode* spliced_tail = other_root->prev();
-    // Splice the remainder out of the other list
-    lnode->set_next(other_root);
-    other_root->set_prev(lnode);
-    // Insert it into our list
-    IntrusiveListNode* tail = root_.prev();
-    tail->set_next(spliced_head);
-    spliced_head->set_prev(tail);
-    spliced_tail->set_next(&root_);
-    root_.set_prev(spliced_tail);
+  reference extractBack() {
+    JIT_DCHECK(!isEmpty(), "list cannot be empty");
+    NodeType* old_back = root_.prev();
+    old_back->unlink();
+    --size_;
+    return *getOwner(old_back);
   }
 
   void insert(reference r, iterator it) {
@@ -212,16 +227,23 @@ class IntrusiveList {
         "iterator is for list {}, this == {}",
         reinterpret_cast<void*>(it.list()),
         reinterpret_cast<void*>(this));
-    (r.*node_member).InsertBefore(it.node());
+    r.NodeType::insertBefore(it.node());
+    ++size_;
+  }
+
+  // Remove an element that is known to be a member of this list.
+  void remove(reference r) {
+    r.NodeType::unlink();
+    --size_;
   }
 
   // Return an iterator to the given object, assuming it's in this list.
   iterator iterator_to(reference r) {
-    return iterator(this, &(r.*node_member));
+    return iterator(this, &r);
   }
 
   const_iterator const_iterator_to(const_reference r) const {
-    return const_iterator(this, &(r.*node_member));
+    return const_iterator(this, &r);
   }
 
   iterator begin() {
@@ -271,35 +293,26 @@ class IntrusiveList {
     return rend();
   }
 
+  IntrusiveList(const IntrusiveList&) = delete;
+  IntrusiveList& operator=(const IntrusiveList&) = delete;
+
  private:
-  DISALLOW_COPY_AND_ASSIGN(IntrusiveList);
-
-  pointer GetOwner(IntrusiveListNode* node) const {
-    return reinterpret_cast<pointer>(
-        reinterpret_cast<char*>(node) - node_member_offset_);
+  pointer getOwner(NodeType* node) const {
+    return static_cast<T*>(node);
   }
 
-  const_pointer GetOwner(const IntrusiveListNode* node) const {
-    return reinterpret_cast<const_pointer>(
-        reinterpret_cast<const char*>(node) - node_member_offset_);
+  const_pointer getOwner(const NodeType* node) const {
+    return static_cast<T const*>(node);
   }
 
-  // This is technically UB, but all of the compilers that we're going to
-  // need to use seem to support it, and it's what other more sophisticated
-  // intrusive list classes use.
-  static std::size_t OffsetOfNode() {
-    return reinterpret_cast<char*>(&(static_cast<T*>(nullptr)->*node_member)) -
-        static_cast<char*>(nullptr);
-  }
+  friend class IntrusiveListIterator<T, Tag, true>;
+  friend class IntrusiveListIterator<T, Tag, false>;
 
-  friend class IntrusiveListIterator<T, node_member, true>;
-  friend class IntrusiveListIterator<T, node_member, false>;
-
-  IntrusiveListNode root_;
-  std::size_t node_member_offset_;
+  NodeType root_;
+  size_type size_{0};
 };
 
-template <class T, IntrusiveListNode T::* node_member, bool is_const>
+template <class T, class Tag, bool is_const>
 class IntrusiveListIterator {
  public:
   using difference_type = std::ptrdiff_t;
@@ -307,10 +320,12 @@ class IntrusiveListIterator {
   using value_type = T;
   using list_type = std::conditional_t<
       is_const,
-      const IntrusiveList<T, node_member>*,
-      IntrusiveList<T, node_member>*>;
-  using node_type = std::
-      conditional_t<is_const, const IntrusiveListNode*, IntrusiveListNode*>;
+      const IntrusiveList<T, Tag>*,
+      IntrusiveList<T, Tag>*>;
+  using node_type = std::conditional_t<
+      is_const,
+      const IntrusiveListNode<T, Tag>*,
+      IntrusiveListNode<T, Tag>*>;
   using pointer = std::conditional_t<is_const, const T*, T*>;
   using reference = std::conditional_t<is_const, const T&, T&>;
 
@@ -324,18 +339,14 @@ class IntrusiveListIterator {
     return current_ == other.current_;
   }
 
-  bool operator!=(IntrusiveListIterator const& other) const {
-    return !(*this == other);
-  }
-
   reference operator*() const {
     JIT_DCHECK(current_ != &(list_->root_), "iterator exhausted");
-    return *(list_->GetOwner(current_));
+    return *(list_->getOwner(current_));
   }
 
   pointer operator->() const {
     JIT_DCHECK(current_ != &(list_->root_), "iterator exhausted");
-    return list_->GetOwner(current_);
+    return list_->getOwner(current_);
   }
 
   IntrusiveListIterator& operator++() {
@@ -346,7 +357,7 @@ class IntrusiveListIterator {
 
   IntrusiveListIterator operator++(int) {
     JIT_DCHECK(current_ != &(list_->root_), "iterator exhausted");
-    IntrusiveListIterator<T, node_member, is_const> clone(*this);
+    IntrusiveListIterator<T, Tag, is_const> clone(*this);
     operator++();
     return clone;
   }
@@ -359,7 +370,7 @@ class IntrusiveListIterator {
 
   IntrusiveListIterator operator--(int) {
     JIT_DCHECK(current_ != list_->root_.next(), "iterator exhausted");
-    IntrusiveListIterator<T, node_member, is_const> clone(*this);
+    IntrusiveListIterator<T, Tag, is_const> clone(*this);
     operator--();
     return clone;
   }
@@ -377,4 +388,4 @@ class IntrusiveListIterator {
   node_type current_{};
 };
 
-} // namespace jit
+} // namespace cinderx::jit

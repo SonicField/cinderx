@@ -11,7 +11,7 @@
 
 #include <iosfwd>
 
-namespace jit::lir {
+namespace cinderx::jit::lir {
 
 class Printer {
  public:
@@ -20,7 +20,7 @@ class Printer {
   void print(std::ostream& out, const Function& func);
   void print(std::ostream& out, const BasicBlock& block);
   void print(std::ostream& out, const Instruction& instr);
-  void print(std::ostream& out, const OperandBase& operand);
+  void print(std::ostream& out, const Operand& operand);
   void print(std::ostream& out, const MemoryIndirect& memind);
 
  private:
@@ -42,7 +42,7 @@ inline std::ostream& operator<<(std::ostream& out, const Instruction& instr) {
   return out;
 }
 
-inline std::ostream& operator<<(std::ostream& out, const OperandBase& operand) {
+inline std::ostream& operator<<(std::ostream& out, const Operand& operand) {
   Printer().print(out, operand);
   return out;
 }
@@ -54,17 +54,18 @@ inline std::ostream& operator<<(
   return out;
 }
 
-} // namespace jit::lir
+} // namespace cinderx::jit::lir
 
 template <>
-struct fmt::formatter<jit::lir::Function> : fmt::ostream_formatter {};
+struct fmt::formatter<cinderx::jit::lir::Function> : fmt::ostream_formatter {};
 template <>
-struct fmt::formatter<jit::lir::BasicBlock> : fmt::ostream_formatter {};
+struct fmt::formatter<cinderx::jit::lir::BasicBlock> : fmt::ostream_formatter {
+};
 template <>
-struct fmt::formatter<jit::lir::Instruction> : fmt::ostream_formatter {};
+struct fmt::formatter<cinderx::jit::lir::Instruction> : fmt::ostream_formatter {
+};
 template <>
-struct fmt::formatter<jit::lir::OperandBase> : fmt::ostream_formatter {};
+struct fmt::formatter<cinderx::jit::lir::Operand> : fmt::ostream_formatter {};
 template <>
-struct fmt::formatter<jit::lir::Operand> : fmt::ostream_formatter {};
-template <>
-struct fmt::formatter<jit::lir::MemoryIndirect> : fmt::ostream_formatter {};
+struct fmt::formatter<cinderx::jit::lir::MemoryIndirect>
+    : fmt::ostream_formatter {};

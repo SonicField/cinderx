@@ -1,6 +1,6 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
-# pyre-unsafe
+# pyre-strict
 
 import sys
 from dis import get_instructions
@@ -209,10 +209,10 @@ class LinePositionTests(CompilerTest):
                 table = bytes(postab.getTable())
                 self.assertEqual(table, f.__code__.co_linetable)
 
+    # pyrefly: ignore [invalid-argument]
     def get_position(self, compiled: CodeType, opcode: str) -> tuple[...] | None:
         for instr in get_instructions(compiled):
             if instr.opname == opcode:
-                # pyre-ignore[16]: No co_positions
                 return list(compiled.co_positions())[instr.offset // 2]
         else:
             self.fail(f"Could not find opcode {opcode} in bytecode")

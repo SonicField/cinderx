@@ -10,15 +10,16 @@ from warnings import catch_warnings, simplefilter, warn
 # The JIT compiles arbitrary Python functions.  Ideally this type would exclude native
 # functions, but that doesn't seem possible yet.
 #
-# pyre-ignore[33]: Not going to add a new type variable for every use of FuncAny.
 FuncAny = Callable[..., Any]
 
 
 try:
     from cinderjit import (
         _deopt_gen,
+        _would_tag_if_deferred,
         append_jit_list,
         auto,
+        background_compile,
         clear_runtime_stats,
         compile_after_n_calls,
         count_interpreted_calls,
@@ -26,6 +27,7 @@ try:
         disable_emit_type_annotation_guards,
         disable_hir_inliner,
         disable_specialized_opcodes,
+        disassemble,
         enable,
         enable_emit_type_annotation_guards,
         enable_hir_inliner,
@@ -35,8 +37,10 @@ try:
         get_allocator_stats,
         get_and_clear_inline_cache_stats,
         get_and_clear_runtime_stats,
+        get_background_compile,
         get_compilation_time,
         get_compile_after_n_calls,
+        get_compiled_function,
         get_compiled_functions,
         get_compiled_size,
         get_compiled_spill_stack_size,
@@ -59,6 +63,7 @@ try:
         precompile_all,
         read_jit_list,
         set_max_code_size,
+        wait_for_background_compiles,
     )
 
 except ImportError:
@@ -73,6 +78,9 @@ except ImportError:
     ) -> bool:
         return False
 
+    def _would_tag_if_deferred(obj: object) -> bool:
+        return False
+
     def append_jit_list(entry: str) -> None:
         return None
 
@@ -80,6 +88,9 @@ except ImportError:
         return None
 
     def clear_runtime_stats() -> None:
+        return None
+
+    def background_compile(enabled: bool) -> None:
         return None
 
     def compile_after_n_calls(calls: int) -> None:
@@ -100,8 +111,11 @@ except ImportError:
     def disable_specialized_opcodes() -> None:
         return None
 
+    def disassemble(func: FuncAny) -> None:
+        return None
+
     def enable() -> None:
-        # Warn here because users might think this is function is how to enable the JIT
+        # Warn here because users might think this function is how to enable the JIT
         # when it is not installed.
         warn(
             "Cinder JIT is not installed, calling cinderx.jit.enable() is doing nothing"
@@ -135,6 +149,12 @@ except ImportError:
         return 0
 
     def get_compile_after_n_calls() -> int | None:
+        return None
+
+    def get_background_compile() -> bool:
+        return False
+
+    def get_compiled_function(func: FuncAny) -> object | None:
         return None
 
     def get_compiled_functions() -> list[FuncAny]:
@@ -201,6 +221,9 @@ except ImportError:
         return None
 
     def set_max_code_size(max_code_size: int) -> None:
+        return None
+
+    def wait_for_background_compiles() -> None:
         return None
 
 

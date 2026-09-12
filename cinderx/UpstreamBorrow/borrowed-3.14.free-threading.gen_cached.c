@@ -66,11 +66,12 @@ PyObject *
 _PyType_LookupRefAndVersion(PyTypeObject *type, PyObject *name, unsigned int *version) {
   // This is a bit much to borrow as the dependency tree goes deep... but the version
   // is the version at the start before the MRO
-  bool has_version = type->tp_version_tag != 0;
+  unsigned int start_version = FT_ATOMIC_LOAD_UINT_RELAXED(type->tp_version_tag);
+  bool has_version = start_version != 0;
   if (!has_version && PyUnstable_Type_AssignVersionTag(type)) {
-    has_version = true;
+    start_version = FT_ATOMIC_LOAD_UINT_RELAXED(type->tp_version_tag);
+    has_version = start_version != 0;
   }
-  unsigned int start_version = type->tp_version_tag;
   PyObject *res = _PyType_LookupRef(type, name);
   *version = has_version ? start_version : 0;
   return res;
@@ -82,12 +83,6 @@ ASSERT_DICT_LOCKED(PyObject *op)
 {
     _Py_CRITICAL_SECTION_ASSERT_OBJECT_LOCKED(op);
 }
-#endif
-
-#ifdef ENABLE_PEP523_HOOK
-_PyFrameEvalFunction Ci_EvalFrameFunc;
-#else
-#define Ci_EvalFrameFunc NULL
 #endif
 
 // In 3.12 _PyAsyncGenValueWrapperNew needs thread-state. As this is used from
@@ -190,8 +185,6 @@ _PyInterpreterState_GetConfig(PyInterpreterState *interp)
 
 #define PyDict_LOG_MINSIZE 3
 #define PyDict_MINSIZE 8
-#ifdef META_PYTHON
-#endif
 #ifdef Py_GIL_DISABLED
 #define ASSERT_DICT_LOCKED(op) ASSERT_DICT_LOCKED(_Py_CAST(PyObject*, op))
 #define ASSERT_WORLD_STOPPED_OR_DICT_LOCKED(op)                         \
@@ -255,366 +248,22 @@ _PyInterpreterState_GetConfig(PyInterpreterState *interp)
 #define STORE_KEYS_NENTRIES(keys, nentries) FT_ATOMIC_STORE_SSIZE_RELAXED(keys->dk_nentries, nentries)
 #define STORE_USED(mp, used) FT_ATOMIC_STORE_SSIZE_RELAXED(mp->ma_used, used)
 #define PERTURB_SHIFT 5
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef META_PYTHON
-#endif
-#ifndef NDEBUG
-#endif
 #define DK_MASK(dk) (DK_SIZE(dk)-1)
 #define _Py_DICT_IMMORTAL_INITIAL_REFCNT PY_SSIZE_T_MIN
-#ifdef Py_REF_DEBUG
-#endif
-#ifdef Py_REF_DEBUG
-#endif
-#if SIZEOF_VOID_P > 4
-#endif
-#if SIZEOF_VOID_P > 4
-#endif
 #define USABLE_FRACTION(n) (((n) << 1)/3)
-#if SIZEOF_LONG == SIZEOF_SIZE_T
-#elif defined(_MSC_VER)
-#else
-#endif
 #define GROWTH_RATE(d) ((d)->ma_used*3)
-#ifdef Py_GIL_DISABLED
-#endif
 #define Py_EMPTY_KEYS &empty_keys_struct
 #ifdef DEBUG_PYDICT
 #  define ASSERT_CONSISTENT(op) assert(_PyDict_CheckConsistency((PyObject *)(op), 1))
 #else
 #  define ASSERT_CONSISTENT(op) assert(_PyDict_CheckConsistency((PyObject *)(op), 0))
 #endif
-#ifdef DEBUG_PYDICT
-#endif
 #define CHECK(expr) \
     do { if (!(expr)) { _PyObject_ASSERT_FAILED_MSG(op, Py_STRINGIFY(expr)); } } while (0)
-#ifdef META_PYTHON
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef META_PYTHON
-#endif
 #undef CHECK
-#ifdef META_PYTHON
-#else
-#endif
-#if SIZEOF_VOID_P > 4
-#endif
-#ifdef Py_REF_DEBUG
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
 #define CACHED_KEYS(tp) (((PyHeapTypeObject*)tp)->ht_cached_keys)
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_REF_DEBUG
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#ifdef META_PYTHON
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef META_PYTHON
-#endif
-#else   // Py_GIL_DISABLED
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef META_PYTHON
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef Py_REF_DEBUG
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef Py_DEBUG
-#endif
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#ifdef META_PYTHON
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef META_PYTHON
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#else
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#else /* Py_GIL_DISABLED */
-#endif  /* Py_GIL_DISABLED */
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#ifndef Py_GIL_DISABLED
-#endif  /* Py_GIL_DISABLED */
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_STATS
-#endif
-#ifdef Py_GIL_DISABLED
-#else
-#endif
 #if 0
 #define CHECK(val) assert(val); if (!(val)) { return 0; }
-#endif
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifndef NDEBUG
-#endif
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#ifndef NDEBUG
 #endif
 // Several functions in dictobject.c check for exact pointer equality on Py_EMPTY_KEYS
 // but the global it points to is only locally visible. Fortunately, we can extract
@@ -669,9 +318,23 @@ dictkeys_incref(PyDictKeysObject *dk)
 static void
 free_keys_object(PyDictKeysObject *keys, bool use_qsbr)
 {
+    void *ptr = keys;
+#ifdef Py_GIL_DISABLED
+    size_t size = _PyDict_KeysSize(keys);
+#endif
+    if (DK_KIND(keys) == DICT_KEYS_SPLIT) {
+#ifdef META_PYTHON
+        ptr = _PyDictKeys_AsSharedKeys(keys);
+#ifdef Py_GIL_DISABLED
+        size += offsetof(struct _instancekeysobject, dsk_keys);
+#endif
+#else
+        ptr = keys;
+#endif
+    }
 #ifdef Py_GIL_DISABLED
     if (use_qsbr) {
-        _PyMem_FreeDelayed(keys, _PyDict_KeysSize(keys));
+        _PyMem_FreeDelayed(ptr, size);
         return;
     }
 #endif
@@ -679,7 +342,7 @@ free_keys_object(PyDictKeysObject *keys, bool use_qsbr)
         _Py_FREELIST_FREE(dictkeys, keys, PyMem_Free);
     }
     else {
-        PyMem_Free(keys);
+        PyMem_Free(ptr);
     }
 }
 static inline void
@@ -1346,20 +1009,12 @@ _PyDict_DelItem_KnownHash_LockHeld(PyObject *op, PyObject *key, Py_hash_t hash)
     delitem_common(mp, hash, ix, old_value);
     return 0;
 }
-static PyDictKeysObject*
-#ifdef META_PYTHON
-new_keys_object(PyInterpreterState *interp, uint8_t log2_size, bool unicode, bool lazy_imports)
-#else
-new_keys_object(PyInterpreterState *interp, uint8_t log2_size, bool unicode)
-#endif
+static inline int
+get_log2_bytes(uint8_t log2_size)
 {
-    Py_ssize_t usable;
     int log2_bytes;
-    size_t entry_size = unicode ? sizeof(PyDictUnicodeEntry) : sizeof(PyDictKeyEntry);
-
     assert(log2_size >= PyDict_LOG_MINSIZE);
 
-    usable = USABLE_FRACTION((size_t)1<<log2_size);
     if (log2_size < 8) {
         log2_bytes = log2_size;
     }
@@ -1375,26 +1030,23 @@ new_keys_object(PyInterpreterState *interp, uint8_t log2_size, bool unicode)
         log2_bytes = log2_size + 2;
     }
 
-    PyDictKeysObject *dk = NULL;
-    if (log2_size == PyDict_LOG_MINSIZE && unicode) {
-        dk = _Py_FREELIST_POP_MEM(dictkeys);
-    }
-    if (dk == NULL) {
-        dk = PyMem_Malloc(sizeof(PyDictKeysObject)
-                          + ((size_t)1 << log2_bytes)
-                          + entry_size * usable);
-        if (dk == NULL) {
-            PyErr_NoMemory();
-            return NULL;
-        }
-    }
+    return log2_bytes;
+}
+static inline void
+init_keys_object(PyDictKeysObject* dk, uint8_t log2_size, int log2_bytes, int kind,
+                 Py_ssize_t usable, Py_ssize_t entry_size
+#ifdef META_PYTHON
+                 , bool lazy_imports
+#endif
+                 )
+{
 #ifdef Py_REF_DEBUG
     _Py_IncRefTotal(_PyThreadState_GET());
 #endif
     dk->dk_refcnt = 1;
     dk->dk_log2_size = log2_size;
     dk->dk_log2_index_bytes = log2_bytes;
-    dk->dk_kind = unicode ? DICT_KEYS_UNICODE : DICT_KEYS_GENERAL;
+    dk->dk_kind = kind;
 #ifdef META_PYTHON
     if (lazy_imports) {
         dk->dk_kind |= DICT_KEYS_LAZY_IMPORTS_MASK;
@@ -1408,6 +1060,39 @@ new_keys_object(PyInterpreterState *interp, uint8_t log2_size, bool unicode)
     dk->dk_version = 0;
     memset(&dk->dk_indices[0], 0xff, ((size_t)1 << log2_bytes));
     memset(&dk->dk_indices[(size_t)1 << log2_bytes], 0, entry_size * usable);
+}
+static PyDictKeysObject*
+#ifdef META_PYTHON
+new_keys_object(PyInterpreterState *interp, uint8_t log2_size, bool unicode, bool lazy_imports)
+#else
+new_keys_object(PyInterpreterState *interp, uint8_t log2_size, bool unicode)
+#endif
+{
+    Py_ssize_t usable = USABLE_FRACTION((size_t)1<<log2_size);
+    size_t entry_size = unicode ? sizeof(PyDictUnicodeEntry) : sizeof(PyDictKeyEntry);
+
+    int log2_bytes = get_log2_bytes(log2_size);
+
+    PyDictKeysObject *dk = NULL;
+    if (log2_size == PyDict_LOG_MINSIZE && unicode) {
+        dk = _Py_FREELIST_POP_MEM(dictkeys);
+    }
+    if (dk == NULL) {
+        dk = PyMem_Malloc(sizeof(PyDictKeysObject)
+                          + ((size_t)1 << log2_bytes)
+                          + entry_size * usable);
+        if (dk == NULL) {
+            PyErr_NoMemory();
+            return NULL;
+        }
+    }
+    init_keys_object(dk, log2_size, log2_bytes,
+                     unicode ? DICT_KEYS_UNICODE : DICT_KEYS_GENERAL,
+                     usable, entry_size
+#ifdef META_PYTHON
+                     , lazy_imports
+#endif
+                     );
     return dk;
 }
 #ifdef META_PYTHON
@@ -1836,6 +1521,9 @@ insert_split_key(PyDictKeysObject *keys, PyObject *key, Py_hash_t hash)
     if (ix == DKIX_EMPTY && keys->dk_usable > 0) {
         // Insert into new slot
         FT_ATOMIC_STORE_UINT32_RELAXED(keys->dk_version, 0);
+#ifdef META_PYTHON
+        _PyDict_SplitKeysInvalidated(keys);
+#endif
         Py_ssize_t hashpos = find_empty_slot(keys, hash);
         ix = keys->dk_nentries;
         dictkeys_set_index(keys, hashpos, ix);
@@ -2361,8 +2049,6 @@ _PyDict_KeysSize(PyDictKeysObject *keys)
 
 // _PyCode_Quicken is used by copy_code from codeobject.c, so must be borrowed first
 #ifdef Py_STATS
-#if PYSTATS_MAX_UOP_ID < MAX_UOP_ID
-#endif
 #define ADD_STAT_TO_DICT(res, field) \
     do { \
         PyObject *val = PyLong_FromUnsignedLongLong(stats->field); \
@@ -2383,15 +2069,8 @@ _PyDict_KeysSize(PyDictKeysObject *keys)
         fprintf(out, "    opcode[%s]." #field " : %" PRIu64 "\n", _PyOpcode_OpName[i], stats[i].field); \
     }
 #undef PRINT_STAT
-#ifdef _Py_TIER2
-#endif
-#ifdef _Py_TIER2
-#endif
 #define MEM_IS_ZERO(DATA) mem_is_zero((unsigned char*)DATA, sizeof(*(DATA)))
 #undef MEM_IS_ZERO
-# ifdef MS_WINDOWS
-# else
-# endif
 #define SPECIALIZATION_FAIL(opcode, kind) \
 do { \
     if (_Py_stats) { \
@@ -2567,19 +2246,6 @@ do { \
 #define SPEC_FAIL_CONTAINS_OP_TUPLE      10
 #define SPEC_FAIL_CONTAINS_OP_LIST       11
 #define SPEC_FAIL_CONTAINS_OP_USER_CLASS 12
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_STATS
-#endif   // Py_STATS
-#ifdef Py_STATS
-#endif
-#ifdef Py_STATS
-#endif
-#ifdef Py_STATS
-#endif
 #define BITWISE_LONGS_ACTION(NAME, OP) \
     static PyObject * \
     (NAME)(PyObject *lhs, PyObject *rhs) \
@@ -2607,27 +2273,7 @@ do { \
         return PyFloat_FromDouble(lhs_val OP rhs_val); \
     }
 #undef LONG_FLOAT_ACTION
-#ifdef Py_STATS
-#endif   // Py_STATS
-#ifdef Py_STATS
-#endif   // Py_STATS
-#ifdef Py_STATS
-#endif   // Py_STATS
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_STATS
-#endif  // Py_STATS
-#ifdef Py_STATS
-#endif
-#ifdef Py_STATS
-#endif
 #define NO_LOC_4 (128 | (PY_CODE_LOCATION_INFO_NONE << 3) | 3)
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
 void
 _PyCode_Quicken(_Py_CODEUNIT *instructions, Py_ssize_t size, int enable_counters)
 {
@@ -2771,18 +2417,15 @@ _PyCode_GetTLBC(PyCodeObject *co)
     return result;
 }
 
-void Cix_dict_insert_split_value(
-    PyInterpreterState *interp,
+void _PyDict_InsertSplitValue(
     PyDictObject *mp,
     PyObject *key,
     PyObject *value,
     Py_ssize_t ix) {
 #if defined(__clang__)
   [[clang::always_inline]]
-#elif defined(__GNUC__)
-  [[gnu::always_inline]]
 #endif
-  insert_split_value(interp, mp, key, value, ix);
+  insert_split_value(_PyInterpreterState_GET(), mp, key, value, ix);
 }
 
 #define _PyObject_SetAttributeErrorContext _CiPyObject_SetAttributeErrorContext
@@ -3005,8 +2648,8 @@ error:
     MCACHE_HASH(FT_ATOMIC_LOAD_UINT32_RELAXED((type)->tp_version_tag),   \
                 ((Py_ssize_t)(name)) >> 3)
 #define MCACHE_CACHEABLE_NAME(name)                             \
-        PyUnicode_CheckExact(name) &&                           \
-        (PyUnicode_GET_LENGTH(name) <= MCACHE_MAX_ATTR_SIZE)
+        (PyUnicode_CheckExact(name) &&                           \
+         (PyUnicode_GET_LENGTH(name) <= MCACHE_MAX_ATTR_SIZE))
 #define NEXT_VERSION_TAG(interp) \
     (interp)->types.next_version_tag
 #ifdef Py_GIL_DISABLED
@@ -3024,71 +2667,18 @@ error:
 #define BEGIN_TYPE_DICT_LOCK(d)
 #define END_TYPE_DICT_LOCK()
 #define ASSERT_TYPE_LOCK_HELD()
+#define types_stop_world()
+#define types_start_world()
+#define type_lock_prevent_release()
+#define type_lock_allow_release()
 #endif
 #define PyTypeObject_CAST(op)   ((PyTypeObject *)(op))
-#ifndef NDEBUG
-#endif
-#ifdef Py_GIL_DISABLED
-#else
-#endif
 #define SIGNATURE_END_MARKER         ")\n--\n\n"
 #define SIGNATURE_END_MARKER_LENGTH  6
 #define CHECK(expr) \
     do { if (!(expr)) { _PyObject_ASSERT_FAILED_MSG((PyObject *)type, Py_STRINGIFY(expr)); } } while (0)
 #undef CHECK
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifndef Py_GIL_DISABLED
-#else
-#endif
-#ifndef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#else
-#endif
 #define MAX_VERSIONS_PER_CLASS 1000
-#if _Py_ATTR_CACHE_UNUSED < MAX_VERSIONS_PER_CLASS
-#endif
-#ifdef Py_DEBUG
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#if Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#if Py_GIL_DISABLED
-#else
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifndef NDEBUG
-#else
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
 #define COPYVAL(SLOT) \
     if (type->SLOT == 0) { type->SLOT = base->SLOT; }
 #undef COPYVAL
@@ -3109,8 +2699,6 @@ error:
 #define COPYMAP(SLOT) COPYSLOT(tp_as_mapping->SLOT)
 #define COPYBUF(SLOT) COPYSLOT(tp_as_buffer->SLOT)
 #define COLLECTION_FLAGS (Py_TPFLAGS_SEQUENCE | Py_TPFLAGS_MAPPING)
-#ifdef Py_TRACE_REFS
-#endif
 #undef RICHCMP_WRAPPER
 #define RICHCMP_WRAPPER(NAME, OP) \
 static PyObject * \
@@ -3177,10 +2765,6 @@ FUNCNAME(PyObject *self, PyObject *other) \
 #define SLOT1BIN(FUNCNAME, SLOTNAME, DUNDER, RDUNDER) \
     SLOT1BINFULL(FUNCNAME, FUNCNAME, SLOTNAME, DUNDER, RDUNDER)
 #define slot_mp_length slot_sq_length
-#ifndef Py_GIL_DISABLED
-#endif
-#ifndef Py_GIL_DISABLED
-#endif
 #define PyBufferWrapper_CAST(op)    ((PyBufferWrapper *)(op))
 #undef TPSLOT
 #undef FLSLOT
@@ -3513,7 +3097,7 @@ take_ownership(PyFrameObject *f, _PyInterpreterFrame *frame)
     _PyFrame_Copy(frame, new_frame);
     // _PyFrame_Copy takes the reference to the executable,
     // so we need to restore it.
-    frame->f_executable = PyStackRef_DUP(new_frame->f_executable);
+    new_frame->f_executable = PyStackRef_DUP(new_frame->f_executable);
     f->f_frame = new_frame;
     new_frame->owner = FRAME_OWNED_BY_FRAME_OBJECT;
     if (_PyFrame_IsIncomplete(new_frame)) {
@@ -3829,6 +3413,8 @@ _PyBuildSlice_ConsumeRefs(PyObject *start, PyObject *stop)
 }
 
 #define get_line_delta instrumentation_get_line_delta
+#define _Py_Instrumentation_GetLine _Ci_Instrumentation_GetLine
+
 static const int8_t MOST_SIGNIFICANT_BITS[16] = {
     -1, 0, 1, 1,
     2, 2, 2, 2,
@@ -3948,10 +3534,6 @@ static const int8_t EVENT_FOR_OPCODE[256] = {
 #define MODIFY_BYTECODE(code, func, ...) \
     (func)(code, _PyCode_CODE(code), __VA_ARGS__)
 #endif
-#ifndef NDEBUG
-#endif
-#ifndef NDEBUG
-#endif
 #define NO_LINE (-2)
 #ifdef INSTRUMENT_DEBUG
 #define CHECK(test) do { \
@@ -3963,31 +3545,12 @@ static const int8_t EVENT_FOR_OPCODE[256] = {
 #else
 #define CHECK(test) assert(test)
 #endif
-#ifndef NDEBUG
-#endif
-#ifdef Py_DEBUG
-#endif
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#ifndef NDEBUG
-#endif
-#ifdef Py_DEBUG
-#endif
-#ifdef _Py_TIER2
-#endif
-#ifdef INSTRUMENT_DEBUG
-#endif
-#ifdef INSTRUMENT_DEBUG
-#endif
 #define C_RETURN_EVENTS \
     ((1 << PY_MONITORING_EVENT_C_RETURN) | \
      (1 << PY_MONITORING_EVENT_C_RAISE))
 #define C_CALL_EVENTS \
     (C_RETURN_EVENTS | (1 << PY_MONITORING_EVENT_CALL))
 #define MONITORING_VERSION_INCREMENT (1 << _PY_EVAL_EVENTS_BITS)
-#ifdef _Py_TIER2
-#endif
 #define _PyLegacyBranchEventHandler_CAST(op)    ((_PyLegacyBranchEventHandler *)(op))
 #define branchesiterator_CAST(op)   ((branchesiterator *)(op))
 static inline bool
@@ -4466,8 +4029,12 @@ call_one_instrument(
     if (res == NULL) {
         return -1;
     }
+    if (res == &_PyInstrumentation_DISABLE) {
+        assert(_Py_IsImmortal(res));
+        return 1;
+    }
     Py_DECREF(res);
-    return (res == &_PyInstrumentation_DISABLE);
+    return 0;
 }
 static inline int most_significant_bit(uint8_t bits) {
     assert(bits != 0);
@@ -4701,13 +4268,10 @@ _Py_call_instrumentation_exc2(
     call_instrumentation_vector_protected(tstate, event, frame, instr, 4, args);
 }
 int
-_Py_Instrumentation_GetLine(PyCodeObject *code, int index)
+_Py_Instrumentation_GetLine(PyCodeObject *code, _PyCoLineInstrumentationData *line_data, int index)
 {
-    _PyCoMonitoringData *monitoring = code->_co_monitoring;
-    assert(monitoring != NULL);
-    assert(monitoring->lines != NULL);
+    assert(line_data != NULL);
     assert(index < Py_SIZE(code));
-    _PyCoLineInstrumentationData *line_data = monitoring->lines;
     int line_delta = get_line_delta(line_data, index);
     int line = compute_line(code, line_delta);
     return line;
@@ -4724,11 +4288,11 @@ _Py_call_instrumentation_line(PyThreadState *tstate, _PyInterpreterFrame* frame,
     _PyCoMonitoringData *monitoring = code->_co_monitoring;
     _PyCoLineInstrumentationData *line_data = monitoring->lines;
     PyInterpreterState *interp = tstate->interp;
-    int line = _Py_Instrumentation_GetLine(code, i);
+    int line = _Py_Instrumentation_GetLine(code, line_data, i);
     assert(line >= 0);
     assert(prev != NULL);
     int prev_index = (int)(prev - bytecode);
-    int prev_line = _Py_Instrumentation_GetLine(code, prev_index);
+    int prev_line = _Py_Instrumentation_GetLine(code, line_data, prev_index);
     if (prev_line == line) {
         int prev_opcode = bytecode[prev_index].op.code;
         /* RESUME and INSTRUMENTED_RESUME are needed for the operation of
@@ -4922,11 +4486,9 @@ initialize_tools(PyCodeObject *code)
     }
 }
 static void
-initialize_lines(PyCodeObject *code, int bytes_per_entry)
+initialize_lines(_PyCoLineInstrumentationData *line_data, PyCodeObject *code, int bytes_per_entry)
 {
     ASSERT_WORLD_STOPPED_OR_LOCKED(code);
-    _PyCoLineInstrumentationData *line_data = code->_co_monitoring->lines;
-
     assert(line_data != NULL);
     line_data->bytes_per_entry = bytes_per_entry;
     int code_len = (int)Py_SIZE(code);
@@ -5065,18 +4627,19 @@ allocate_instrumentation_data(PyCodeObject *code)
     ASSERT_WORLD_STOPPED_OR_LOCKED(code);
 
     if (code->_co_monitoring == NULL) {
-        code->_co_monitoring = PyMem_Malloc(sizeof(_PyCoMonitoringData));
-        if (code->_co_monitoring == NULL) {
+        _PyCoMonitoringData *monitoring = PyMem_Malloc(sizeof(_PyCoMonitoringData));
+        if (monitoring == NULL) {
             PyErr_NoMemory();
             return -1;
         }
-        code->_co_monitoring->local_monitors = (_Py_LocalMonitors){ 0 };
-        code->_co_monitoring->active_monitors = (_Py_LocalMonitors){ 0 };
-        code->_co_monitoring->tools = NULL;
-        code->_co_monitoring->lines = NULL;
-        code->_co_monitoring->line_tools = NULL;
-        code->_co_monitoring->per_instruction_opcodes = NULL;
-        code->_co_monitoring->per_instruction_tools = NULL;
+        monitoring->local_monitors = (_Py_LocalMonitors){ 0 };
+        monitoring->active_monitors = (_Py_LocalMonitors){ 0 };
+        monitoring->tools = NULL;
+        monitoring->lines = NULL;
+        monitoring->line_tools = NULL;
+        monitoring->per_instruction_opcodes = NULL;
+        monitoring->per_instruction_tools = NULL;
+        _Py_atomic_store_ptr_release(&code->_co_monitoring, monitoring);
     }
     return 0;
 }
@@ -5140,12 +4703,13 @@ update_instrumentation_data(PyCodeObject *code, PyInterpreterState *interp)
             else {
                 bytes_per_entry = 5;
             }
-            code->_co_monitoring->lines = PyMem_Malloc(1 + code_len * bytes_per_entry);
-            if (code->_co_monitoring->lines == NULL) {
+            _PyCoLineInstrumentationData *lines = PyMem_Malloc(1 + code_len * bytes_per_entry);
+            if (lines == NULL) {
                 PyErr_NoMemory();
                 return -1;
             }
-            initialize_lines(code, bytes_per_entry);
+            initialize_lines(lines, code, bytes_per_entry);
+            _Py_atomic_store_ptr_release(&code->_co_monitoring->lines, lines);
         }
         if (multitools && code->_co_monitoring->line_tools == NULL) {
             code->_co_monitoring->line_tools = PyMem_Malloc(code_len);
@@ -5452,6 +5016,17 @@ _Py_Specialize_LoadSuperAttr(_PyStackRef global_super_st, _PyStackRef cls_st, _P
 fail:
     unspecialize(instr);
 }
+static void
+maybe_enable_deferred_ref_count(PyObject *op)
+{
+    if (!_Py_IsOwnedByCurrentThread(op) && _PyObject_GC_IS_TRACKED(op)) {
+        // For module level variables that are heavily used from multiple
+        // threads, deferred reference counting provides good scaling
+        // benefits.  The downside is that the object will only be deallocated
+        // by a GC run.
+        PyUnstable_Object_EnableDeferredRefcount(op);
+    }
+}
 static int
 specialize_module_load_attr_lock_held(PyDictObject *dict, _Py_CODEUNIT *instr, PyObject *name)
 {
@@ -5460,13 +5035,22 @@ specialize_module_load_attr_lock_held(PyDictObject *dict, _Py_CODEUNIT *instr, P
         SPECIALIZATION_FAIL(LOAD_ATTR, SPEC_FAIL_ATTR_NON_STRING);
         return -1;
     }
-    Py_ssize_t index = _PyDict_LookupIndex(dict, &_Py_ID(__getattr__));
-    assert(index != DKIX_ERROR);
-    if (index != DKIX_EMPTY) {
-        SPECIALIZATION_FAIL(LOAD_ATTR, SPEC_FAIL_ATTR_MODULE_ATTR_NOT_FOUND);
-        return -1;
-    }
-    index = _PyDict_LookupIndex(dict, name);
+    /* A module-level __getattr__ is consulted only when the name is absent
+       from the module dict, and _LOAD_ATTR_MODULE already deoptimizes in
+       exactly that case: a name absent now fails the uint16 index check
+       below, and one deleted later leaves ep->me_value NULL, which the
+       opcode's DEOPT_IF catches. So defining __getattr__ need not disable
+       specialization for the names the module does define.
+
+       This matters well beyond the rare fallback it was guarding. Both
+       `torch` and `numpy` define a module __getattr__ (for lazy submodules
+       and deprecated aliases), so every attribute access on them took the
+       generic path process-wide. On a free-threaded build that is the
+       difference between the lock-free _Py_TryIncrefCompareStackRef in
+       _LOAD_ATTR_MODULE and a contended refcount: measured over 32 threads,
+       `np.zeros` in a loop scaled 0.1x through the module against 16x for
+       the same object bound to a plain global. */
+    Py_ssize_t index = _PyDict_LookupIndex(dict, name);
     assert (index != DKIX_ERROR);
     if (index != (uint16_t)index) {
         SPECIALIZATION_FAIL(LOAD_ATTR,
@@ -5481,6 +5065,16 @@ specialize_module_load_attr_lock_held(PyDictObject *dict, _Py_CODEUNIT *instr, P
         SPECIALIZATION_FAIL(LOAD_ATTR, SPEC_FAIL_OUT_OF_VERSIONS);
         return -1;
     }
+#ifdef Py_GIL_DISABLED
+    // Upstream reads the value out of `_PyDict_LookupIndexAndValue`, which
+    // 3.14 does not have, so take it from the entry instead. That can be NULL
+    // for a deleted key at a still-valid index, which `_LOAD_ATTR_MODULE`
+    // handles at run time via `DEOPT_IF(attr_o == NULL)`.
+    PyObject *value = DK_UNICODE_ENTRIES(dict->ma_keys)[index].me_value;
+    if (value != NULL) {
+        maybe_enable_deferred_ref_count(value);
+    }
+#endif
     write_u32(cache->version, keys_version);
     cache->index = (uint16_t)index;
     specialize(instr, LOAD_ATTR_MODULE);
@@ -5745,7 +5339,9 @@ specialize_attr_loadclassattr(PyObject *owner, _Py_CODEUNIT *instr,
             SPECIALIZATION_FAIL(LOAD_ATTR, SPEC_FAIL_OUT_OF_VERSIONS);
             return 0;
         }
+#ifndef META_PYTHON
         write_u32(cache->keys_version, shared_keys_version);
+#endif
         specialize(instr, is_method ? LOAD_ATTR_METHOD_WITH_VALUES : LOAD_ATTR_NONDESCRIPTOR_WITH_VALUES);
     }
     else {
@@ -6005,7 +5601,7 @@ do_specialize_instance_load_attr(PyObject* owner, _Py_CODEUNIT* instr, PyObject*
                 return -1;
             }
             /* Don't specialize if PEP 523 is active */
-            if ((_PyInterpreterState_GET()->eval_frame != NULL && _PyInterpreterState_GET()->eval_frame != Ci_EvalFrameFunc)) {
+            if ((_PyInterpreterState_GET()->eval_frame != NULL && _PyInterpreterState_GET()->eval_frame != Ci_GetEvalFrameFunc())) {
                 SPECIALIZATION_FAIL(LOAD_ATTR, SPEC_FAIL_OTHER);
                 return -1;
             }
@@ -6080,7 +5676,7 @@ do_specialize_instance_load_attr(PyObject* owner, _Py_CODEUNIT* instr, PyObject*
                 return -1;
             }
             /* Don't specialize if PEP 523 is active */
-            if ((_PyInterpreterState_GET()->eval_frame != NULL && _PyInterpreterState_GET()->eval_frame != Ci_EvalFrameFunc)) {
+            if ((_PyInterpreterState_GET()->eval_frame != NULL && _PyInterpreterState_GET()->eval_frame != Ci_GetEvalFrameFunc())) {
                 SPECIALIZATION_FAIL(LOAD_ATTR, SPEC_FAIL_OTHER);
                 return -1;
             }
@@ -6329,6 +5925,14 @@ specialize_load_global_lock_held(
             SPECIALIZATION_FAIL(LOAD_GLOBAL, SPEC_FAIL_OUT_OF_RANGE);
             goto fail;
         }
+#ifdef Py_GIL_DISABLED
+        // Same as above: no `_PyDict_LookupIndexAndValue` in 3.14, and
+        // `_LOAD_GLOBAL_MODULE` deopts on a NULL entry value itself.
+        PyObject *value = DK_UNICODE_ENTRIES(globals_keys)[index].me_value;
+        if (value != NULL) {
+            maybe_enable_deferred_ref_count(value);
+        }
+#endif
         cache->index = (uint16_t)index;
         cache->module_keys_version = (uint16_t)keys_version;
         specialize(instr, LOAD_GLOBAL_MODULE);
@@ -6482,7 +6086,7 @@ specialize_py_call(PyFunctionObject *func, _Py_CODEUNIT *instr, int nargs,
     PyCodeObject *code = (PyCodeObject *)func->func_code;
     int kind = function_kind(code);
     /* Don't specialize if PEP 523 is active */
-    if ((_PyInterpreterState_GET()->eval_frame != NULL && _PyInterpreterState_GET()->eval_frame != Ci_EvalFrameFunc)) {
+    if ((_PyInterpreterState_GET()->eval_frame != NULL && _PyInterpreterState_GET()->eval_frame != Ci_GetEvalFrameFunc())) {
         SPECIALIZATION_FAIL(CALL, SPEC_FAIL_CALL_PEP_523);
         return -1;
     }
@@ -6686,7 +6290,7 @@ specialize_py_call_kw(PyFunctionObject *func, _Py_CODEUNIT *instr, int nargs,
     PyCodeObject *code = (PyCodeObject *)func->func_code;
     int kind = function_kind(code);
     /* Don't specialize if PEP 523 is active */
-    if ((_PyInterpreterState_GET()->eval_frame != NULL && _PyInterpreterState_GET()->eval_frame != Ci_EvalFrameFunc)) {
+    if ((_PyInterpreterState_GET()->eval_frame != NULL && _PyInterpreterState_GET()->eval_frame != Ci_GetEvalFrameFunc())) {
         SPECIALIZATION_FAIL(CALL, SPEC_FAIL_CALL_PEP_523);
         return -1;
     }
@@ -6964,7 +6568,7 @@ _Py_Specialize_BinaryOp(_PyStackRef lhs_st, _PyStackRef rhs_st, _Py_CODEUNIT *in
                 PyHeapTypeObject *ht = (PyHeapTypeObject *)container_type;
                 if (kind == SIMPLE_FUNCTION &&
                     fcode->co_argcount == 2 &&
-                    !(_PyInterpreterState_GET()->eval_frame != NULL && _PyInterpreterState_GET()->eval_frame != Ci_EvalFrameFunc) && /* Don't specialize if PEP 523 is active */
+                    !(_PyInterpreterState_GET()->eval_frame != NULL && _PyInterpreterState_GET()->eval_frame != Ci_GetEvalFrameFunc()) && /* Don't specialize if PEP 523 is active */
                     _PyType_CacheGetItemForSpecialization(ht, descriptor, (uint32_t)tp_version))
                 {
                     specialize(instr, BINARY_OP_SUBSCR_GETITEM);
@@ -7112,7 +6716,7 @@ _Py_Specialize_ForIter(_PyStackRef iter, _Py_CODEUNIT *instr, int oparg)
             instr[oparg + INLINE_CACHE_ENTRIES_FOR_ITER + 1].op.code == INSTRUMENTED_END_FOR
         );
         /* Don't specialize if PEP 523 is active */
-        if ((_PyInterpreterState_GET()->eval_frame != NULL && _PyInterpreterState_GET()->eval_frame != Ci_EvalFrameFunc))
+        if ((_PyInterpreterState_GET()->eval_frame != NULL && _PyInterpreterState_GET()->eval_frame != Ci_GetEvalFrameFunc()))
             goto failure;
         specialize(instr, FOR_ITER_GEN);
         return;
@@ -7132,7 +6736,7 @@ _Py_Specialize_Send(_PyStackRef receiver_st, _Py_CODEUNIT *instr)
     PyTypeObject *tp = Py_TYPE(receiver);
     if (tp == &PyGen_Type || tp == &PyCoro_Type) {
         /* Don't specialize if PEP 523 is active */
-        if ((_PyInterpreterState_GET()->eval_frame != NULL && _PyInterpreterState_GET()->eval_frame != Ci_EvalFrameFunc)) {
+        if ((_PyInterpreterState_GET()->eval_frame != NULL && _PyInterpreterState_GET()->eval_frame != Ci_GetEvalFrameFunc())) {
             SPECIALIZATION_FAIL(SEND, SPEC_FAIL_OTHER);
             goto failure;
         }
@@ -7237,29 +6841,14 @@ _Py_Specialize_ContainsOp(_PyStackRef value_st, _Py_CODEUNIT *instr)
 }
 
 #ifdef HAVE_DLOPEN
-#  ifdef HAVE_DLFCN_H
-#  endif
 #  if !HAVE_DECL_RTLD_LAZY
 #    define RTLD_LAZY 1
 #  endif
-#endif
-#ifdef HAVE_THREAD_LOCAL
-#endif
-#ifdef HAVE_THREAD_LOCAL
-#else
-#endif
-#ifdef HAVE_THREAD_LOCAL
-#else
-#endif
-#ifdef HAVE_THREAD_LOCAL
-#else
 #endif
 #define tstate_verify_not_active(tstate) \
     if (tstate == current_fast_get()) { \
         _Py_FatalErrorFormat(__func__, "tstate %p is still current", tstate); \
     }
-#ifdef HAVE_FORK
-#endif
 #define gilstate_tss_initialized(runtime) \
     tstate_tss_initialized(&(runtime)->autoTSSkey)
 #define gilstate_tss_init(runtime) \
@@ -7274,16 +6863,6 @@ _Py_Specialize_ContainsOp(_PyStackRef value_st, _Py_CODEUNIT *instr)
     tstate_tss_clear(&(runtime)->autoTSSkey)
 #define gilstate_tss_reinit(runtime) \
     tstate_tss_reinit(&(runtime)->autoTSSkey)
-#ifndef NDEBUG
-#endif  // !NDEBUG
-#ifdef PY_HAVE_THREAD_NATIVE_ID
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifndef HAVE_PTHREAD_STUBS
-#endif
-#ifdef PY_HAVE_THREAD_NATIVE_ID
-#endif
 #define LOCKS_INIT(runtime) \
     { \
         &(runtime)->interpreters.mutex, \
@@ -7296,144 +6875,20 @@ _Py_Specialize_ContainsOp(_PyStackRef value_st, _Py_CODEUNIT *instr)
         &(runtime)->allocators.mutex, \
         &(runtime)->_main_interpreter.types.mutex, \
         &(runtime)->_main_interpreter.code_state.mutex, \
+        &(runtime)->_main_interpreter.dict_state.watcher_mutex, \
         &(runtime)->_main_interpreter.lazy_imports_mutex, \
     }
-#ifdef Py_REF_DEBUG
-#endif
-#ifdef HAVE_FORK
-#ifdef Py_GIL_DISABLED
-#endif
-#endif
-#ifndef NDEBUG
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef META_PYTHON
-#endif
-#if !defined(Py_GIL_DISABLED) && defined(Py_STACKREF_DEBUG)
-#  ifdef Py_STACKREF_CLOSE_DEBUG
-#  endif
-#endif
-#if !defined(Py_GIL_DISABLED) && defined(Py_STACKREF_DEBUG)
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef HAVE_FORK
-#endif
-#ifdef _Py_TIER2
-#endif
-#if !defined(Py_GIL_DISABLED) && defined(Py_STACKREF_DEBUG)
-#  ifdef Py_STACKREF_CLOSE_DEBUG
-#  endif
-#endif
-#ifdef Py_REF_DEBUG
-#endif
-#ifdef HAVE_FORK
-#endif
-#ifndef NDEBUG
-#endif
-#if LLONG_MAX > INT64_MAX
-#endif
-#ifndef NDEBUG
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#if defined(Py_REF_DEBUG) && defined(Py_GIL_DISABLED)
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#if defined(Py_DEBUG)
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#if defined(Py_DEBUG)
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
 #ifdef Py_GIL_DISABLED
 #define _Py_FOR_EACH_STW_INTERP(stw, i)                                     \
     for (PyInterpreterState *i = interp_for_stop_the_world((stw));          \
             i != NULL; i = ((stw->is_global) ? i->next : NULL))
 #endif  // Py_GIL_DISABLED
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#if defined(Py_GIL_DISABLED) && !defined(Py_LIMITED_API)
-#ifdef HAVE_THREAD_LOCAL
-#else
-#endif
-#endif
-#ifndef NDEBUG
-#endif
-#ifdef _Py_TIER2
-#endif
 #define MINIMUM_OVERHEAD 1000
-#ifndef NDEBUG
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef WITH_MIMALLOC
-#endif
-#if defined(Py_GIL_DISABLED) && !defined(WITH_MIMALLOC)
-#endif
 #undef  uint
 #define uint pymem_uint
 #ifdef WITH_MIMALLOC
 #ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
 #define QSBR_PAGE_MEM_LIMIT 4096*20
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#ifdef Py_GIL_DISABLED
-#else
 #endif
 #endif // WITH_MIMALLOC
 #define MALLOC_ALLOC {NULL, _PyMem_RawMalloc, _PyMem_RawCalloc, _PyMem_RawRealloc, _PyMem_RawFree}
@@ -7463,18 +6918,6 @@ _Py_Specialize_ContainsOp(_PyStackRef value_st, _Py_CODEUNIT *instr)
     {&_PyRuntime.allocators.debug.mem, _PyMem_DebugMalloc, _PyMem_DebugCalloc, _PyMem_DebugRealloc, _PyMem_DebugFree}
 #define PYDBGOBJ_ALLOC \
     {&_PyRuntime.allocators.debug.obj, _PyMem_DebugMalloc, _PyMem_DebugCalloc, _PyMem_DebugRealloc, _PyMem_DebugFree}
-#ifdef Py_DEBUG
-#else
-#endif
-#ifdef Py_DEBUG
-#else
-#endif
-#ifdef Py_DEBUG
-#else
-#endif
-#ifdef Py_DEBUG
-#else
-#endif
 #ifdef WITH_PYMALLOC
 #  ifdef MS_WINDOWS
 #  elif defined(HAVE_MMAP)
@@ -7483,67 +6926,16 @@ _Py_Specialize_ContainsOp(_PyStackRef value_st, _Py_CODEUNIT *instr)
 #    endif
 #  endif
 #endif
-#ifdef MS_WINDOWS
-#elif defined(ARENAS_USE_MMAP)
-#else
-#endif
-#if defined(ARENAS_USE_MMAP)
-#else
-#endif
-#ifdef MS_WINDOWS
-#elif defined(ARENAS_USE_MMAP)
-#else
-#endif
 #define ALLOCATORS_MUTEX (_PyRuntime.allocators.mutex)
 #define _PyMem_Raw (_PyRuntime.allocators.standard.raw)
 #define _PyMem (_PyRuntime.allocators.standard.mem)
 #define _PyObject (_PyRuntime.allocators.standard.obj)
 #define _PyMem_Debug (_PyRuntime.allocators.debug)
 #define _PyObject_Arena (_PyRuntime.allocators.obj_arena)
-#ifdef Py_DEBUG
-#else
-#endif
-#if defined(WITH_PYMALLOC) && !defined(Py_GIL_DISABLED)
-#endif
-#ifdef WITH_MIMALLOC
-#endif
-#ifndef Py_GIL_DISABLED
-#endif
-#ifdef WITH_PYMALLOC
-#endif
-#ifdef WITH_MIMALLOC
-#endif
-#ifdef WITH_PYMALLOC
-#endif
-#ifdef WITH_MIMALLOC
-#endif
-#ifdef WITH_PYMALLOC
-#endif
-#ifdef WITH_MIMALLOC
-#endif
-#ifdef WITH_PYMALLOC
-#endif
-#ifdef WITH_MIMALLOC
-#endif
-#ifdef WITH_PYMALLOC
-#ifdef WITH_MIMALLOC
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#endif  // WITH_MIMALLOC
-#endif  // WITH_PYMALLOC
 #define WORK_ITEMS_PER_CHUNK 254
-#ifdef Py_GIL_DISABLED
-#else
-#endif
 #ifdef Py_GIL_DISABLED
 #define QSBR_DEFERRED_LIMIT 127
 #define QSBR_FREE_MEM_LIMIT 1024*1024
-#endif
-#ifndef Py_GIL_DISABLED
-#else
-#endif
-#ifdef Py_GIL_DISABLED
 #endif
 #if defined(__GNUC__) && (__GNUC__ > 2) && defined(__OPTIMIZE__)
 #  define UNLIKELY(value) __builtin_expect((value), 0)
@@ -7553,8 +6945,6 @@ _Py_Specialize_ContainsOp(_PyStackRef value_st, _Py_CODEUNIT *instr)
 #  define LIKELY(value) (value)
 #endif
 #ifdef WITH_PYMALLOC
-#ifdef WITH_VALGRIND
-#endif
 #define usedpools (state->pools.used)
 #define allarenas (state->mgmt.arenas)
 #define maxarenas (state->mgmt.maxarenas)
@@ -7565,114 +6955,22 @@ _Py_Specialize_ContainsOp(_PyStackRef value_st, _Py_CODEUNIT *instr)
 #define ntimes_arena_allocated (state->mgmt.ntimes_arena_allocated)
 #define narenas_highwater (state->mgmt.narenas_highwater)
 #define raw_allocated_blocks (state->mgmt.raw_allocated_blocks)
-#ifdef WITH_MIMALLOC
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#endif
-#ifdef WITH_MIMALLOC
-#endif
-#ifdef Py_DEBUG
-#else
-#endif
-#ifdef WITH_MIMALLOC
-#endif
-#ifdef Py_DEBUG
-#endif
-#ifdef Py_DEBUG
-#endif
-#ifdef Py_DEBUG
-#endif
 #if WITH_PYMALLOC_RADIX_TREE
 #define arena_map_root (state->usage.arena_map_root)
 #ifdef USE_INTERIOR_NODES
 #define arena_map_mid_count (state->usage.arena_map_mid_count)
 #define arena_map_bot_count (state->usage.arena_map_bot_count)
 #endif
-#ifdef USE_INTERIOR_NODES
-#else
-#endif
 #endif /* WITH_PYMALLOC_RADIX_TREE */
-#if SIZEOF_SIZE_T <= SIZEOF_INT
-#endif
-#if WITH_PYMALLOC_RADIX_TREE
-#endif
-#if WITH_PYMALLOC_RADIX_TREE
-#else
-#endif /* !WITH_PYMALLOC_RADIX_TREE */
-#ifdef WITH_MEMORY_LIMITS
-#endif
-#ifdef WITH_VALGRIND
-#endif
-#if WITH_PYMALLOC_RADIX_TREE
-#endif
-#ifdef WITH_VALGRIND
-#endif
-#ifdef WITH_VALGRIND
-#endif
 #else   /* ! WITH_PYMALLOC */
 #endif /* WITH_PYMALLOC */
-#ifdef PYMEM_DEBUG_SERIALNO
-#endif
 #define SST SIZEOF_SIZE_T
 #ifdef PYMEM_DEBUG_SERIALNO
 #  define PYMEM_DEBUG_EXTRA_BYTES 4 * SST
 #else
 #  define PYMEM_DEBUG_EXTRA_BYTES 3 * SST
 #endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef PYMEM_DEBUG_SERIALNO
-#endif
-#ifdef PYMEM_DEBUG_SERIALNO
-#endif
 #define ERASED_SIZE 64
-#ifdef PYMEM_DEBUG_SERIALNO
-#endif
-#ifndef Py_GIL_DISABLED
-#endif
-#ifdef PYMEM_DEBUG_SERIALNO
-#endif
-#ifdef PYMEM_DEBUG_SERIALNO
-#endif
-#ifndef Py_GIL_DISABLED
-#endif
-#ifndef Py_GIL_DISABLED
-#else
-#endif
-#ifdef PYMEM_DEBUG_SERIALNO
-#endif
-#if WITH_PYMALLOC
-#else
-#endif
-#ifdef WITH_PYMALLOC
-#endif /* WITH_PYMALLOC */
-#ifdef WITH_PYMALLOC
-#endif /* WITH_PYMALLOC */
-#ifdef WITH_PYMALLOC
-#if WITH_PYMALLOC_RADIX_TREE
-#ifdef USE_INTERIOR_NODES
-#endif
-#endif
-#ifdef Py_DEBUG
-#endif
-#ifdef WITH_MIMALLOC
-#endif
-#ifdef Py_DEBUG
-#endif
-#ifdef Py_DEBUG
-#endif
-#ifdef PYMEM_DEBUG_SERIALNO
-#endif
-#if WITH_PYMALLOC_RADIX_TREE
-#ifdef USE_INTERIOR_NODES
-#endif
-#ifdef USE_INTERIOR_NODES
-#endif
-#endif
-#ifdef WITH_MIMALLOC
-#endif
-#endif /* #ifdef WITH_PYMALLOC */
 void *
 _PyObject_VirtualAlloc(size_t size)
 {
@@ -7698,9 +6996,20 @@ push_chunk(PyThreadState *tstate, int size)
     while (allocate_size < (int)sizeof(PyObject*)*(size + MINIMUM_OVERHEAD)) {
         allocate_size *= 2;
     }
-    _PyStackChunk *new = allocate_chunk(allocate_size, tstate->datastack_chunk);
-    if (new == NULL) {
-        return NULL;
+    _PyStackChunk *new;
+    if (tstate->datastack_cached_chunk != NULL
+        && (size_t)allocate_size <= tstate->datastack_cached_chunk->size)
+    {
+        new = tstate->datastack_cached_chunk;
+        tstate->datastack_cached_chunk = NULL;
+        new->previous = tstate->datastack_chunk;
+        new->top = 0;
+    }
+    else {
+        new = allocate_chunk(allocate_size, tstate->datastack_chunk);
+        if (new == NULL) {
+            return NULL;
+        }
     }
     if (tstate->datastack_chunk) {
         tstate->datastack_chunk->top = tstate->datastack_top -
@@ -7738,125 +7047,28 @@ struct _mem_work_chunk {
     Py_ssize_t wr_idx;  // index of next item to write
     struct _mem_work_item array[WORK_ITEMS_PER_CHUNK];
 };
-#ifdef Py_LIMITED_API
-#endif
 #define CHECK(expr) \
     do { if (!(expr)) { _PyObject_ASSERT_FAILED_MSG(op, Py_STRINGIFY(expr)); } } while (0)
 #undef CHECK
 #ifdef Py_REF_DEBUG
-#endif
-#ifdef Py_REF_DEBUG
 #  define REFTOTAL(interp) \
     interp->object_state.reftotal
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
 #undef REFTOTAL
 #endif /* Py_REF_DEBUG */
 #ifdef Py_TRACE_REFS
 #define REFCHAIN(interp) interp->object_state.refchain
 #define REFCHAIN_VALUE ((void*)(uintptr_t)1)
-#ifndef NDEBUG
-#else
-#endif
 #endif  /* Py_TRACE_REFS */
-#ifdef Py_REF_DEBUG
-#endif /* Py_REF_DEBUG */
-#ifdef Py_GIL_DISABLED
-# ifdef Py_REF_DEBUG
-#  if SIZEOF_SIZE_T == 8
-#  else
-#  endif
-# endif
-#ifdef Py_REF_DEBUG
-#endif
-#ifdef Py_REF_DEBUG
-#endif
-#ifdef Py_REF_DEBUG
-#endif
-#ifdef Py_TRACE_REFS
-#endif
-#ifdef Py_TRACE_REFS
-#endif
-#endif  /* Py_GIL_DISABLED */
-#ifdef Py_DEBUG
-#endif
-#ifdef Py_DEBUG
-#endif
-#ifdef META_PYTHON
-#else
-#endif
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#ifdef Py_TRACE_REFS
-#endif
-#ifdef Py_TRACE_REFS
-#endif
-#ifdef META_PYTHON
-#endif
-#ifdef _Py_TIER2
-#endif
-#if !defined(Py_GIL_DISABLED)
-#if SIZEOF_VOID_P > 4
-#else
-#endif
-#else
-#ifdef _Py_THREAD_SANITIZER
-#else
-#endif
-#endif
-#ifdef Py_TRACE_REFS
-#endif
-#ifdef Py_REF_DEBUG
-#endif
-#ifdef Py_DEBUG
-#endif
-#ifdef Py_GIL_DISABLED
-#elif SIZEOF_VOID_P > 4
-#else
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#ifdef Py_GIL_DISABLED
-#endif
-#ifdef Py_TRACE_REFS
-#endif
-#ifdef Py_TRACE_REFS
-#ifdef SLOW_UNREF_CHECK
-#endif
-#endif
 #ifdef Py_TRACE_REFS
 #undef REFCHAIN
 #undef REFCHAIN_VALUE
 #endif  /* Py_TRACE_REFS */
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#ifdef Py_GIL_DISABLED
-#else
-#endif
-#ifdef Py_DEBUG
-#if !defined(Py_GIL_DISABLED) && !defined(Py_STACKREF_DEBUG)
-#endif
-#endif
-#ifdef Py_TRACE_REFS
-#endif
-#ifdef Py_DEBUG
-#endif
 #undef Py_NewRef
 #undef Py_XNewRef
 #undef Py_Is
 #undef Py_IsNone
 #undef Py_IsTrue
 #undef Py_IsFalse
-#ifndef NDEBUG
-#endif
 #undef Py_TYPE
 #undef Py_REFCNT
 // object.c #undef's a bunch of macros so it can implement the stable ABI
@@ -7869,6 +7081,7 @@ struct _mem_work_chunk {
 #undef Py_XNewRef
 #define Py_XNewRef(obj) _Py_XNewRef(_PyObject_CAST(obj))
 
+#ifdef Py_REF_DEBUG
 static inline void
 reftotal_add(PyThreadState *tstate, Py_ssize_t n)
 {
@@ -7886,6 +7099,7 @@ _Py_AddRefTotal(PyThreadState *tstate, Py_ssize_t n)
 {
     reftotal_add(tstate, n);
 }
+#endif
 Py_ssize_t
 _Py_ExplicitMergeRefcount(PyObject *op, Py_ssize_t extra)
 {
@@ -8379,83 +7593,40 @@ _PyStackRef _PyFloat_FromDouble_ConsumeInputs(_PyStackRef left, _PyStackRef righ
 {
     PyStackRef_CLOSE_SPECIALIZED(left, _PyFloat_ExactDealloc);
     PyStackRef_CLOSE_SPECIALIZED(right, _PyFloat_ExactDealloc);
-    return PyStackRef_FromPyObjectSteal(PyFloat_FromDouble(value));
-}
-
-// Internal dependencies for gen_dealloc.
-static void
-gen_clear_frame(PyGenObject *gen)
-{
-    if (gen->gi_frame_state == FRAME_CLEARED)
-        return;
-
-    gen->gi_frame_state = FRAME_CLEARED;
-    _PyInterpreterFrame *frame = &gen->gi_iframe;
-    frame->previous = NULL;
-    _PyFrame_ClearExceptCode(frame);
-    _PyErr_ClearExcState(&gen->gi_exc_state);
-}
-// End internal dependencies.
-// Use our own memory deallocation which handles generators that might be on
-// our custom free-list.
-#define PyObject_GC_Del(x) Ci_free_jit_list_gen(x)
-static void
-gen_dealloc(PyObject *self)
-{
-    PyGenObject *gen = _PyGen_CAST(self);
-
-    _PyObject_GC_UNTRACK(gen);
-
-    FT_CLEAR_WEAKREFS(self, gen->gi_weakreflist);
-
-    _PyObject_GC_TRACK(self);
-
-    if (PyObject_CallFinalizerFromDealloc(self))
-        return;                     /* resurrected.  :( */
-
-    _PyObject_GC_UNTRACK(self);
-    if (PyAsyncGen_CheckExact(gen)) {
-        /* We have to handle this case for asynchronous generators
-           right here, because this code has to be between UNTRACK
-           and GC_Del. */
-        Py_CLEAR(((PyAsyncGenObject*)gen)->ag_origin_or_finalizer);
+    PyObject *obj = PyFloat_FromDouble(value);
+    if (obj == NULL) {
+        return PyStackRef_NULL;
     }
-    if (PyCoro_CheckExact(gen)) {
-        Py_CLEAR(((PyCoroObject *)gen)->cr_origin_or_finalizer);
-    }
-    gen_clear_frame(gen);
-    assert(gen->gi_exc_state.exc_value == NULL);
-    PyStackRef_CLEAR(gen->gi_iframe.f_executable);
-    Py_CLEAR(gen->gi_name);
-    Py_CLEAR(gen->gi_qualname);
-
-    PyObject_GC_Del(gen);
-}
-#undef PyObject_GC_Del
-void Cix_gen_dealloc_with_custom_free(PyObject* obj) {
-    gen_dealloc(obj);
+    return PyStackRef_FromPyObjectSteal(obj);
 }
 
-void
-_PyTuple_MaybeUntrack(PyObject *op)
+// _PyCoroObject_CAST includes assert(PyCoro_CheckExact(op)) which fails
+// for JIT coroutines that have a different type. Replace with a plain cast.
+#undef _PyCoroObject_CAST
+#define _PyCoroObject_CAST(op) ((PyCoroObject *)(op))
+static PyObject *
+cr_getrunning(PyObject *self, void *Py_UNUSED(ignored))
 {
-    PyTupleObject *t;
-    Py_ssize_t i, n;
-
-    if (!PyTuple_CheckExact(op) || !_PyObject_GC_IS_TRACKED(op))
-        return;
-    t = (PyTupleObject *) op;
-    n = Py_SIZE(t);
-    for (i = 0; i < n; i++) {
-        PyObject *elt = PyTuple_GET_ITEM(t, i);
-        /* Tuple with NULL elements aren't
-           fully constructed, don't untrack
-           them yet. */
-        if (!elt ||
-            _PyObject_GC_MAY_BE_TRACKED(elt))
-            return;
+    PyCoroObject *coro = _PyCoroObject_CAST(self);
+    if (coro->cr_frame_state == FRAME_EXECUTING) {
+        Py_RETURN_TRUE;
     }
-    _PyObject_GC_UNTRACK(op);
+    Py_RETURN_FALSE;
+}
+PyObject* Cix_cr_getrunning(PyObject* self, void* ignored) {
+    return cr_getrunning(self, ignored);
+}
+static PyObject *
+cr_getsuspended(PyObject *self, void *Py_UNUSED(ignored))
+{
+    PyCoroObject *coro = _PyCoroObject_CAST(self);
+    if (FRAME_STATE_SUSPENDED(coro->cr_frame_state)) {
+        Py_RETURN_TRUE;
+    }
+    Py_RETURN_FALSE;
+}
+PyObject* Cix_cr_getsuspended(PyObject* self, void* ignored) {
+    return cr_getsuspended(self, ignored);
 }
 
 typedef struct {

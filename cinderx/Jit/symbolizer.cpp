@@ -6,22 +6,40 @@
 #include "cinderx/Common/util.h"
 #include "cinderx/module_state.h"
 
+#ifndef WIN32
+
 #include <cxxabi.h>
-#include <dlfcn.h>
+
+#endif
+
+// Reading our own symbol tables is ELF-specific.  Where that isn't available
+// the symbolizer is dladdr-only, which still resolves anything exported by the
+// executable or a loaded dylib.
+#if defined(ENABLE_SYMBOLIZER) && defined(__linux__)
+#define CINDERX_SYMBOLIZER_ELF
+#endif
 
 #ifdef ENABLE_SYMBOLIZER
+
+#include <dlfcn.h>
+
+#endif
+
+#ifdef CINDERX_SYMBOLIZER_ELF
+
 #include <elf.h>
 #include <link.h> // for ElfW
+
 #endif
 
 #include <cstdio>
 #include <cstdlib>
 
-namespace jit {
+namespace cinderx::jit {
 
 namespace {
 
-#ifdef ENABLE_SYMBOLIZER
+#ifdef CINDERX_SYMBOLIZER_ELF
 
 struct SymbolResult {
   const void* func;
@@ -127,7 +145,8 @@ int findSymbolIn(struct dl_phdr_info* info, size_t, void* data) {
 
 } // namespace
 
-Symbolizer::Symbolizer(const char* exe_path) {
+Symbolizer::Symbolizer([[maybe_unused]] const char* exe_path) {
+#ifdef CINDERX_SYMBOLIZER_ELF
   try {
     file_.open(exe_path);
   } catch (const std::exception& exn) {
@@ -135,9 +154,10 @@ Symbolizer::Symbolizer(const char* exe_path) {
     return;
   }
 
-#ifdef ENABLE_SYMBOLIZER
   const std::byte* exe = file_.data().data();
 
+  // Try to find the symtab and strtab sections from our executable.  This can
+  // fail if the executable has been stripped.
   auto elf = reinterpret_cast<const ElfW(Ehdr)*>(exe);
   auto shdr = reinterpret_cast<const ElfW(Shdr)*>(exe + elf->e_shoff);
   auto str =
@@ -151,15 +171,8 @@ Symbolizer::Symbolizer(const char* exe_path) {
       }
     }
   }
-  if (symtab_ == nullptr) {
-    JIT_LOG("could not find symtab");
+  if (symtab_ == nullptr || strtab_ == nullptr) {
     deinit();
-    return;
-  }
-  if (strtab_ == nullptr) {
-    JIT_LOG("could not find strtab");
-    deinit();
-    return;
   }
 #endif
 }
@@ -179,27 +192,34 @@ std::optional<std::string_view> Symbolizer::symbolize(const void* func) {
   if (cached != cache_.end()) {
     return cached->second;
   }
-  // Then try dladdr. It might be able to find the symbol.
+
+  // Then try dladdr. It might be able to find the symbol.  It reports the
+  // nearest preceding symbol rather than an exact match -- and on macOS it
+  // does so even for addresses that belong to no image at all -- so only
+  // accept it when it lands exactly on `func`, which is what the lookups below
+  // require too.
   Dl_info info;
-  if (::dladdr(func, &info) != 0 && info.dli_sname != nullptr) {
+  if (::dladdr(func, &info) != 0 && info.dli_sname != nullptr &&
+      info.dli_saddr == func) {
     return cache(func, info.dli_sname);
   }
-  if (!isInitialized()) {
-    return std::nullopt;
-  }
-  // Fall back to reading our own ELF header.
-  const std::byte* exe = file_.data().data();
 
-  auto symtab = reinterpret_cast<const ElfW(Shdr)*>(symtab_);
-  auto strtab = reinterpret_cast<const ElfW(Shdr)*>(strtab_);
+#ifdef CINDERX_SYMBOLIZER_ELF
+  // Try reading our own ELF header.
+  if (isInitialized()) {
+    const std::byte* exe = file_.data().data();
+    auto symtab = reinterpret_cast<const ElfW(Shdr)*>(symtab_);
+    auto strtab = reinterpret_cast<const ElfW(Shdr)*>(strtab_);
 
-  auto sym = reinterpret_cast<const ElfW(Sym)*>(exe + symtab->sh_offset);
-  auto str = reinterpret_cast<const char*>(exe + strtab->sh_offset);
-  for (size_t i = 0; i < symtab->sh_size / sizeof(ElfW(Sym)); i++) {
-    if (reinterpret_cast<void*>(sym[i].st_value) == func) {
-      return cache(func, str + sym[i].st_name);
+    auto sym = reinterpret_cast<const ElfW(Sym)*>(exe + symtab->sh_offset);
+    auto str = reinterpret_cast<const char*>(exe + strtab->sh_offset);
+    for (size_t i = 0; i < symtab->sh_size / sizeof(ElfW(Sym)); i++) {
+      if (reinterpret_cast<void*>(sym[i].st_value) == func) {
+        return cache(func, str + sym[i].st_name);
+      }
     }
   }
+
   // Fall back to reading dynamic symbols.
   SymbolResult result = {func, std::nullopt};
   int found = ::dl_iterate_phdr(findSymbolIn, &result);
@@ -212,16 +232,22 @@ std::optional<std::string_view> Symbolizer::symbolize(const void* func) {
   // first attempt at symbolizing them.
   return cache(func, result.name);
 #else
+  return cache(func, std::nullopt);
+#endif
+
+#else
   return std::nullopt;
 #endif
 }
 
 void Symbolizer::deinit() {
+#ifndef WIN32
   try {
     file_.close();
   } catch (const std::exception& exn) {
     JIT_LOG("{}", exn.what());
   }
+#endif
 
   symtab_ = nullptr;
   strtab_ = nullptr;
@@ -229,6 +255,7 @@ void Symbolizer::deinit() {
 }
 
 std::optional<std::string> demangle(const std::string& mangled_name) {
+#ifndef WIN32
   int status;
   char* demangled_name =
       abi::__cxa_demangle(mangled_name.c_str(), nullptr, nullptr, &status);
@@ -248,6 +275,9 @@ std::optional<std::string> demangle(const std::string& mangled_name) {
   std::string result{demangled_name};
   std::free(demangled_name);
   return result;
+#else
+  return std::nullopt;
+#endif
 }
 
 std::optional<std::string> symbolize(const void* func) {
@@ -256,12 +286,12 @@ std::optional<std::string> symbolize(const void* func) {
     return std::nullopt;
   }
   auto module_state = cinderx::getModuleState();
-  if (module_state == nullptr || module_state->symbolizer() == nullptr) {
+  if (module_state == nullptr || module_state->symbolizer.get() == nullptr) {
     return std::nullopt;
   }
 
   std::optional<std::string_view> mangled_name =
-      module_state->symbolizer()->symbolize(func);
+      module_state->symbolizer.get()->symbolize(func);
   if (!mangled_name.has_value()) {
     return std::nullopt;
   }
@@ -271,4 +301,4 @@ std::optional<std::string> symbolize(const void* func) {
 #endif
 }
 
-} // namespace jit
+} // namespace cinderx::jit

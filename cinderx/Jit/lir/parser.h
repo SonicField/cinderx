@@ -2,14 +2,14 @@
 
 #pragma once
 
-#include "cinderx/Jit/containers.h"
+#include "cinderx/Common/containers.h"
 #include "cinderx/Jit/lir/printer.h"
 
 #include <memory>
 #include <string>
 #include <unordered_map>
 
-namespace jit::lir {
+namespace cinderx::jit::lir {
 
 std::unordered_set<std::string>& GetStringLiterals();
 
@@ -47,7 +47,13 @@ class Parser {
 
   DataType getOperandDataType(const std::string& name) const;
 
-  Instruction::Opcode getInstrOpcode(const std::string& name) const;
+  // An instruction name resolves to an opcode and, for BranchCC and Compare,
+  // the condition its name encodes.
+  struct InstrKind {
+    Opcode opcode;
+    Condition cond;
+  };
+  InstrKind getInstrKind(const std::string& name) const;
 
   enum TokenType {
     kFunctionStart,
@@ -78,11 +84,18 @@ class Parser {
   };
 
   Token getNextToken(const char* s);
-  void parseInput(const Token& token, const char* code);
+  std::unique_ptr<Operand> parseInput(const Token& token, const char* code);
   void parseIndirect(Operand* opnd, std::string_view token, const char* code);
   void fixOperands();
   void connectBasicBlocks();
+  void installPhiInputs();
   void fixUnknownIds();
+
+  struct PendingPhiInput {
+    Instruction* phi{nullptr};
+    int predecessor_id{0};
+    std::unique_ptr<Operand> value;
+  };
 
   // current function, basic block and instruction
   Function* func_{nullptr};
@@ -96,11 +109,13 @@ class Parser {
 
   // basic block and instruction references to be fixed
   UnorderedMap<Operand*, int> basic_block_refs_;
-  UnorderedMap<LinkedOperand*, int> instr_refs_;
+  UnorderedMap<Operand*, int> instr_refs_;
 
   // succesors that need to be linked
   // Note - the order of pairs matters for conditional branching
   std::vector<std::pair<BasicBlock*, int>> basic_block_succs_;
+  std::vector<IncomingEdge> incoming_edges_;
+  std::vector<PendingPhiInput> pending_phi_inputs_;
 };
 
-} // namespace jit::lir
+} // namespace cinderx::jit::lir

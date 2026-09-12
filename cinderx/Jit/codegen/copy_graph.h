@@ -12,7 +12,7 @@
 #include <utility>
 #include <vector>
 
-namespace jit::codegen {
+namespace cinderx::jit::codegen {
 
 // CopyGraph is used to generate a sequence of copies and/or exchanges to
 // shuffle data between registers (non-negative ints) and memory locations
@@ -58,9 +58,11 @@ class CopyGraph {
   }
 
  private:
-  struct Node {
+  struct ChildListTag {};
+  struct LeafListTag {};
+  struct Node : public IntrusiveListNode<Node, ChildListTag>,
+                public IntrusiveListNode<Node, LeafListTag> {
     explicit Node(int loc) : loc{loc} {}
-    ~Node();
 
     bool operator<(const Node& other) const {
       return loc < other.loc;
@@ -68,12 +70,15 @@ class CopyGraph {
 
     const int loc;
     Node* parent{nullptr};
-    IntrusiveListNode child_node;
-    IntrusiveListNode leaf_node;
-    IntrusiveList<Node, &Node::child_node> children;
+    IntrusiveList<Node, ChildListTag> children;
 
-    DISALLOW_COPY_AND_ASSIGN(Node);
+    Node(const Node&) = delete;
+    Node& operator=(const Node&) = delete;
+    Node(Node&&) = delete;
+    Node& operator=(Node&&) = delete;
   };
+  using ChildLink = IntrusiveListNode<Node, ChildListTag>;
+  using LeafLink = IntrusiveListNode<Node, LeafListTag>;
 
   // Create or look up a node for the given location. Newly-created nodes will
   // automatically be added to leaf_nodes_.
@@ -95,7 +100,7 @@ class CopyGraph {
   std::map<int, Node> nodes_;
 
   // All nodes with no outgoing edges (children).
-  IntrusiveList<Node, &Node::leaf_node> leaf_nodes_;
+  IntrusiveList<Node, LeafListTag> leaf_nodes_;
 };
 
 // the same as CopyGraph, but preserves certain types of `from` nodes.
@@ -139,4 +144,4 @@ class CopyGraphWithType : public CopyGraph {
   std::unordered_map<int, std::remove_cv_t<FromType>> from_types_;
 };
 
-} // namespace jit::codegen
+} // namespace cinderx::jit::codegen

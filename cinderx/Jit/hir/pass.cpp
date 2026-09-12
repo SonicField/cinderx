@@ -4,34 +4,37 @@
 
 #include "cinderx/Jit/context.h"
 #include "cinderx/Jit/hir/analysis.h"
+#include "cinderx/Jit/hir/dominance.h"
 #include "cinderx/Jit/hir/printer.h"
 
-namespace jit::hir {
+#include <ranges>
+
+namespace cinderx::jit::hir {
 
 namespace {
 
 std::optional<Type> builtinFunctionReturnType(std::string_view name) {
   static const UnorderedMap<std::string_view, Type> kRetTypes = {
-      {"dict.copy", TDictExact},      {"hasattr", TBool},
-      {"isinstance", TBool},          {"len", TLongExact},
-      {"list.copy", TListExact},      {"list.count", TLongExact},
-      {"list.index", TLongExact},     {"str.capitalize", TUnicodeExact},
-      {"str.center", TUnicodeExact},  {"str.count", TLongExact},
-      {"str.endswith", TBool},        {"str.find", TLongExact},
-      {"str.format", TUnicodeExact},  {"str.index", TLongExact},
-      {"str.isalnum", TBool},         {"str.isalpha", TBool},
-      {"str.isascii", TBool},         {"str.isdecimal", TBool},
-      {"str.isdigit", TBool},         {"str.isidentifier", TBool},
-      {"str.islower", TBool},         {"str.isnumeric", TBool},
-      {"str.isprintable", TBool},     {"str.isspace", TBool},
-      {"str.istitle", TBool},         {"str.isupper", TBool},
-      {"str.join", TUnicodeExact},    {"str.lower", TUnicodeExact},
-      {"str.lstrip", TUnicodeExact},  {"str.partition", TTupleExact},
-      {"str.replace", TUnicodeExact}, {"str.rfind", TLongExact},
-      {"str.rindex", TLongExact},     {"str.rpartition", TTupleExact},
-      {"str.rsplit", TListExact},     {"str.split", TListExact},
-      {"str.splitlines", TListExact}, {"str.upper", TUnicodeExact},
-      {"tuple.count", TLongExact},    {"tuple.index", TLongExact},
+      {"dict.copy", TDictExact},          {"hasattr", TImmortalBool},
+      {"isinstance", TImmortalBool},      {"len", TLongExact},
+      {"list.copy", TListExact},          {"list.count", TLongExact},
+      {"list.index", TLongExact},         {"str.capitalize", TUnicodeExact},
+      {"str.center", TUnicodeExact},      {"str.count", TLongExact},
+      {"str.endswith", TImmortalBool},    {"str.find", TLongExact},
+      {"str.format", TUnicodeExact},      {"str.index", TLongExact},
+      {"str.isalnum", TImmortalBool},     {"str.isalpha", TImmortalBool},
+      {"str.isascii", TImmortalBool},     {"str.isdecimal", TImmortalBool},
+      {"str.isdigit", TImmortalBool},     {"str.isidentifier", TImmortalBool},
+      {"str.islower", TImmortalBool},     {"str.isnumeric", TImmortalBool},
+      {"str.isprintable", TImmortalBool}, {"str.isspace", TImmortalBool},
+      {"str.istitle", TImmortalBool},     {"str.isupper", TImmortalBool},
+      {"str.join", TUnicodeExact},        {"str.lower", TUnicodeExact},
+      {"str.lstrip", TUnicodeExact},      {"str.partition", TTupleExact},
+      {"str.replace", TUnicodeExact},     {"str.rfind", TLongExact},
+      {"str.rindex", TLongExact},         {"str.rpartition", TTupleExact},
+      {"str.rsplit", TListExact},         {"str.split", TListExact},
+      {"str.splitlines", TListExact},     {"str.upper", TUnicodeExact},
+      {"tuple.count", TLongExact},        {"tuple.index", TLongExact},
   };
   auto return_type = kRetTypes.find(name);
   if (return_type != kRetTypes.end()) {
@@ -72,6 +75,15 @@ Type returnType(Type callable) {
     Type result =
         Type::fromTypeExact(reinterpret_cast<PyTypeObject*>(callable_obj));
     if (result <= TBuiltinExact && !(result <= TType)) {
+      if (result <= TUnicodeExact || result <= TBytesExact) {
+        // bytes and str are odd in that you can have a subclass which overrides
+        // __str__ or __bytes__ and returns a subclass. The subclass is what's
+        // returned instead of an exact type. Other types (e.g. int, float,
+        // complex) do not have this behavior and returning a subclass from
+        // their dunder method is deprecated. But if you do you'll get the exact
+        // type.
+        return result | TUser;
+      }
       return result;
     }
   }
@@ -81,18 +93,32 @@ Type returnType(Type callable) {
 } // namespace
 
 Register* chaseAssignOperand(Register* value) {
-  while (value->instr()->IsAssign()) {
-    value = value->instr()->GetOperand(0);
+  while (value->instr()->isAssign()) {
+    value = value->instr()->getOperand(0);
   }
   return value;
+}
+
+Instr* collapseTrivialPhi(Phi& phi) {
+  Register* value = phi.isTrivial();
+  if (value == nullptr) {
+    return nullptr;
+  }
+  Register* output = phi.output();
+  // A trivial Phi that only references itself can never be initialized, so use
+  // a LoadConst<Bottom> to signify that.
+  if (chaseAssignOperand(value) == output) {
+    return LoadConst::create(output, TBottom);
+  }
+  return Assign::create(output, value);
 }
 
 RegUses collectDirectRegUses(Function& func) {
   RegUses uses;
   for (auto& block : func.cfg.blocks) {
     for (Instr& instr : block) {
-      for (size_t i = 0; i < instr.NumOperands(); ++i) {
-        uses[instr.GetOperand(i)].insert(&instr);
+      for (size_t i = 0; i < instr.numOperands(); ++i) {
+        uses[instr.getOperand(i)].insert(&instr);
       }
     }
   }
@@ -113,7 +139,7 @@ Type outputType(
     case Opcode::kCompare: {
       CompareOp op = static_cast<const Compare&>(instr).op();
       if (op == CompareOp::kIn || op == CompareOp::kNotIn) {
-        return TBool;
+        return TImmortalBool;
       }
       return TObject;
     }
@@ -193,13 +219,12 @@ Type outputType(
     case Opcode::kImportFrom:
     case Opcode::kImportName:
     case Opcode::kInvokeIterNext:
+    case Opcode::kListSubscr:
     case Opcode::kLoadAttr:
-    case Opcode::kLoadAttrCached:
     case Opcode::kLoadAttrSpecial:
     case Opcode::kLoadAttrSuper:
     case Opcode::kLoadGlobal:
     case Opcode::kLoadMethod:
-    case Opcode::kLoadMethodCached:
     case Opcode::kLoadMethodSuper:
     case Opcode::kLoadModuleAttrCached:
     case Opcode::kLoadModuleMethodCached:
@@ -208,9 +233,6 @@ Type outputType(
     case Opcode::kMatchKeys:
     case Opcode::kSend:
     case Opcode::kWaitHandleLoadCoroOrResult:
-    case Opcode::kYieldAndYieldFrom:
-    case Opcode::kYieldFrom:
-    case Opcode::kYieldFromHandleStopAsyncIteration:
     case Opcode::kYieldValue:
       return TObject;
     case Opcode::kBuildString:
@@ -222,7 +244,7 @@ Type outputType(
     case Opcode::kUnaryOp: {
       auto op = static_cast<const UnaryOp&>(instr).op();
       if (op == UnaryOpKind::kNot) {
-        return TBool;
+        return TImmortalBool;
       }
       return TObject;
     }
@@ -249,7 +271,7 @@ Type outputType(
     case Opcode::kLoadVarObjectSize:
       return TCInt64;
     case Opcode::kInvokeStaticFunction:
-      return static_cast<const InvokeStaticFunction&>(instr).ret_type();
+      return static_cast<const InvokeStaticFunction&>(instr).retType();
     case Opcode::kLoadArrayItem:
       return static_cast<const LoadArrayItem&>(instr).type();
     case Opcode::kLoadSplitDictItem:
@@ -260,14 +282,14 @@ Type outputType(
       return TCPtr;
     case Opcode::kCallStatic: {
       auto& call = static_cast<const CallStatic&>(instr);
-      return call.ret_type();
+      return call.retType();
     }
     case Opcode::kCallInd: {
       auto& call = static_cast<const CallInd&>(instr);
-      return call.ret_type();
+      return call.retType();
     }
-    case Opcode::kIntConvert: {
-      auto& conv = static_cast<const IntConvert&>(instr);
+    case Opcode::kPrimitiveConvert: {
+      auto& conv = static_cast<const PrimitiveConvert&>(instr);
       return conv.type();
     }
     case Opcode::kIntBinaryOp: {
@@ -281,7 +303,9 @@ Type outputType(
     case Opcode::kDoubleBinaryOp: {
       return TCDouble;
     }
+    case Opcode::kIsCompactLong:
     case Opcode::kPrimitiveCompare:
+    case Opcode::kUnicodeEqual:
       return TCBool;
     case Opcode::kPrimitiveUnaryOp:
       if (static_cast<const PrimitiveUnaryOp&>(instr).op() ==
@@ -296,11 +320,13 @@ Type outputType(
     case Opcode::kGetTuple:
       return TTupleExact;
     case Opcode::kInitialYield:
-      return TOptNoneType;
+      return TOptImmortalNoneType;
     case Opcode::kLoadArg: {
       auto& loadarg = static_cast<const LoadArg&>(instr);
       return loadarg.type();
     }
+    case Opcode::kTagIfDeferred:
+      return get_op_type(0);
     case Opcode::kLoadCurrentFunc:
       return TFunc;
     case Opcode::kLoadEvalBreaker:
@@ -345,10 +371,9 @@ Type outputType(
     }
     case Opcode::kFloatBinaryOp:
       return TFloatExact;
-    case Opcode::kFloatCompare:
     case Opcode::kLongCompare:
     case Opcode::kUnicodeCompare:
-      return TBool;
+      return TImmortalBool;
     case Opcode::kDictUpdate:
     case Opcode::kDictMerge:
     case Opcode::kRunPeriodicTasks:
@@ -359,7 +384,7 @@ Type outputType(
     // we should get rid of this extra layer and deal with the int return value
     // directly.
     case Opcode::kListExtend:
-      return TNoneType;
+      return TImmortalNoneType;
 
     case Opcode::kListAppend:
     case Opcode::kMergeSetUnpack:
@@ -388,6 +413,8 @@ Type outputType(
       return get_op_type(0);
     case Opcode::kBitCast:
       return static_cast<const BitCast&>(instr).type();
+    case Opcode::kMaterializeRef:
+      return get_op_type(0);
     case Opcode::kLoadConst: {
       return static_cast<const LoadConst&>(instr).type();
     }
@@ -397,14 +424,19 @@ Type outputType(
     case Opcode::kMakeTupleFromList:
     case Opcode::kUnpackExToTuple:
       return TMortalTupleExact;
+    case Opcode::kUnpackSequence:
+      return TCInt32;
+    case Opcode::kReserveStack:
+      return TCPtr;
     case Opcode::kPhi: {
       auto ty = TBottom;
-      for (std::size_t i = 0, n = instr.NumOperands(); i < n; ++i) {
+      for (std::size_t i = 0, n = instr.numOperands(); i < n; ++i) {
         ty |= get_op_type(i);
       }
       return ty;
     }
-    case Opcode::kCheckSequenceBounds: {
+    case Opcode::kCheckSequenceBounds:
+    case Opcode::kCompactLongUnbox: {
       return TCInt64;
     }
 
@@ -419,8 +451,9 @@ Type outputType(
       return TObject;
     }
 
-    case Opcode::kPrimitiveBoxBool: {
-      return TBool;
+    case Opcode::kPrimitiveBoxBool:
+    case Opcode::kUnaryNot: {
+      return TImmortalBool;
     }
 
     case Opcode::kPrimitiveBox: {
@@ -510,11 +543,14 @@ Type outputType(
     case Opcode::kDeleteSubscr:
     case Opcode::kDeopt:
     case Opcode::kDeoptPatchpoint:
+    case Opcode::kEndGeneratorFrame:
     case Opcode::kEndInlinedFunction:
     case Opcode::kGuard:
     case Opcode::kHintType:
     case Opcode::kIncref:
     case Opcode::kInitFrameCellVars:
+    case Opcode::kInitListElements:
+    case Opcode::kInitTupleElements:
     case Opcode::kLoadFrame:
     case Opcode::kRaise:
     case Opcode::kRaiseAwaitableError:
@@ -526,11 +562,11 @@ Type outputType(
     case Opcode::kSnapshot:
     case Opcode::kStoreArrayItem:
     case Opcode::kStoreAttr:
-    case Opcode::kStoreAttrCached:
     case Opcode::kStoreField:
     case Opcode::kStoreSubscr:
     case Opcode::kUnreachable:
     case Opcode::kUpdatePrevInstr:
+    case Opcode::kUseObj:
     case Opcode::kUseType:
     case Opcode::kWaitHandleRelease:
     case Opcode::kXDecref:
@@ -542,7 +578,7 @@ Type outputType(
 
 Type outputType(const Instr& instr) {
   return outputType(
-      instr, [&](std::size_t ind) { return instr.GetOperand(ind)->type(); });
+      instr, [&](std::size_t ind) { return instr.getOperand(ind)->type(); });
 }
 
 void reflowTypes(Function& func) {
@@ -552,19 +588,19 @@ void reflowTypes(Function& func) {
 void reflowTypes(Function& func, BasicBlock* start) {
   // First, reset all types to Bottom so Phi inputs from back edges don't
   // contribute to the output type of the Phi until they've been processed.
-  for (auto& pair : func.env.GetRegisters()) {
-    pair.second->set_type(TBottom);
+  for (auto& pair : func.env.getRegisters()) {
+    pair.second->setType(TBottom);
   }
 
   // Next, flow types forward, iterating to a fixed point.
-  auto rpo_blocks = CFG::GetRPOTraversal(start);
+  auto rpo_blocks = CFG::getRPOTraversal(start);
   for (bool changed = true; changed;) {
     changed = false;
     for (auto block : rpo_blocks) {
       for (auto& instr : *block) {
         if (instr.opcode() == Opcode::kReturn) {
           Type type = static_cast<const Return&>(instr).type();
-          hir::Register* value = instr.GetOperand(0);
+          hir::Register* value = instr.getOperand(0);
           JIT_DCHECK(
               value->type() <= type,
               "Function expecting to return a {} but got {}:{}, CFG is:\n{}",
@@ -584,47 +620,206 @@ void reflowTypes(Function& func, BasicBlock* start) {
           continue;
         }
 
-        dst->set_type(new_ty);
+        dst->setType(new_ty);
         changed = true;
       }
     }
   }
 }
 
-bool removeTrampolineBlocks(CFG* cfg) {
-  std::vector<BasicBlock*> trampolines;
-  for (auto& block : cfg->blocks) {
-    if (!block.IsTrampoline()) {
+namespace {
+
+// Get the block that `block` unconditionally jumps to, or nullptr if it ends in
+// anything other than a Branch.
+BasicBlock* branchTarget(BasicBlock& block) {
+  Instr* term = block.getTerminator();
+  if (term == nullptr || term->opcode() != Opcode::kBranch) {
+    return nullptr;
+  }
+  return static_cast<Branch*>(term)->target();
+}
+
+// Absorb the sole successor of `block` into it, deleting the successor.  Return
+// false if `block` doesn't end a linear A -> B pair.
+bool absorbSuccessor(Function& func, BasicBlock& block) {
+  // Identify linear blocks, A -> B.
+  BasicBlock* target = branchTarget(block);
+  if (target == nullptr || target == &block || target->empty() ||
+      target->inEdges().size() != 1) {
+    return false;
+  }
+  // The entry block's instructions have to run first, so it can never be
+  // absorbed into one of its own successors.
+  if (target == func.cfg.entry_block) {
+    return false;
+  }
+
+  // Any phis in B are trivial because B only has one predecessor.  They can't
+  // move to the end of A as phis only live at the start of a block, so collapse
+  // them into assignments in place.
+  for (auto it = target->begin(); it != target->end();) {
+    Instr& instr = *it;
+    ++it;
+    if (!instr.isPhi()) {
+      break;
+    }
+    Instr* new_instr = collapseTrivialPhi(static_cast<Phi&>(instr));
+    JIT_THROW_IF(
+        new_instr == nullptr,
+        "Non-trivial Phi '{}' in bb {} of {}, which only has one predecessor",
+        instr,
+        target->id,
+        func.fullname);
+    target->replace(instr, *new_instr);
+    delete &instr;
+  }
+
+  // Drop the branch, then append all instructions from B onto A.  The branch
+  // has to go before B does, it owns the last edge pointing at B.
+  Instr* branch = block.getTerminator();
+  branch->unlink();
+  delete branch;
+  while (!target->empty()) {
+    block.append(target->pop_front());
+  }
+
+  // The successors of B might still have phis that refer to it.  Retarget them
+  // to A.
+  Instr* new_term = block.getTerminator();
+  for (std::size_t i = 0, n = new_term->numEdges(); i < n; ++i) {
+    new_term->successor(i)->fixupPhis(target, &block);
+  }
+
+  // B can now be deleted.
+  func.cfg.removeBlock(target);
+  delete target;
+  return true;
+}
+
+// A trampoline block does nothing but jump to another block.  Snapshots are
+// ignored as they're only metadata.
+bool isTrampoline(BasicBlock& block) {
+  for (Instr& instr : block) {
+    if (instr.isSnapshot()) {
       continue;
     }
-    BasicBlock* succ = block.successor(0);
-    // if this is the entry block and its successor has multiple
-    // predecessors, don't remove it; it's necessary to maintain isolated
-    // entries
-    if (&block == cfg->entry_block) {
-      if (succ->in_edges().size() > 1) {
-        continue;
-      } else {
-        cfg->entry_block = succ;
-      }
+    if (!instr.isBranch()) {
+      return false;
     }
-    // Update all predecessors to jump directly to our successor
-    block.retargetPreds(succ);
-    // Finish splicing the trampoline out of the cfg
-    block.set_successor(0, nullptr);
-    trampolines.emplace_back(&block);
+    BasicBlock* succ = instr.successor(0);
+    // Don't treat a block as a trampoline if its successor has Phis, this
+    // block may be necessary to pass a specific value to one of them.  That's
+    // correct but conservative: it's often safe to eliminate such trampolines,
+    // but it needs more involved analysis.
+    return succ != &block && (succ->empty() || !succ->front().isPhi());
   }
-  for (auto& block : trampolines) {
-    cfg->RemoveBlock(block);
-    delete block;
+  // Empty block.
+  return false;
+}
+
+// Splice a trampoline block out of the CFG by pointing all of its predecessors
+// at its successor, deleting the block.  Return false if `block` isn't a
+// trampoline.
+//
+// This is the other half of a linear A -> B merge: it applies when B has other
+// predecessors and so can't be absorbed into A.
+bool spliceTrampoline(Function& func, BasicBlock& block) {
+  // Keep the entry block around, it's needed to maintain an isolated entry.
+  // When its successor only has one predecessor absorbSuccessor() handles it.
+  if (&block == func.cfg.entry_block || !isTrampoline(block)) {
+    return false;
   }
-  simplifyRedundantCondBranches(cfg);
-  return trampolines.size() > 0;
+
+  block.retargetPreds(block.successor(0));
+  block.setSuccessor(0, nullptr);
+  func.cfg.removeBlock(&block);
+  delete &block;
+  return true;
+}
+
+// Replace a conditional branch where both sides go to the same block with a
+// direct branch.  Do nothing for other instructions.
+void simplifyRedundantCondBranch(Instr* instr) {
+  // Only optimize branches with two identical successors.
+  if (instr->numEdges() != 2) {
+    return;
+  }
+  BasicBlock* succ0 = instr->successor(0);
+  if (succ0 != instr->successor(1)) {
+    return;
+  }
+
+  // Verify the instruction is known to be safe to replace.
+  switch (instr->opcode()) {
+    case Opcode::kCondBranch:
+    case Opcode::kCondBranchIterNotDone:
+    case Opcode::kCondBranchCheckType:
+      break;
+    default:
+      return;
+  }
+
+  // Replace with an unconditional branch.
+  auto block = instr->block();
+  block->remove(*instr);
+  std::unique_ptr<Instr> deleter{instr};
+  block->appendWithOff<Branch>(instr->bytecodeOffset(), succ0);
+}
+
+// Run a single merge pass over every block in the CFG, returning true if any
+// blocks were removed.
+bool mergeLinearBlocksOnce(Function& func) {
+  bool changed = false;
+  for (auto it = func.cfg.blocks.begin(); it != func.cfg.blocks.end();) {
+    BasicBlock& block = *it;
+
+    // Empty blocks never have successors to be absorbed, nor are they
+    // trampolines to be spliced out.
+    if (block.empty()) {
+      ++it;
+      continue;
+    }
+
+    // Fold conditional branch first to try to linearize the current block with
+    // a single successor.
+    simplifyRedundantCondBranch(block.getTerminator());
+
+    // Keep absorbing successors, chains of them collapse into a single block.
+    // This only ever unlinks the successor, never `block`, so the iterator
+    // stays valid.
+    while (absorbSuccessor(func, block)) {
+      // Keep simplifying branches to try to generate more linear successors to
+      // be absorbed.
+      simplifyRedundantCondBranch(block.getTerminator());
+      changed = true;
+    }
+
+    // Splicing deletes `block`, so step past it first.
+    ++it;
+    changed |= spliceTrampoline(func, block);
+  }
+  return changed;
+}
+
+} // namespace
+
+bool mergeLinearBlocks(Function& func) {
+  bool changed = false;
+  for (bool modified = true; modified;) {
+    modified = mergeLinearBlocksOnce(func);
+    changed |= modified;
+  }
+
+  if (changed) {
+    func.invalidateDomTree();
+  }
+  return changed;
 }
 
 bool removeUnreachableBlocks(Function& func) {
   auto cfg = &func.cfg;
 
+  // DFS through the graph and find all reachable blocks.
   std::unordered_set<BasicBlock*> visited;
   std::vector<BasicBlock*> stack;
   stack.emplace_back(cfg->entry_block);
@@ -635,7 +830,7 @@ bool removeUnreachableBlocks(Function& func) {
       continue;
     }
     visited.insert(block);
-    auto term = block->GetTerminator();
+    auto term = block->getTerminator();
     for (std::size_t i = 0, n = term->numEdges(); i < n; ++i) {
       BasicBlock* succ = term->successor(i);
       // This check isn't necessary for correctness but avoids unnecessary
@@ -646,51 +841,52 @@ bool removeUnreachableBlocks(Function& func) {
     }
   }
 
-  std::vector<BasicBlock*> unreachable;
+  // Unlink and delete all the unreachable blocks.
+  size_t deleted = 0;
   for (auto it = cfg->blocks.begin(); it != cfg->blocks.end();) {
     BasicBlock* block = &*it;
     ++it;
-    if (!visited.contains(block)) {
-      if (Instr* old_term = block->GetTerminator()) {
-        for (std::size_t i = 0, n = old_term->numEdges(); i < n; ++i) {
-          old_term->successor(i)->removePhiPredecessor(block);
-        }
-      }
-      cfg->RemoveBlock(block);
-      block->clear();
-      unreachable.emplace_back(block);
+
+    if (visited.contains(block)) {
+      continue;
     }
-  }
 
-  for (BasicBlock* block : unreachable) {
+    // Update any phis that are still referencing this block.
+    if (Instr* old_term = block->getTerminator()) {
+      for (std::size_t i = 0, n = old_term->numEdges(); i < n; ++i) {
+        old_term->successor(i)->removePhiPredecessor(block);
+      }
+    }
+
+    cfg->removeBlock(block);
+    // Block is unreachable, but it might have other unreachable predecessors.
+    // Clear them out first so we can delete it safely.
+    block->becomeUnreachable();
     delete block;
+    deleted += 1;
   }
 
-  return unreachable.size() > 0;
+  // Removing blocks changes the CFG and invalidates the dominator tree.
+  if (deleted > 0) {
+    func.invalidateDomTree();
+  }
+
+  return deleted > 0;
 }
 
 bool removeUnreachableInstructions(Function& func) {
-  auto cfg = &func.cfg;
-
   bool modified = false;
-  std::vector<BasicBlock*> blocks = cfg->GetPostOrderTraversal();
-  DominatorAnalysis dom(func);
-  RegUses reg_uses = collectDirectRegUses(func);
-  auto remove_reg_uses = [&reg_uses](Instr* instr) {
-    for (auto op : instr->GetOperands()) {
-      auto instrs = reg_uses.find(op);
-      if (instrs != reg_uses.end()) {
-        instrs->second.erase(instr);
-      }
-    }
-  };
-  for (BasicBlock* block : blocks) {
+
+  // Post-order traversal.
+  const DominatorTree& dom = func.domTree();
+  auto po = std::ranges::reverse_view(dom.reversePostorder());
+  for (BasicBlock* block : po) {
     auto it = block->begin();
     while (it != block->end()) {
       Instr& instr = *it;
       ++it;
       if ((instr.output() == nullptr || !instr.output()->isA(TBottom)) &&
-          !instr.IsUnreachable()) {
+          !instr.isUnreachable()) {
         continue;
       }
       // 1) Any instruction dominated by a definition of a Bottom value is
@@ -713,7 +909,7 @@ bool removeUnreachableInstructions(Function& func) {
         it = prev_it;
       } while (it != block->begin());
 
-      if (it != block->begin() && std::prev(it)->IsGuardType()) {
+      if (it != block->begin() && std::prev(it)->isGuardType()) {
         // Everything after this GuardType is unreachable, but only as long as
         // the GuardType fails at runtime. Indicate that the guard is required
         // for correctness with a UseType. This prevents GuardTypeElimination
@@ -726,15 +922,8 @@ bool removeUnreachableInstructions(Function& func) {
 
       block->insert(Unreachable::create(), it);
       // Clean up dangling phi references
-      if (Instr* old_term = block->GetTerminator()) {
+      if (Instr* old_term = block->getTerminator()) {
         for (std::size_t i = 0, n = old_term->numEdges(); i < n; ++i) {
-          auto bb = old_term->successor(i);
-          for (auto& potential_phi : *bb) {
-            if (potential_phi.IsPhi()) {
-              remove_reg_uses(&potential_phi);
-            }
-          }
-
           old_term->successor(i)->removePhiPredecessor(block);
         }
       }
@@ -743,110 +932,34 @@ bool removeUnreachableInstructions(Function& func) {
         Instr& instrToDelete = *it;
         ++it;
         instrToDelete.unlink();
-        remove_reg_uses(&instrToDelete);
         delete &instrToDelete;
       }
     }
-    if (block->begin()->IsUnreachable()) {
-      std::vector<Instr*> interesting_branches;
-      // If one edge of a conditional branch leads to an Unreachable, it can be
-      // replaced with a Branch to the other target. If a Branch leads to an
-      // Unreachable, it is replaced with an Unreachable.
-      for (const Edge* edge : block->in_edges()) {
-        BasicBlock* predecessor = edge->from();
-        interesting_branches.emplace_back(predecessor->GetTerminator());
-      }
-      for (Instr* branch : interesting_branches) {
-        if (branch->IsBranch()) {
-          branch->ReplaceWith(*Unreachable::create());
-        } else if (auto cond_branch = dynamic_cast<CondBranchBase*>(branch)) {
-          BasicBlock* target;
-          if (cond_branch->false_bb() == block) {
-            target = cond_branch->true_bb();
-          } else {
-            JIT_CHECK(
-                cond_branch->true_bb() == block,
-                "true branch must be unreachable");
-            target = cond_branch->false_bb();
-          }
 
-          if (branch->IsCondBranchCheckType()) {
-            // Before replacing a CondBranchCheckType with a Branch to the
-            // reachable block, insert a RefineType to preserve the type
-            // information implied by following that path.
-            auto check_type_branch = static_cast<CondBranchCheckType*>(branch);
-            Register* refined_value = func.env.AllocateRegister();
-            Type check_type = check_type_branch->type();
-            if (target == cond_branch->false_bb()) {
-              check_type = TTop - check_type_branch->type();
-            }
+    // If the first instruction in the block is now an Unreachable, then all
+    // predecessors can be optimized.  A predecessor with a conditional branch
+    // transforms into an unconditional branch to the opposite block, and a
+    // predecessor with an unconditional branch itself gets an Unreachable.
+    if (block->begin()->isUnreachable()) {
+      block->becomeUnreachable();
 
-            Register* operand = check_type_branch->GetOperand(0);
-            RefineType::create(refined_value, check_type, operand)
-                ->InsertBefore(*cond_branch);
-            auto uses = reg_uses.find(operand);
-            if (uses == reg_uses.end()) {
-              break;
-            }
-            std::unordered_set<Instr*>& instrs_using_reg = uses->second;
-            const std::unordered_set<const BasicBlock*>& dom_set =
-                dom.getBlocksDominatedBy(target);
-            for (Instr* instr : instrs_using_reg) {
-              if (dom_set.contains(instr->block())) {
-                instr->ReplaceUsesOf(operand, refined_value);
-              }
-            }
-          }
-          cond_branch->ReplaceWith(*Branch::create(target));
-        } else {
-          JIT_ABORT("Unexpected branch instruction {}", *branch);
-        }
-        remove_reg_uses(branch);
-        delete branch;
+      // All of the block's predecessors no longer point to it and all phis
+      // pointing to it have been updated.  Unless it's the entry block, we can
+      // delete it.
+      if (block != func.cfg.entry_block) {
+        func.cfg.removeBlock(block);
+        delete block;
       }
     }
   }
+
   if (modified) {
-    removeUnreachableBlocks(func);
+    // We rewrote branches and/or dropped blocks above, so any cached dominance
+    // is no longer valid.
+    func.invalidateDomTree();
     reflowTypes(func);
   }
   return modified;
 }
 
-void simplifyRedundantCondBranches(CFG* cfg) {
-  std::vector<BasicBlock*> to_simplify;
-  for (auto& block : cfg->blocks) {
-    if (block.empty()) {
-      continue;
-    }
-    auto term = block.GetTerminator();
-    std::size_t num_edges = term->numEdges();
-    if (num_edges < 2) {
-      continue;
-    }
-    JIT_CHECK(num_edges == 2, "only two edges are supported");
-    if (term->successor(0) != term->successor(1)) {
-      continue;
-    }
-    switch (term->opcode()) {
-      case Opcode::kCondBranch:
-      case Opcode::kCondBranchIterNotDone:
-      case Opcode::kCondBranchCheckType:
-        break;
-      default:
-        // Can't be sure that it's safe to replace the instruction with a branch
-        JIT_ABORT("Unknown side effects of {} instruction", term->opname());
-    }
-    to_simplify.emplace_back(&block);
-  }
-  for (auto& block : to_simplify) {
-    auto term = block->GetTerminator();
-    term->unlink();
-    auto branch = block->appendWithOff<Branch>(
-        term->bytecodeOffset(), term->successor(0));
-    branch->copyBytecodeOffset(*term);
-    delete term;
-  }
-}
-
-} // namespace jit::hir
+} // namespace cinderx::jit::hir

@@ -14,43 +14,13 @@ def test(i: int) -> int:
     j: int32 = int32(i)
     return box(abs(j))
 
---- Expected 3.10 ---
-fun jittestmodule:test {
-  bb 0 {
-    v0 = LoadArg<0; "i", Long>
-    Snapshot
-    v0 = CheckVar<"i"> v0 {
-      FrameState {
-        CurInstrOffset 0
-        Locals<2> v0 v1
-      }
-    }
-    v0 = RefineType<Long> v0
-    v2 = PrimitiveUnbox<CInt32> v0
-    v3 = IsNegativeAndErrOccurred v2 {
-      FrameState {
-        CurInstrOffset 4
-        Locals<2> v0 v1
-      }
-    }
-    v1 = Assign v2
-    v4 = CallStatic<abs@0xdeadbeef, 1> v1
-    Snapshot
-    v5 = PrimitiveBox<CInt32> v4 {
-      FrameState {
-        CurInstrOffset 12
-        Locals<2> v0 v1
-      }
-    }
-    v5 = RefineType<Long> v5
-    Return<Long> v5
-  }
-}
 --- Expected 3.12 ---
 fun jittestmodule:test {
   bb 0 {
     v0 = LoadArg<0; "i", Long>
     v2 = LoadCurrentFunc
+    LoadFrame
+    v1 = LoadConst<CInt32[0]>
     Snapshot
     v3 = LoadEvalBreaker
     CondBranch<2, 1> v3
@@ -95,6 +65,8 @@ fun jittestmodule:test {
   bb 0 {
     v0 = LoadArg<0; "i", Long>
     v2 = LoadCurrentFunc
+    LoadFrame
+    v1 = LoadConst<CInt32[0]>
     Snapshot
     v3 = LoadEvalBreaker
     CondBranch<2, 1> v3
@@ -139,6 +111,8 @@ fun jittestmodule:test {
   bb 0 {
     v0 = LoadArg<0; "i", Long>
     v2 = LoadCurrentFunc
+    LoadFrame
+    v1 = LoadConst<CInt32[0]>
     Snapshot
     v3 = LoadEvalBreaker
     CondBranch<2, 1> v3
@@ -161,7 +135,7 @@ fun jittestmodule:test {
     v5 = PrimitiveUnbox<CInt32> v0
     v6 = IsNegativeAndErrOccurred v5 {
       FrameState {
-        CurInstrOffset 8
+        CurInstrOffset 10
         Locals<2> v0 v1
       }
     }
@@ -170,12 +144,106 @@ fun jittestmodule:test {
     Snapshot
     v8 = PrimitiveBox<CInt32> v7 {
       FrameState {
-        CurInstrOffset 24
+        CurInstrOffset 26
         Locals<2> v0 v1
       }
     }
     v8 = RefineType<Long> v8
     Return<Long> v8
+  }
+}
+--- Expected 3.16 ---
+fun jittestmodule:test {
+  bb 0 {
+    v0 = LoadArg<0; "i", Long>
+    v2 = LoadCurrentFunc
+    LoadFrame
+    v1 = LoadConst<CInt32[0]>
+    Snapshot
+    v3 = LoadEvalBreaker
+    CondBranch<2, 1> v3
+  }
+
+  bb 2 (preds 0) {
+    Snapshot
+    v4 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+        Locals<2> v0 v1
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
+    Snapshot
+    v0 = RefineType<Long> v0
+    v5 = PrimitiveUnbox<CInt32> v0
+    v6 = IsNegativeAndErrOccurred v5 {
+      FrameState {
+        CurInstrOffset 10
+        Locals<2> v0 v1
+      }
+    }
+    v1 = Assign v5
+    v7 = CallStatic<abs@0xdeadbeef, 1> v1
+    Snapshot
+    v8 = PrimitiveBox<CInt32> v7 {
+      FrameState {
+        CurInstrOffset 26
+        Locals<2> v0 v1
+      }
+    }
+    v8 = RefineType<Long> v8
+    Return<Long> v8
+  }
+}
+--- Expected 3.14t ---
+fun jittestmodule:test {
+  bb 0 {
+    v0 = LoadArg<0; "i", Long>
+    v2 = LoadCurrentFunc
+    LoadFrame
+    v1 = LoadConst<CInt32[0]>
+    v3 = TagIfDeferred v0
+    Snapshot
+    AtQuiescentState
+    v4 = LoadEvalBreaker
+    CondBranch<2, 1> v4
+  }
+
+  bb 2 (preds 0) {
+    Snapshot
+    v5 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+        Locals<2> v3 v1
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
+    Snapshot
+    v3 = RefineType<Long> v3
+    v6 = PrimitiveUnbox<CInt32> v3
+    v7 = IsNegativeAndErrOccurred v6 {
+      FrameState {
+        CurInstrOffset 8
+        Locals<2> v3 v1
+      }
+    }
+    v1 = Assign v6
+    v8 = CallStatic<abs@0xdeadbeef, 1> v1
+    Snapshot
+    v9 = PrimitiveBox<CInt32> v8 {
+      FrameState {
+        CurInstrOffset 24
+        Locals<2> v3 v1
+      }
+    }
+    v9 = RefineType<Long> v9
+    Return<Long> v9
   }
 }
 --- End ---

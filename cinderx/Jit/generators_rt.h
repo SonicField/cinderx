@@ -3,12 +3,9 @@
 
 #include "cinderx/python.h"
 
-#if PY_VERSION_HEX >= 0x030C0000
 #include "internal/pycore_frame.h"
 
 #include "cpython/genobject.h"
-
-#endif
 
 #ifdef __cplusplus
 
@@ -17,31 +14,21 @@
 #include "cinderx/Jit/gen_data_footer.h"
 #include "cinderx/module_state.h" // @donotremove
 
-namespace jit {
-
-#if PY_VERSION_HEX < 0x030C0000
-
-template <typename PyObjectT>
-int JitGen_CheckAny(PyObjectT*) {
-  return 0;
-}
-
-#else
+namespace cinderx::jit {
 
 struct GenDataFooter;
 extern PyType_Spec JitGen_Spec;
 extern PyType_Spec JitCoro_Spec;
-extern PyType_Spec JitAnextAwaitable_Spec;
 extern PyTypeObject _JitCoroWrapper_Type;
 
 template <typename PyObjectT>
 int JitGen_CheckAny(PyObjectT* op) {
   return Py_IS_TYPE(
              reinterpret_cast<PyObject*>(op),
-             cinderx::getModuleState()->genType()) ||
+             cinderx::getModuleState()->gen_type) ||
       Py_IS_TYPE(
              reinterpret_cast<PyObject*>(op),
-             cinderx::getModuleState()->coroType());
+             cinderx::getModuleState()->coro_type);
 }
 
 struct JitGenObject : PyGenObject {
@@ -66,7 +53,10 @@ struct JitGenObject : PyGenObject {
 
 // Converts a JitGenObject into a regular PyGenObject. This assumes deopting
 // the associated frame will be done elsewhere.
-void deopt_jit_gen_object_only(JitGenObject* gen);
+void deopt_jit_gen_object_only(
+    JitGenObject* gen,
+    GenDataFooter* footer = nullptr,
+    ModuleState* state = nullptr);
 
 // Fully deopt a generator so it'll be ready for use in the interpreter. Note
 // this cannot be done on a currently executing JIT generator and will return
@@ -79,17 +69,14 @@ inline bool deopt_jit_gen(PyGenObject* gen) {
 void init_jit_genobject_type();
 void shutdown_jit_genobject_type();
 
-PyObject* JitGen_AnextAwaitable_New(
-    cinderx::ModuleState* moduleState,
-    PyObject* awaitable,
-    PyObject* defaultValue);
+// Swap am_send on JIT gen/coro types to a wrapper that deopts generators
+// before resuming. Called when the JIT is paused for instrumentation.
+void patchJitGenAmSendForDeopt();
+// Restore the normal JIT am_send. Called when the JIT is re-enabled.
+void unpatchJitGenAmSendForDeopt();
 
-#endif // PY_VERSION_HEX >= 0x030C0000
-
-} // namespace jit
+} // namespace cinderx::jit
 #endif // __cplusplus
-
-#if PY_VERSION_HEX >= 0x030C0000
 
 #ifdef __cplusplus
 extern "C" {
@@ -103,5 +90,3 @@ PyObject* JitGen_yf(PyGenObject* gen);
 #ifdef __cplusplus
 }
 #endif
-
-#endif // PY_VERSION_HEX >= 0x030C0000

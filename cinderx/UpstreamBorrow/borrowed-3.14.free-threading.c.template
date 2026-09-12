@@ -63,11 +63,12 @@ PyObject *
 _PyType_LookupRefAndVersion(PyTypeObject *type, PyObject *name, unsigned int *version) {
   // This is a bit much to borrow as the dependency tree goes deep... but the version
   // is the version at the start before the MRO
-  bool has_version = type->tp_version_tag != 0;
+  unsigned int start_version = FT_ATOMIC_LOAD_UINT_RELAXED(type->tp_version_tag);
+  bool has_version = start_version != 0;
   if (!has_version && PyUnstable_Type_AssignVersionTag(type)) {
-    has_version = true;
+    start_version = FT_ATOMIC_LOAD_UINT_RELAXED(type->tp_version_tag);
+    has_version = start_version != 0;
   }
-  unsigned int start_version = type->tp_version_tag;
   PyObject *res = _PyType_LookupRef(type, name);
   *version = has_version ? start_version : 0;
   return res;
@@ -79,12 +80,6 @@ ASSERT_DICT_LOCKED(PyObject *op)
 {
     _Py_CRITICAL_SECTION_ASSERT_OBJECT_LOCKED(op);
 }
-#endif
-
-#ifdef ENABLE_PEP523_HOOK
-_PyFrameEvalFunction Ci_EvalFrameFunc;
-#else
-#define Ci_EvalFrameFunc NULL
 #endif
 
 // In 3.12 _PyAsyncGenValueWrapperNew needs thread-state. As this is used from
@@ -156,6 +151,8 @@ PyDictKeysObject* ci_dict_empty_keys;
 // @Borrow function dictkeys_set_index from Objects/dictobject.c [3.14]
 // @Borrow function delitem_common from Objects/dictobject.c [3.14]
 // @Borrow function _PyDict_DelItem_KnownHash_LockHeld from Objects/dictobject.c [3.14]
+// @Borrow function get_log2_bytes from Objects/dictobject.c [3.14]
+// @Borrow function init_keys_object from Objects/dictobject.c [3.14]
 // @Borrow function new_keys_object from Objects/dictobject.c [3.14]
 #ifdef META_PYTHON
 // @Borrow function lazy_import_verbose_lock_held from Objects/dictobject.c [3.14]
@@ -208,18 +205,15 @@ PyDictKeysObject* ci_dict_empty_keys;
 // @Borrow function get_tlbc_lock_held from Objects/codeobject.c [3.14]
 // @Borrow function _PyCode_GetTLBC from Objects/codeobject.c [3.14]
 
-void Cix_dict_insert_split_value(
-    PyInterpreterState *interp,
+void _PyDict_InsertSplitValue(
     PyDictObject *mp,
     PyObject *key,
     PyObject *value,
     Py_ssize_t ix) {
 #if defined(__clang__)
   [[clang::always_inline]]
-#elif defined(__GNUC__)
-  [[gnu::always_inline]]
 #endif
-  insert_split_value(interp, mp, key, value, ix);
+  insert_split_value(_PyInterpreterState_GET(), mp, key, value, ix);
 }
 
 #define _PyObject_SetAttributeErrorContext _CiPyObject_SetAttributeErrorContext
@@ -426,6 +420,8 @@ void _PyErr_SetObject(PyThreadState* tstate, PyObject* type, PyObject* value) {
 // @Borrow function _PyBuildSlice_ConsumeRefs from Objects/sliceobject.c [3.14]
 
 #define get_line_delta instrumentation_get_line_delta
+#define _Py_Instrumentation_GetLine _Ci_Instrumentation_GetLine
+
 // @Borrow var MOST_SIGNIFICANT_BITS from Python/instrumentation.c [3.14]
 // @Borrow var INSTRUMENTED_OPCODES from Python/instrumentation.c [3.14]
 // @Borrow var EVENT_FOR_OPCODE from Python/instrumentation.c [3.14]
@@ -500,6 +496,7 @@ void _PyErr_SetObject(PyThreadState* tstate, PyObject* type, PyObject* value) {
 // @Borrow function load_counter from Python/specialize.c [3.14]
 // @Borrow function unspecialize from Python/specialize.c [3.14]
 // @Borrow function _Py_Specialize_LoadSuperAttr from Python/specialize.c [3.14]
+// @Borrow function maybe_enable_deferred_ref_count from Python/specialize.c [3.14]
 // @Borrow function specialize_module_load_attr_lock_held from Python/specialize.c [3.14]
 // @Borrow function specialize_module_load_attr from Python/specialize.c [3.14]
 // @Borrow function classify_descriptor from Python/specialize.c [3.14]
@@ -611,8 +608,10 @@ LONG_FLOAT_ACTION(compactlong_float_true_div, /)
 #undef Py_XNewRef
 #define Py_XNewRef(obj) _Py_XNewRef(_PyObject_CAST(obj))
 
+#ifdef Py_REF_DEBUG
 // @Borrow optional function reftotal_add from Objects/object.c
 // @Borrow optional function _Py_AddRefTotal from Objects/object.c
+#endif
 // @Borrow function _Py_ExplicitMergeRefcount from Objects/object.c
 // @Borrow function _Py_qsbr_advance from Python/qsbr.c
 // @Borrow function _Py_qsbr_shared_next from Python/qsbr.c
@@ -639,19 +638,18 @@ LONG_FLOAT_ACTION(compactlong_float_true_div, /)
 
 // @Borrow function _PyFloat_FromDouble_ConsumeInputs from Objects/floatobject.c [3.14]
 
-// Internal dependencies for gen_dealloc.
-// @Borrow function gen_clear_frame from Objects/genobject.c [3.14]
-// End internal dependencies.
-// Use our own memory deallocation which handles generators that might be on
-// our custom free-list.
-#define PyObject_GC_Del(x) Ci_free_jit_list_gen(x)
-// @Borrow function gen_dealloc from Objects/genobject.c [3.14]
-#undef PyObject_GC_Del
-void Cix_gen_dealloc_with_custom_free(PyObject* obj) {
-    gen_dealloc(obj);
+// _PyCoroObject_CAST includes assert(PyCoro_CheckExact(op)) which fails
+// for JIT coroutines that have a different type. Replace with a plain cast.
+#undef _PyCoroObject_CAST
+#define _PyCoroObject_CAST(op) ((PyCoroObject *)(op))
+// @Borrow function cr_getrunning from Objects/genobject.c [3.14]
+PyObject* Cix_cr_getrunning(PyObject* self, void* ignored) {
+    return cr_getrunning(self, ignored);
 }
-
-// @Borrow function _PyTuple_MaybeUntrack from Objects/tupleobject.c [3.14]
+// @Borrow function cr_getsuspended from Objects/genobject.c [3.14]
+PyObject* Cix_cr_getsuspended(PyObject* self, void* ignored) {
+    return cr_getsuspended(self, ignored);
+}
 
 // @Borrow typedef _PyListArray from Objects/listobject.c [3.14]
 // @Borrow function valid_index from Objects/listobject.c [3.14]

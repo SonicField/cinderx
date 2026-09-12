@@ -80,7 +80,7 @@ def graph_instrs(graph, name=None) -> Generator[Instruction, None, None]:
         yield from block.getInstructions()
 
 
-class TestFile:
+class ParsedTestFile:
     """Parsed test case file."""
 
     _SECTION_HEADERS = {SCRIPT_EXPECTED: "expected", SCRIPT_EXC_TABLE: "exc_table"}
@@ -341,9 +341,8 @@ class CodeTests(CompilerTest):
 
 def add_test(modname: str, fname: str) -> None:
     version = sys.version_info[:2]
+    # glob_test() normalizes fname to use "/" on every platform.
     if "/cinder/" in fname and "cinder" not in sys.version:
-        return
-    elif "/3.10/" in fname and version != (3, 10):
         return
     elif "/3.12/" in fname and version != (3, 12):
         return
@@ -353,7 +352,7 @@ def add_test(modname: str, fname: str) -> None:
         return
 
     def test_code(self: CodeTests) -> None:
-        test = TestFile(fname)
+        test = ParsedTestFile(fname)
         graph = self.to_graph(test.code)
 
         fixme = "fixup to be a minimal repro and check it in"
@@ -371,8 +370,6 @@ def add_test(modname: str, fname: str) -> None:
         # Parse expected exception table
         exc_table = test.exc_table
         if exc_table is not None:
-            if version < (3, 11):
-                self.fail("No exception table in python 3.10")
             assert isinstance(graph, PyFlowGraph312)
             exc = eval(exc_table)
             for fn, table in exc.items():

@@ -1,11 +1,15 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 
+#include "cinderx/python.h"
+
 #include <gtest/gtest.h>
 
 #include "cinderx/Common/ref.h"
+#include "cinderx/Common/util.h"
 #include "cinderx/Interpreter/cinder_opcode.h"
 #include "cinderx/Jit/compiler.h"
 #include "cinderx/Jit/hir/builder.h"
+#include "cinderx/Jit/hir/dominance.h"
 #include "cinderx/Jit/hir/hir.h"
 #include "cinderx/Jit/hir/parser.h"
 #include "cinderx/Jit/hir/phi_elimination.h"
@@ -14,12 +18,16 @@
 #include "cinderx/Jit/hir/ssa.h"
 #include "cinderx/RuntimeTests/fixtures.h"
 
-#if PY_VERSION_HEX >= 0x030C0000
-#include "internal/pycore_intrinsics.h"
-#endif
+extern "C" {
 
-using namespace jit;
-using namespace jit::hir;
+#include "internal/pycore_intrinsics.h"
+
+} // extern "C"
+
+namespace cinderx {
+
+using namespace cinderx::jit;
+using namespace cinderx::jit::hir;
 
 HIRPrinter fullPrinter() {
   return HIRPrinter{}.setFullSnapshots(true);
@@ -28,23 +36,23 @@ HIRPrinter fullPrinter() {
 TEST(BasicBlockTest, CanAppendInstrs) {
   Environment env;
   BasicBlock block;
-  auto v0 = env.AllocateRegister();
+  auto v0 = env.allocateRegister();
   block.append<LoadConst>(v0, TNoneType);
   block.append<Return>(v0);
-  ASSERT_TRUE(block.GetTerminator()->IsReturn());
+  ASSERT_TRUE(block.getTerminator()->isReturn());
 }
 
 TEST(BasicBlockTest, CanIterateInstrs) {
   Environment env;
   BasicBlock block;
-  auto v0 = env.AllocateRegister();
+  auto v0 = env.allocateRegister();
   block.append<LoadConst>(v0, TNoneType);
   block.append<Return>(v0);
 
   auto it = block.begin();
-  ASSERT_TRUE(it->IsLoadConst());
+  ASSERT_TRUE(it->isLoadConst());
   it++;
-  ASSERT_TRUE(it->IsReturn());
+  ASSERT_TRUE(it->isReturn());
   it++;
   ASSERT_TRUE(it == block.end());
 }
@@ -52,47 +60,47 @@ TEST(BasicBlockTest, CanIterateInstrs) {
 TEST(BasicBlockTest, SplitAfterSplitsBlockAfterInstruction) {
   Environment env;
   CFG cfg;
-  BasicBlock* head = cfg.AllocateBlock();
-  auto v0 = env.AllocateRegister();
+  BasicBlock* head = cfg.allocateBlock();
+  auto v0 = env.allocateRegister();
   head->append<LoadConst>(v0, TNoneType);
-  Instr* load_const = head->GetTerminator();
+  Instr* load_const = head->getTerminator();
   head->append<Return>(v0);
   BasicBlock* tail = cfg.splitAfter(*load_const);
-  ASSERT_NE(nullptr, head->GetTerminator());
-  EXPECT_TRUE(head->GetTerminator()->IsLoadConst());
-  ASSERT_NE(nullptr, tail->GetTerminator());
-  EXPECT_TRUE(tail->GetTerminator()->IsReturn());
+  ASSERT_NE(nullptr, head->getTerminator());
+  EXPECT_TRUE(head->getTerminator()->isLoadConst());
+  ASSERT_NE(nullptr, tail->getTerminator());
+  EXPECT_TRUE(tail->getTerminator()->isReturn());
 }
 
 TEST(CFGIterTest, IteratingEmptyCFGReturnsEmptyTraversal) {
   CFG cfg;
-  std::vector<BasicBlock*> traversal = cfg.GetRPOTraversal();
+  std::vector<BasicBlock*> traversal = cfg.getRPOTraversal();
   ASSERT_EQ(traversal.size(), 0);
 }
 
 TEST(CFGIterTest, IteratingSingleBlockCFGReturnsOneBlock) {
   Environment env;
   CFG cfg;
-  BasicBlock* block = cfg.AllocateBlock();
+  BasicBlock* block = cfg.allocateBlock();
   cfg.entry_block = block;
 
   // Add a single instuction to the block
-  block->append<Return>(env.AllocateRegister());
+  block->append<Return>(env.allocateRegister());
 
-  std::vector<BasicBlock*> traversal = cfg.GetRPOTraversal();
+  std::vector<BasicBlock*> traversal = cfg.getRPOTraversal();
   ASSERT_EQ(traversal.size(), 1) << "Incorrect number of blocks returned";
   ASSERT_EQ(traversal[0], block) << "Incorrect block returned";
 }
 
 TEST(CFGIterTest, VisitsBlocksOnlyOnce) {
   CFG cfg;
-  BasicBlock* block = cfg.AllocateBlock();
+  BasicBlock* block = cfg.allocateBlock();
   cfg.entry_block = block;
 
   // The block loops on itself
   block->append<Branch>(block);
 
-  std::vector<BasicBlock*> traversal = cfg.GetRPOTraversal();
+  std::vector<BasicBlock*> traversal = cfg.getRPOTraversal();
   ASSERT_EQ(traversal.size(), 1) << "Incorrect number of blocks returned";
   ASSERT_EQ(traversal[0], block) << "Incorrect block returned";
 }
@@ -100,18 +108,18 @@ TEST(CFGIterTest, VisitsBlocksOnlyOnce) {
 TEST(CFGIterTest, VisitsAllBranches) {
   Environment env;
   CFG cfg;
-  BasicBlock* cond = cfg.AllocateBlock();
+  BasicBlock* cond = cfg.allocateBlock();
   cfg.entry_block = cond;
 
-  BasicBlock* true_block = cfg.AllocateBlock();
-  true_block->append<Return>(env.AllocateRegister());
+  BasicBlock* true_block = cfg.allocateBlock();
+  true_block->append<Return>(env.allocateRegister());
 
-  BasicBlock* false_block = cfg.AllocateBlock();
-  false_block->append<Return>(env.AllocateRegister());
+  BasicBlock* false_block = cfg.allocateBlock();
+  false_block->append<Return>(env.allocateRegister());
 
-  cond->append<CondBranch>(env.AllocateRegister(), true_block, false_block);
+  cond->append<CondBranch>(env.allocateRegister(), true_block, false_block);
 
-  std::vector<BasicBlock*> traversal = cfg.GetRPOTraversal();
+  std::vector<BasicBlock*> traversal = cfg.getRPOTraversal();
   ASSERT_EQ(traversal.size(), 3) << "Incorrect number of blocks returned";
   ASSERT_EQ(traversal[0], cond) << "Should have visited cond block first";
   ASSERT_EQ(traversal[1], true_block)
@@ -125,21 +133,21 @@ TEST(CFGIterTest, VisitsLoops) {
   CFG cfg;
 
   // Create the else block
-  BasicBlock* outer_else = cfg.AllocateBlock();
-  outer_else->append<Return>(env.AllocateRegister());
+  BasicBlock* outer_else = cfg.allocateBlock();
+  outer_else->append<Return>(env.allocateRegister());
 
   // Create the inner loop
-  BasicBlock* loop_cond = cfg.AllocateBlock();
-  BasicBlock* loop_body = cfg.AllocateBlock();
+  BasicBlock* loop_cond = cfg.allocateBlock();
+  BasicBlock* loop_body = cfg.allocateBlock();
   loop_body->append<Branch>(loop_cond);
-  loop_cond->append<CondBranch>(env.AllocateRegister(), loop_body, outer_else);
+  loop_cond->append<CondBranch>(env.allocateRegister(), loop_body, outer_else);
 
   // Create the outer conditional
-  BasicBlock* outer_cond = cfg.AllocateBlock();
-  outer_cond->append<CondBranch>(env.AllocateRegister(), loop_cond, outer_else);
+  BasicBlock* outer_cond = cfg.allocateBlock();
+  outer_cond->append<CondBranch>(env.allocateRegister(), loop_cond, outer_else);
   cfg.entry_block = outer_cond;
 
-  std::vector<BasicBlock*> traversal = cfg.GetRPOTraversal();
+  std::vector<BasicBlock*> traversal = cfg.getRPOTraversal();
   ASSERT_EQ(traversal.size(), 4) << "Incorrect number of blocks returned";
   ASSERT_EQ(traversal[0], outer_cond) << "Should have visited outer cond first";
   ASSERT_EQ(traversal[1], loop_cond) << "Should have visited loop cond second";
@@ -170,7 +178,7 @@ fun test {
   }
 }
 )";
-  auto func = HIRParser{}.ParseHIR(hir_source);
+  auto func = HIRParser{}.parseHIR(hir_source);
   ASSERT_NE(func, nullptr);
   ASSERT_TRUE(checkFunc(*func, std::cout));
 
@@ -208,19 +216,19 @@ fun test {
   }
 }
 )";
-  EXPECT_EQ(HIRPrinter{}.ToString(*func), expected_hir);
+  EXPECT_EQ(HIRPrinter{}.toString(*func), expected_hir);
 }
 
-TEST(RemoveTrampolineBlocksTest, DoesntModifySingleBlockLoops) {
-  CFG cfg;
-  Environment env;
+TEST(MergeLinearBlocksTest, DoesntModifySingleBlockLoops) {
+  Function func;
+  auto& cfg = func.cfg;
 
-  cfg.entry_block = cfg.AllocateBlock();
+  cfg.entry_block = cfg.allocateBlock();
   cfg.entry_block->append<Branch>(cfg.entry_block);
 
-  removeTrampolineBlocks(&cfg);
+  EXPECT_FALSE(mergeLinearBlocks(func));
 
-  auto s = HIRPrinter().ToString(cfg);
+  auto s = HIRPrinter().toString(cfg);
   const char* expected = R"(bb 0 (preds 0) {
   Branch<0>
 }
@@ -228,18 +236,18 @@ TEST(RemoveTrampolineBlocksTest, DoesntModifySingleBlockLoops) {
   ASSERT_EQ(s, expected);
 }
 
-TEST(RemoveTrampolineBlocksTest, ReducesSimpleLoops) {
-  CFG cfg;
-  Environment env;
+TEST(MergeLinearBlocksTest, ReducesSimpleLoops) {
+  Function func;
+  auto& cfg = func.cfg;
 
-  auto t1 = cfg.AllocateBlock();
-  cfg.entry_block = cfg.AllocateBlock();
+  auto t1 = cfg.allocateBlock();
+  cfg.entry_block = cfg.allocateBlock();
   cfg.entry_block->append<Branch>(t1);
   t1->append<Branch>(cfg.entry_block);
 
-  removeTrampolineBlocks(&cfg);
+  EXPECT_TRUE(mergeLinearBlocks(func));
 
-  auto s = HIRPrinter().ToString(cfg);
+  auto s = HIRPrinter().toString(cfg);
   const char* expected = R"(bb 1 (preds 1) {
   Branch<1>
 }
@@ -247,41 +255,46 @@ TEST(RemoveTrampolineBlocksTest, ReducesSimpleLoops) {
   ASSERT_EQ(s, expected);
 }
 
-TEST(RemoveTrampolineBlocksTest, RemovesSimpleChain) {
-  CFG cfg;
-  Environment env;
+TEST(MergeLinearBlocksTest, MergesSimpleChain) {
+  Function func;
+  auto& cfg = func.cfg;
+  auto& env = func.env;
 
   // This constructs a CFG that looks like
   //
   // entry -> t2 -> t1 -> exit
   //
-  // after removing tramponline blocks we should be left
-  // with only the exit block
-  auto exit_block = cfg.AllocateBlock();
-  exit_block->append<Return>(env.AllocateRegister());
+  // Every block is linear, so they all collapse into the entry block.
+  auto exit_block = cfg.allocateBlock();
+  exit_block->append<Return>(env.allocateRegister());
 
-  auto t1 = cfg.AllocateBlock();
+  auto t1 = cfg.allocateBlock();
   t1->append<Branch>(exit_block);
 
-  auto t2 = cfg.AllocateBlock();
+  auto t2 = cfg.allocateBlock();
   t2->append<Branch>(t1);
 
-  cfg.entry_block = cfg.AllocateBlock();
+  cfg.entry_block = cfg.allocateBlock();
   cfg.entry_block->append<Branch>(t2);
 
-  removeTrampolineBlocks(&cfg);
+  EXPECT_EQ(func.domTree().immediateDominator(exit_block), t1);
+  EXPECT_TRUE(mergeLinearBlocks(func));
+  // The merged-away blocks are gone, so the cached dominator tree has to have
+  // been invalidated.  Debug builds verify that when it's recomputed here.
+  EXPECT_EQ(func.domTree().immediateDominator(cfg.entry_block), nullptr);
 
-  auto s = HIRPrinter().ToString(cfg);
-  auto expected = R"(bb 0 {
+  auto s = HIRPrinter().toString(cfg);
+  auto expected = R"(bb 3 {
   Return v0
 }
 )";
   ASSERT_EQ(s, expected);
 }
 
-TEST(RemoveTrampolineBlocksTest, ReducesLoops) {
-  CFG cfg;
-  Environment env;
+TEST(MergeLinearBlocksTest, MergesChainsInsideLoops) {
+  Function func;
+  auto& cfg = func.cfg;
+  auto& env = func.env;
 
   // This constructs a CFG that look like
   //
@@ -294,54 +307,56 @@ TEST(RemoveTrampolineBlocksTest, ReducesLoops) {
   //                                 |       |
   //                                 +-------+
   //
-  // the loop of trampoline blocks on the right should be
-  // reduced to a single block that loops back on itself:
+  // Blocks 2, 3, and 4 form a linear chain and collapse into a single block
+  // that loops back on itself.  Block 1 is a trampoline into that loop and
+  // gets spliced out:
   //
   //              entry
   //                |
   //   +--- true ---+--- false ---+
   //   |                          |
-  //  exit                        4--+
+  //  exit                        2--+
   //                              ^  |
   //                              |  |
   //                              +--+
-  Register* v0 = env.AllocateRegister();
-  auto exit_block = cfg.AllocateBlock();
+  Register* v0 = env.allocateRegister();
+  auto exit_block = cfg.allocateBlock();
   exit_block->append<Return>(v0);
 
-  auto t1 = cfg.AllocateBlock();
-  auto t2 = cfg.AllocateBlock();
-  auto t3 = cfg.AllocateBlock();
-  auto t4 = cfg.AllocateBlock();
+  auto t1 = cfg.allocateBlock();
+  auto t2 = cfg.allocateBlock();
+  auto t3 = cfg.allocateBlock();
+  auto t4 = cfg.allocateBlock();
   t1->append<Branch>(t2);
   t2->append<Branch>(t3);
   t3->append<Branch>(t4);
   t4->append<Branch>(t2);
 
-  cfg.entry_block = cfg.AllocateBlock();
+  cfg.entry_block = cfg.allocateBlock();
   cfg.entry_block->append<CondBranch>(v0, exit_block, t1);
 
-  removeTrampolineBlocks(&cfg);
+  EXPECT_TRUE(mergeLinearBlocks(func));
 
-  auto after = HIRPrinter().ToString(cfg);
+  auto after = HIRPrinter().toString(cfg);
   const char* expected = R"(bb 5 {
-  CondBranch<0, 4> v0
+  CondBranch<0, 2> v0
 }
 
 bb 0 (preds 5) {
   Return v0
 }
 
-bb 4 (preds 4, 5) {
-  Branch<4>
+bb 2 (preds 2, 5) {
+  Branch<2>
 }
 )";
   ASSERT_EQ(after, expected);
 }
 
-TEST(RemoveTrampolineBlocksTest, UpdatesAllPredecessors) {
-  CFG cfg;
-  Environment env;
+TEST(MergeLinearBlocksTest, UpdatesAllPredecessors) {
+  Function func;
+  auto& cfg = func.cfg;
+  auto& env = func.env;
 
   // This constructs a CFG that look like
   //
@@ -359,43 +374,246 @@ TEST(RemoveTrampolineBlocksTest, UpdatesAllPredecessors) {
   //                v
   //               exit
   //
-  // After removing trampoline blocks this should look like
+  // The 2 -> 1 -> exit chain collapses into block 2, and blocks 3 and 4 are
+  // trampolines into it.  Splicing them out leaves entry with both sides of
+  // its CondBranch going to block 2, so that folds down to a single block:
   //
   //              entry
-  //                |
-  //                v
-  //               exit
-  Register* v0 = env.AllocateRegister();
-  auto exit_block = cfg.AllocateBlock();
+  Register* v0 = env.allocateRegister();
+  auto exit_block = cfg.allocateBlock();
   exit_block->append<Return>(v0);
 
-  auto t1 = cfg.AllocateBlock();
+  auto t1 = cfg.allocateBlock();
   t1->append<Branch>(exit_block);
 
-  auto t2 = cfg.AllocateBlock();
+  auto t2 = cfg.allocateBlock();
   t2->append<Branch>(t1);
 
-  auto t3 = cfg.AllocateBlock();
+  auto t3 = cfg.allocateBlock();
   t3->append<Branch>(t2);
 
-  auto t4 = cfg.AllocateBlock();
+  auto t4 = cfg.allocateBlock();
   t4->append<Branch>(t2);
 
-  cfg.entry_block = cfg.AllocateBlock();
+  cfg.entry_block = cfg.allocateBlock();
   cfg.entry_block->append<CondBranch>(v0, t4, t3);
 
-  removeTrampolineBlocks(&cfg);
+  EXPECT_TRUE(mergeLinearBlocks(func));
 
-  auto after = HIRPrinter().ToString(cfg);
+  auto after = HIRPrinter().toString(cfg);
   const char* expected = R"(bb 5 {
-  Branch<0>
-}
-
-bb 0 (preds 5) {
   Return v0
 }
 )";
   ASSERT_EQ(after, expected);
+}
+
+TEST(MergeLinearBlocksTest, MergesNonEmptyBlocks) {
+  const char* hir = R"(
+fun foo {
+  bb 0 {
+    v0 = LoadConst<NoneType>
+    Branch<1>
+  }
+
+  bb 1 {
+    v1 = LoadConst<NoneType>
+    Branch<2>
+  }
+
+  bb 2 {
+    Return v1
+  }
+}
+)";
+
+  std::unique_ptr<Function> func = HIRParser{}.parseHIR(hir);
+  ASSERT_NE(func, nullptr);
+
+  EXPECT_TRUE(mergeLinearBlocks(*func));
+
+  const char* expected = R"(fun foo {
+  bb 0 {
+    v0 = LoadConst<NoneType>
+    v1 = LoadConst<NoneType>
+    Return v1
+  }
+}
+)";
+  EXPECT_EQ(HIRPrinter{}.toString(*func), expected);
+}
+
+TEST(MergeLinearBlocksTest, CollapsesTrivialPhis) {
+  const char* hir = R"(
+fun foo {
+  bb 0 {
+    v0 = LoadConst<NoneType>
+    Branch<1>
+  }
+
+  bb 1 {
+    v1 = Phi<0> v0
+    Return v1
+  }
+}
+)";
+
+  std::unique_ptr<Function> func = HIRParser{}.parseHIR(hir);
+  ASSERT_NE(func, nullptr);
+
+  EXPECT_TRUE(mergeLinearBlocks(*func));
+
+  // Phis can't live in the middle of a block, so the trivial Phi has to become
+  // an Assign.
+  const char* expected = R"(fun foo {
+  bb 0 {
+    v0 = LoadConst<NoneType>
+    v1 = Assign v0
+    Return v1
+  }
+}
+)";
+  EXPECT_EQ(HIRPrinter{}.toString(*func), expected);
+}
+
+TEST(MergeLinearBlocksTest, LeavesEntryBlockAlone) {
+  // The entry block has a single predecessor here, but its instructions have
+  // to run first so it can't be absorbed into that predecessor.
+  const char* hir = R"(
+fun foo {
+  bb 0 {
+    v0 = LoadConst<NoneType>
+    CondBranch<1, 2> v0
+  }
+
+  bb 1 {
+    v1 = LoadConst<NoneType>
+    Branch<0>
+  }
+
+  bb 2 {
+    Return v0
+  }
+}
+)";
+
+  std::unique_ptr<Function> func = HIRParser{}.parseHIR(hir);
+  ASSERT_NE(func, nullptr);
+  BasicBlock* entry = func->cfg.entry_block;
+
+  EXPECT_FALSE(mergeLinearBlocks(*func));
+  EXPECT_EQ(func->cfg.entry_block, entry);
+}
+
+TEST(MergeLinearBlocksTest, SplicesOutTrampolines) {
+  // Block 1 can't absorb block 3 because block 2 jumps to it as well, but it
+  // does nothing besides jump there so it can be spliced out.
+  const char* hir = R"(
+fun foo {
+  bb 0 {
+    v0 = LoadConst<NoneType>
+    CondBranch<1, 2> v0
+  }
+
+  bb 1 {
+    Branch<3>
+  }
+
+  bb 2 {
+    v1 = LoadConst<NoneType>
+    Branch<3>
+  }
+
+  bb 3 {
+    Return v0
+  }
+}
+)";
+
+  std::unique_ptr<Function> func = HIRParser{}.parseHIR(hir);
+  ASSERT_NE(func, nullptr);
+
+  EXPECT_TRUE(mergeLinearBlocks(*func));
+
+  const char* expected = R"(fun foo {
+  bb 0 {
+    v0 = LoadConst<NoneType>
+    CondBranch<3, 2> v0
+  }
+
+  bb 2 (preds 0) {
+    v1 = LoadConst<NoneType>
+    Branch<3>
+  }
+
+  bb 3 (preds 0, 2) {
+    Return v0
+  }
+}
+)";
+  EXPECT_EQ(HIRPrinter{}.toString(*func), expected);
+}
+
+TEST(MergeLinearBlocksTest, KeepsTrampolinesThatFeedPhis) {
+  // Block 1 has to stay, it's what tells the Phi in block 3 to pick v1.
+  const char* hir = R"(
+fun foo {
+  bb 0 {
+    v0 = LoadConst<NoneType>
+    CondBranch<1, 2> v0
+  }
+
+  bb 1 {
+    Branch<3>
+  }
+
+  bb 2 {
+    v1 = LoadConst<NoneType>
+    Branch<3>
+  }
+
+  bb 3 {
+    v2 = Phi<1, 2> v0 v1
+    Return v2
+  }
+}
+)";
+
+  std::unique_ptr<Function> func = HIRParser{}.parseHIR(hir);
+  ASSERT_NE(func, nullptr);
+
+  EXPECT_FALSE(mergeLinearBlocks(*func));
+}
+
+TEST(MergeLinearBlocksTest, MergesThroughRedundantCondBranches) {
+  // Both sides of the CondBranch go to the same block, which makes the two
+  // blocks linear once the branch is folded.
+  const char* hir = R"(
+fun foo {
+  bb 0 {
+    v0 = LoadConst<NoneType>
+    CondBranch<1, 1> v0
+  }
+
+  bb 1 {
+    Return v0
+  }
+}
+)";
+
+  std::unique_ptr<Function> func = HIRParser{}.parseHIR(hir);
+  ASSERT_NE(func, nullptr);
+
+  EXPECT_TRUE(mergeLinearBlocks(*func));
+
+  const char* expected = R"(fun foo {
+  bb 0 {
+    v0 = LoadConst<NoneType>
+    Return v0
+  }
+}
+)";
+  EXPECT_EQ(HIRPrinter{}.toString(*func), expected);
 }
 
 TEST(RemoveUnreachableBlocks, RemovesTransitivelyUnreachableBlocks) {
@@ -437,7 +655,7 @@ fun foo {
 }
 )";
 
-  std::unique_ptr<Function> func = HIRParser{}.ParseHIR(hir);
+  std::unique_ptr<Function> func = HIRParser{}.parseHIR(hir);
   ASSERT_NE(func, nullptr);
 
   removeUnreachableBlocks(*func);
@@ -453,7 +671,7 @@ fun foo {
   }
 }
 )";
-  EXPECT_EQ(HIRPrinter{}.ToString(*func), expected);
+  EXPECT_EQ(HIRPrinter{}.toString(*func), expected);
 }
 
 TEST(RemoveUnreachableBlocks, FixesPhisOfReachableBlocks) {
@@ -481,7 +699,7 @@ fun foo {
 }
 )";
 
-  std::unique_ptr<Function> func = HIRParser{}.ParseHIR(hir);
+  std::unique_ptr<Function> func = HIRParser{}.parseHIR(hir);
   ASSERT_NE(func, nullptr);
 
   removeUnreachableBlocks(*func);
@@ -503,7 +721,7 @@ fun foo {
   }
 }
 )";
-  EXPECT_EQ(HIRPrinter{}.ToString(*func), expected);
+  EXPECT_EQ(HIRPrinter{}.toString(*func), expected);
 }
 
 template <class T>
@@ -574,11 +792,40 @@ TEST_F(HIRBuildTest, GetLength) {
   uint8_t bc[] = {LOAD_FAST, 0, GET_LEN, 0, RETURN_VALUE, 0};
   std::unique_ptr<Function> irfunc = build_test(bc, {Py_None});
 
-#if PY_VERSION_HEX >= 0x030C0000
+#if PY_VERSION_HEX >= 0x030E0000 && defined(Py_GIL_DISABLED)
   const char* expected = R"(fun jittestmodule:funcname {
   bb 0 {
     v0 = LoadArg<0; "param0">
     v1 = LoadCurrentFunc
+    LoadFrame
+    v2 = TagIfDeferred v0
+    Snapshot {
+      CurInstrOffset 0
+      Locals<1> v2
+    }
+    v3 = GetLength v2 {
+      FrameState {
+        CurInstrOffset 2
+        Locals<1> v2
+        Stack<1> v2
+      }
+    }
+    Snapshot {
+      CurInstrOffset 4
+      Locals<1> v2
+      Stack<2> v2 v3
+    }
+    v4 = Assign v2
+    Return v3
+  }
+}
+)";
+#else
+  const char* expected = R"(fun jittestmodule:funcname {
+  bb 0 {
+    v0 = LoadArg<0; "param0">
+    v1 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<1> v0
@@ -595,46 +842,13 @@ TEST_F(HIRBuildTest, GetLength) {
       Locals<1> v0
       Stack<2> v0 v2
     }
-    v3 = Assign v2
-    v2 = Assign v0
-    Return v3
-  }
-}
-)";
-#else
-  const char* expected = R"(fun jittestmodule:funcname {
-  bb 0 {
-    v0 = LoadArg<0; "param0">
-    Snapshot {
-      CurInstrOffset 0
-      Locals<1> v0
-    }
-    v0 = CheckVar<"param0"> v0 {
-      FrameState {
-        CurInstrOffset 0
-        Locals<1> v0
-      }
-    }
-    v1 = GetLength v0 {
-      FrameState {
-        CurInstrOffset 2
-        Locals<1> v0
-        Stack<1> v0
-      }
-    }
-    Snapshot {
-      CurInstrOffset 4
-      Locals<1> v0
-      Stack<2> v0 v1
-    }
-    v2 = Assign v1
-    v1 = Assign v0
+    v3 = Assign v0
     Return v2
   }
 }
 )";
 #endif
-  EXPECT_EQ(fullPrinter().ToString(*(irfunc)), expected);
+  EXPECT_EQ(fullPrinter().toString(*(irfunc)), expected);
 }
 
 #if PY_VERSION_HEX < 0x030E0000
@@ -674,10 +888,10 @@ TEST_F(HIRBuildTest, LoadAssertionError) {
 
   std::unique_ptr<Function> irfunc(buildHIR(func));
 
-#if PY_VERSION_HEX >= 0x030C0000
   const char* expected = R"(fun jittestmodule:funcname {
   bb 0 {
     v0 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
     }
@@ -686,19 +900,7 @@ TEST_F(HIRBuildTest, LoadAssertionError) {
   }
 }
 )";
-#else
-  const char* expected = R"(fun jittestmodule:funcname {
-  bb 0 {
-    Snapshot {
-      CurInstrOffset 0
-    }
-    v0 = LoadConst<ImmortalTypeExact[AssertionError:obj]>
-    Return v0
-  }
-}
-)";
-#endif
-  EXPECT_EQ(fullPrinter().ToString(*(irfunc)), expected);
+  EXPECT_EQ(fullPrinter().toString(*(irfunc)), expected);
 }
 #endif
 
@@ -720,13 +922,8 @@ TEST_F(HIRBuildTest, SetUpdate) {
       SET_UPDATE,
       1,
 
-#if PY_VERSION_HEX < 0x030B0000
-      ROT_TWO,
-      0,
-#else
       SWAP,
       2,
-#endif
       POP_TOP,
       0,
       RETURN_VALUE,
@@ -768,13 +965,45 @@ TEST_F(HIRBuildTest, SetUpdate) {
 
   std::unique_ptr<Function> irfunc(buildHIR(func));
 
-#if PY_VERSION_HEX >= 0x030C0000
+#if PY_VERSION_HEX >= 0x030E0000 && defined(Py_GIL_DISABLED)
   const char* expected = R"(fun jittestmodule:funcname {
   bb 0 {
     v0 = LoadArg<0; "param0">
     v1 = LoadArg<1; "param1">
     v2 = LoadArg<2; "param2">
     v3 = LoadCurrentFunc
+    LoadFrame
+    v4 = TagIfDeferred v0
+    v5 = TagIfDeferred v1
+    v6 = TagIfDeferred v2
+    Snapshot {
+      CurInstrOffset 0
+      Locals<3> v4 v5 v6
+    }
+    v7 = SetUpdate v5 v6 {
+      FrameState {
+        CurInstrOffset 6
+        Locals<3> v4 v5 v6
+        Stack<2> v4 v5
+      }
+    }
+    Snapshot {
+      CurInstrOffset 8
+      Locals<3> v4 v5 v6
+      Stack<2> v4 v5
+    }
+    Return v5
+  }
+}
+)";
+#else
+  const char* expected = R"(fun jittestmodule:funcname {
+  bb 0 {
+    v0 = LoadArg<0; "param0">
+    v1 = LoadArg<1; "param1">
+    v2 = LoadArg<2; "param2">
+    v3 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<3> v0 v1 v2
@@ -795,54 +1024,8 @@ TEST_F(HIRBuildTest, SetUpdate) {
   }
 }
 )";
-#else
-  const char* expected = R"(fun jittestmodule:funcname {
-  bb 0 {
-    v0 = LoadArg<0; "param0">
-    v1 = LoadArg<1; "param1">
-    v2 = LoadArg<2; "param2">
-    Snapshot {
-      CurInstrOffset 0
-      Locals<3> v0 v1 v2
-    }
-    v0 = CheckVar<"param0"> v0 {
-      FrameState {
-        CurInstrOffset 0
-        Locals<3> v0 v1 v2
-      }
-    }
-    v1 = CheckVar<"param1"> v1 {
-      FrameState {
-        CurInstrOffset 2
-        Locals<3> v0 v1 v2
-        Stack<1> v0
-      }
-    }
-    v2 = CheckVar<"param2"> v2 {
-      FrameState {
-        CurInstrOffset 4
-        Locals<3> v0 v1 v2
-        Stack<2> v0 v1
-      }
-    }
-    v3 = SetUpdate v1 v2 {
-      FrameState {
-        CurInstrOffset 6
-        Locals<3> v0 v1 v2
-        Stack<2> v0 v1
-      }
-    }
-    Snapshot {
-      CurInstrOffset 8
-      Locals<3> v0 v1 v2
-      Stack<2> v0 v1
-    }
-    Return v1
-  }
-}
-)";
 #endif
-  EXPECT_EQ(fullPrinter().ToString(*(irfunc)), expected);
+  EXPECT_EQ(fullPrinter().toString(*(irfunc)), expected);
 }
 
 class EdgeCaseTest : public RuntimeTest {};
@@ -863,17 +1046,12 @@ TEST_F(EdgeCaseTest, IgnoreUnreachableLoops) {
       0,
       RETURN_VALUE,
       0,
-#if PY_VERSION_HEX < 0x030C0000
-      JUMP_ABSOLUTE,
-      4,
-#else
       JUMP_BACKWARD,
       2,
 #if PY_VERSION_HEX >= 0x030E0000
       // inline-cache slot for 3.14+
       0,
       0
-#endif
 #endif
   };
   Ref<> bytecode = toByteString(bc);
@@ -909,10 +1087,10 @@ TEST_F(EdgeCaseTest, IgnoreUnreachableLoops) {
   ASSERT_NE(func.get(), nullptr);
 
   std::unique_ptr<Function> irfunc(buildHIR(func));
-#if PY_VERSION_HEX >= 0x030C0000
   const char* expected = R"(fun jittestmodule:funcname {
   bb 0 {
     v0 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
     }
@@ -921,19 +1099,7 @@ TEST_F(EdgeCaseTest, IgnoreUnreachableLoops) {
   }
 }
 )";
-#else
-  const char* expected = R"(fun jittestmodule:funcname {
-  bb 0 {
-    Snapshot {
-      CurInstrOffset 0
-    }
-    v0 = LoadConst<NoneType>
-    Return v0
-  }
-}
-)";
-#endif
-  EXPECT_EQ(fullPrinter().ToString(*(irfunc)), expected);
+  EXPECT_EQ(fullPrinter().toString(*(irfunc)), expected);
 }
 
 TEST_F(EdgeCaseTest, JumpBackwardNoInterrupt) {
@@ -952,13 +1118,8 @@ TEST_F(EdgeCaseTest, JumpBackwardNoInterrupt) {
       0,
       RETURN_VALUE,
       0,
-#if PY_VERSION_HEX < 0x030C0000
-      JUMP_ABSOLUTE,
-      4,
-#else
       JUMP_BACKWARD_NO_INTERRUPT,
       2,
-#endif
   };
   Ref<> bytecode = toByteString(bc);
   ASSERT_NE(bytecode.get(), nullptr);
@@ -994,10 +1155,10 @@ TEST_F(EdgeCaseTest, JumpBackwardNoInterrupt) {
 
   std::unique_ptr<Function> irfunc(buildHIR(func));
   ASSERT_NE(irfunc.get(), nullptr);
-#if PY_VERSION_HEX >= 0x030C0000
   const char* expected = R"(fun jittestmodule:funcname {
   bb 0 {
     v0 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
     }
@@ -1006,19 +1167,7 @@ TEST_F(EdgeCaseTest, JumpBackwardNoInterrupt) {
   }
 }
 )";
-#else
-  const char* expected = R"(fun jittestmodule:funcname {
-  bb 0 {
-    Snapshot {
-      CurInstrOffset 0
-    }
-    v0 = LoadConst<NoneType>
-    Return v0
-  }
-}
-)";
-#endif
-  EXPECT_EQ(fullPrinter().ToString(*(irfunc)), expected);
+  EXPECT_EQ(fullPrinter().toString(*(irfunc)), expected);
 }
 
 class CppInlinerTest : public RuntimeTest {};
@@ -1055,15 +1204,76 @@ def f():
   EXPECT_TRUE(isIntEquals(call_result2, 2));
 }
 
+class LoadGlobalGuardTest : public RuntimeTest {
+ public:
+  std::unordered_map<Opcode, int> opcodeCounts(const Function& irfunc) {
+    std::unordered_map<Opcode, int> counts;
+    for (BasicBlock* block :
+         irfunc.cfg.getPostOrderTraversal(irfunc.cfg.entry_block)) {
+      for (Instr& instr : *block) {
+        counts[instr.opcode()]++;
+      }
+    }
+    return counts;
+  }
+};
+
+// A global holding a function is pinned to its exact value, because that is
+// what lets the compiler inline through it.
+TEST_F(LoadGlobalGuardTest, FunctionGlobalIsPinnedToItsValue) {
+  const char* pycode = R"(
+def callee():
+  return 1
+
+def test():
+  return callee()
+)";
+  Ref<PyFunctionObject> pyfunc(compileAndGet(pycode, "test"));
+  ASSERT_NE(pyfunc, nullptr);
+  auto irfunc = buildHIR(pyfunc);
+  ASSERT_NE(irfunc, nullptr);
+
+  auto counts = opcodeCounts(*irfunc);
+  EXPECT_EQ(counts[Opcode::kLoadGlobalCached], 1);
+  EXPECT_EQ(counts[Opcode::kGuardIs], 1);
+  EXPECT_EQ(counts[Opcode::kGuardType], 0);
+  EXPECT_EQ(counts[Opcode::kGuard], 0);
+}
+
+// A global holding data is not pinned: rebinding it is ordinary Python and
+// must not deopt. Its type is still guarded, so type-driven rewrites keep
+// working.
+TEST_F(LoadGlobalGuardTest, DataGlobalGuardsTypeNotValue) {
+  const char* pycode = R"(
+FLAG = False
+
+def test():
+  return FLAG
+)";
+  Ref<PyFunctionObject> pyfunc(compileAndGet(pycode, "test"));
+  ASSERT_NE(pyfunc, nullptr);
+  auto irfunc = buildHIR(pyfunc);
+  ASSERT_NE(irfunc, nullptr);
+
+  auto counts = opcodeCounts(*irfunc);
+  EXPECT_EQ(counts[Opcode::kLoadGlobalCached], 1);
+  EXPECT_EQ(counts[Opcode::kGuardIs], 0);
+  // Guard, not CheckVar: an unbound global must deopt so the interpreter
+  // raises NameError rather than UnboundLocalError.
+  EXPECT_EQ(counts[Opcode::kGuard], 1);
+  EXPECT_EQ(counts[Opcode::kCheckVar], 0);
+  EXPECT_EQ(counts[Opcode::kGuardType], 1);
+}
+
 class HIRCloneTest : public RuntimeTest {};
 
 TEST_F(HIRCloneTest, CanCloneInstrs) {
   Environment env;
-  auto v0 = env.AllocateRegister();
+  auto v0 = env.allocateRegister();
   std::unique_ptr<Instr> load_const(
       LoadConst::create(v0, Type::fromObject(Py_False)));
   std::unique_ptr<Instr> new_load(load_const->clone());
-  ASSERT_TRUE(new_load->IsLoadConst());
+  ASSERT_TRUE(new_load->isLoadConst());
   EXPECT_TRUE(
       static_cast<LoadConst*>(new_load.get())->type() ==
       static_cast<LoadConst*>(load_const.get())->type());
@@ -1075,13 +1285,13 @@ TEST_F(HIRCloneTest, CanCloneInstrs) {
 TEST_F(HIRCloneTest, CanCloneBranches) {
   Environment env;
   CFG cfg;
-  BasicBlock* from = cfg.AllocateBlock();
-  BasicBlock* to = cfg.AllocateBlock();
+  BasicBlock* from = cfg.allocateBlock();
+  BasicBlock* to = cfg.allocateBlock();
   cfg.entry_block = from;
   from->append<Branch>(to);
-  Instr* branch = from->GetTerminator();
+  Instr* branch = from->getTerminator();
   std::unique_ptr<Instr> new_branch(branch->clone());
-  ASSERT_TRUE(new_branch->IsBranch());
+  ASSERT_TRUE(new_branch->isBranch());
   EXPECT_EQ(branch->block(), from);
   EXPECT_EQ(new_branch->block(), nullptr);
 
@@ -1091,21 +1301,21 @@ TEST_F(HIRCloneTest, CanCloneBranches) {
   EXPECT_NE(orig_edge, dup_edge);
 
   EXPECT_EQ(orig_edge->from(), dup_edge->from());
-  EXPECT_TRUE(from->out_edges().contains(orig_edge));
-  EXPECT_TRUE(from->out_edges().contains(dup_edge));
+  EXPECT_TRUE(from->outEdges().contains(orig_edge));
+  EXPECT_TRUE(from->outEdges().contains(dup_edge));
 
   EXPECT_EQ(orig_edge->to(), dup_edge->to());
-  EXPECT_TRUE(to->in_edges().contains(orig_edge));
-  EXPECT_TRUE(to->in_edges().contains(dup_edge));
+  EXPECT_TRUE(to->inEdges().contains(orig_edge));
+  EXPECT_TRUE(to->inEdges().contains(dup_edge));
 }
 
 TEST_F(HIRCloneTest, CanCloneBorrwedRefFields) {
   Environment env;
-  auto v0 = env.AllocateRegister();
+  auto v0 = env.allocateRegister();
   auto name = Ref<>::steal(PyUnicode_FromString("test"));
   std::unique_ptr<Instr> check(CheckVar::create(v0, v0, name));
   std::unique_ptr<Instr> new_check(check->clone());
-  ASSERT_TRUE(new_check->IsCheckVar());
+  ASSERT_TRUE(new_check->isCheckVar());
   BorrowedRef<> orig_name = static_cast<CheckVar*>(check.get())->name();
   BorrowedRef<> dup_name = static_cast<CheckVar*>(new_check.get())->name();
   EXPECT_EQ(orig_name, dup_name);
@@ -1113,34 +1323,34 @@ TEST_F(HIRCloneTest, CanCloneBorrwedRefFields) {
 
 TEST_F(HIRCloneTest, CanCloneVariadicOpInstr) {
   Environment env;
-  auto out = env.AllocateRegister();
-  auto v0 = env.AllocateRegister();
+  auto out = env.allocateRegister();
+  auto v0 = env.allocateRegister();
 
   // Create a CallStatic with no arguments
   std::unique_ptr<Instr> call_static_no_args(
       CallStatic::create(0, out, nullptr, Type::fromObject(Py_None)));
   std::unique_ptr<Instr> new_call_static_no_args(call_static_no_args->clone());
   ASSERT_NE(call_static_no_args.get(), new_call_static_no_args.get());
-  ASSERT_TRUE(new_call_static_no_args->IsCallStatic());
+  ASSERT_TRUE(new_call_static_no_args->isCallStatic());
 
   CallStatic* orig_call = static_cast<CallStatic*>(call_static_no_args.get());
   CallStatic* dup_call =
       static_cast<CallStatic*>(new_call_static_no_args.get());
   EXPECT_EQ(orig_call->addr(), dup_call->addr());
-  EXPECT_EQ(orig_call->ret_type(), dup_call->ret_type());
+  EXPECT_EQ(orig_call->retType(), dup_call->retType());
 
   // Create a CallStatic with one argument
   std::unique_ptr<Instr> call_static_one_arg(
       CallStatic::create(1, out, nullptr, Type::fromObject(Py_None), v0));
   std::unique_ptr<Instr> new_call_static_one_arg(call_static_one_arg->clone());
   ASSERT_NE(call_static_one_arg.get(), new_call_static_one_arg.get());
-  ASSERT_TRUE(new_call_static_one_arg->IsCallStatic());
+  ASSERT_TRUE(new_call_static_one_arg->isCallStatic());
 
   orig_call = static_cast<CallStatic*>(call_static_one_arg.get());
   dup_call = static_cast<CallStatic*>(new_call_static_one_arg.get());
   EXPECT_EQ(orig_call->addr(), dup_call->addr());
-  EXPECT_EQ(orig_call->ret_type(), dup_call->ret_type());
-  EXPECT_EQ(orig_call->GetOperand(0), dup_call->GetOperand(0));
+  EXPECT_EQ(orig_call->retType(), dup_call->retType());
+  EXPECT_EQ(orig_call->getOperand(0), dup_call->getOperand(0));
 
   // Create a CallStatic with two arguments
   std::unique_ptr<Instr> call_static_two_args(
@@ -1148,14 +1358,14 @@ TEST_F(HIRCloneTest, CanCloneVariadicOpInstr) {
   std::unique_ptr<Instr> new_call_static_two_args(
       call_static_two_args->clone());
   ASSERT_NE(call_static_two_args.get(), new_call_static_two_args.get());
-  ASSERT_TRUE(new_call_static_two_args->IsCallStatic());
+  ASSERT_TRUE(new_call_static_two_args->isCallStatic());
 
   orig_call = static_cast<CallStatic*>(call_static_two_args.get());
   dup_call = static_cast<CallStatic*>(new_call_static_two_args.get());
   EXPECT_EQ(orig_call->addr(), dup_call->addr());
-  EXPECT_EQ(orig_call->ret_type(), dup_call->ret_type());
-  EXPECT_EQ(orig_call->GetOperand(0), dup_call->GetOperand(0));
-  EXPECT_EQ(orig_call->GetOperand(1), dup_call->GetOperand(1));
+  EXPECT_EQ(orig_call->retType(), dup_call->retType());
+  EXPECT_EQ(orig_call->getOperand(0), dup_call->getOperand(0));
+  EXPECT_EQ(orig_call->getOperand(1), dup_call->getOperand(1));
 }
 
 TEST_F(HIRCloneTest, CanCloneDeoptBase) {
@@ -1182,11 +1392,11 @@ TEST_F(HIRCloneTest, CanCloneDeoptBase) {
   }
 }
 )";
-  auto irfunc = HIRParser().ParseHIR(hir);
+  auto irfunc = HIRParser().parseHIR(hir);
   ASSERT_NE(irfunc, nullptr);
   ASSERT_TRUE(checkFunc(*irfunc, std::cout));
   reflowTypes(*irfunc);
-  RefcountInsertion().Run(*irfunc);
+  RefcountInsertion().run(*irfunc);
   const char* expected = R"(fun jittestmodule:test {
   bb 0 {
     v1:ImmortalLongExact[1] = LoadConst<ImmortalLongExact[1]>
@@ -1201,19 +1411,19 @@ TEST_F(HIRCloneTest, CanCloneDeoptBase) {
   }
 }
 )";
-  ASSERT_EQ(fullPrinter().ToString(*irfunc), expected);
+  ASSERT_EQ(fullPrinter().toString(*irfunc), expected);
   BasicBlock* bb0 = irfunc->cfg.entry_block;
   Instr& load_global = *(++(bb0->rbegin()));
-  ASSERT_TRUE(load_global.IsLoadGlobal());
+  ASSERT_TRUE(load_global.isLoadGlobal());
 
   std::unique_ptr<Instr> dup_load(load_global.clone());
-  ASSERT_TRUE(dup_load->IsLoadGlobal());
+  ASSERT_TRUE(dup_load->isLoadGlobal());
 
   LoadGlobal* orig = static_cast<LoadGlobal*>(&load_global);
   LoadGlobal* dup = static_cast<LoadGlobal*>(dup_load.get());
 
   EXPECT_EQ(orig->output(), dup->output());
-  EXPECT_EQ(orig->name_idx(), dup->name_idx());
+  EXPECT_EQ(orig->nameIdx(), dup->nameIdx());
 
   FrameState* orig_fs = orig->frameState();
   FrameState* dup_fs = dup->frameState();
@@ -1222,122 +1432,58 @@ TEST_F(HIRCloneTest, CanCloneDeoptBase) {
   EXPECT_TRUE(*orig_fs == *dup_fs);
 
   // Should have equal contents
-  EXPECT_TRUE(orig->live_regs() == dup->live_regs());
+  EXPECT_TRUE(orig->liveRegs() == dup->liveRegs());
 }
-
-// ROT_N was removed in 3.11.
-#if PY_VERSION_HEX < 0x030B0000
-TEST_F(HIRBuildTest, ROT_N) {
-  uint8_t bc[] = {
-      LOAD_FAST,
-      0,
-      LOAD_FAST,
-      1,
-      LOAD_FAST,
-      2,
-      LOAD_FAST,
-      3,
-      ROT_N,
-      3,
-      BINARY_OR,
-      0,
-      BINARY_OR,
-      0,
-      BINARY_OR,
-      0,
-      RETURN_VALUE,
-      0};
-
-  std::unique_ptr<Function> irfunc =
-      build_test(bc, {Py_None, Py_None, Py_None, Py_None});
-
-  const char* expected = R"(fun jittestmodule:funcname {
-  bb 0 {
-    v0 = LoadArg<0; "param0">
-    Snapshot {
-      CurInstrOffset 0
-      Locals<4> v0 v1 v2 v3
-    }
-    v0 = CheckVar<"param0"> v0 {
-      FrameState {
-        CurInstrOffset 0
-        Locals<4> v0 v1 v2 v3
-      }
-    }
-    v1 = CheckVar<"param1"> v1 {
-      FrameState {
-        CurInstrOffset 2
-        Locals<4> v0 v1 v2 v3
-        Stack<1> v0
-      }
-    }
-    v2 = CheckVar<"param2"> v2 {
-      FrameState {
-        CurInstrOffset 4
-        Locals<4> v0 v1 v2 v3
-        Stack<2> v0 v1
-      }
-    }
-    v3 = CheckVar<"param3"> v3 {
-      FrameState {
-        CurInstrOffset 6
-        Locals<4> v0 v1 v2 v3
-        Stack<3> v0 v1 v2
-      }
-    }
-    v4 = BinaryOp<Or> v1 v2 {
-      FrameState {
-        CurInstrOffset 10
-        Locals<4> v0 v1 v2 v3
-        Stack<2> v0 v3
-      }
-    }
-    Snapshot {
-      CurInstrOffset 12
-      Locals<4> v0 v1 v2 v3
-      Stack<3> v0 v3 v4
-    }
-    v5 = BinaryOp<Or> v3 v4 {
-      FrameState {
-        CurInstrOffset 12
-        Locals<4> v0 v1 v2 v3
-        Stack<1> v0
-      }
-    }
-    Snapshot {
-      CurInstrOffset 14
-      Locals<4> v0 v1 v2 v3
-      Stack<2> v0 v5
-    }
-    v6 = BinaryOp<Or> v0 v5 {
-      FrameState {
-        CurInstrOffset 14
-        Locals<4> v0 v1 v2 v3
-      }
-    }
-    Snapshot {
-      CurInstrOffset 16
-      Locals<4> v0 v1 v2 v3
-      Stack<1> v6
-    }
-    Return v6
-  }
-}
-)";
-
-  EXPECT_EQ(fullPrinter().ToString(*(irfunc)), expected);
-}
-#endif
 
 TEST_F(HIRBuildTest, MatchMapping) {
   uint8_t bc[] = {LOAD_FAST, 0, MATCH_MAPPING, 0, RETURN_VALUE, 0};
   std::unique_ptr<Function> irfunc = build_test(bc, {Py_None});
 
-#if PY_VERSION_HEX >= 0x030C0000
+#if PY_VERSION_HEX >= 0x030E0000 && defined(Py_GIL_DISABLED)
   const char* expected = R"(fun jittestmodule:funcname {
   bb 0 {
     v0 = LoadArg<0; "param0">
     v1 = LoadCurrentFunc
+    LoadFrame
+    v2 = TagIfDeferred v0
+    Snapshot {
+      CurInstrOffset 0
+      Locals<1> v2
+    }
+    v3 = LoadField<ob_type@24, Type, borrowed> v2
+    v4 = LoadField<tp_flags@184, CUInt64, borrowed> v3
+    v5 = LoadConst<CUInt64[64]>
+    v6 = IntBinaryOp<And> v4 v5
+    CondBranch<1, 2> v6
+  }
+
+  bb 1 (preds 0) {
+    v7 = LoadConst<ImmortalBool[True]>
+    Branch<3>
+  }
+
+  bb 2 (preds 0) {
+    v7 = LoadConst<ImmortalBool[False]>
+    Branch<3>
+  }
+
+  bb 3 (preds 1, 2) {
+    Snapshot {
+      CurInstrOffset 4
+      Locals<1> v2
+      Stack<2> v2 v7
+    }
+    v8 = Assign v2
+    Return v7
+  }
+}
+)";
+#elif PY_VERSION_HEX >= 0x030E0000
+  const char* expected = R"(fun jittestmodule:funcname {
+  bb 0 {
+    v0 = LoadArg<0; "param0">
+    v1 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<1> v0
@@ -1365,39 +1511,35 @@ TEST_F(HIRBuildTest, MatchMapping) {
       Locals<1> v0
       Stack<2> v0 v6
     }
-    v2 = Assign v0
+    v7 = Assign v0
     Return v6
   }
 }
 )";
-#else
+#elif PY_VERSION_HEX >= 0x030C0000
   const char* expected = R"(fun jittestmodule:funcname {
   bb 0 {
     v0 = LoadArg<0; "param0">
+    v1 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<1> v0
     }
-    v0 = CheckVar<"param0"> v0 {
-      FrameState {
-        CurInstrOffset 0
-        Locals<1> v0
-      }
-    }
-    v1 = LoadField<ob_type@8, Type, borrowed> v0
-    v2 = LoadField<tp_flags@168, CUInt64, borrowed> v1
-    v3 = LoadConst<CUInt64[64]>
-    v4 = IntBinaryOp<And> v2 v3
-    CondBranch<1, 2> v4
+    v2 = LoadField<ob_type@8, Type, borrowed> v0
+    v3 = LoadField<tp_flags@168, CUInt64, borrowed> v2
+    v4 = LoadConst<CUInt64[64]>
+    v5 = IntBinaryOp<And> v3 v4
+    CondBranch<1, 2> v5
   }
 
   bb 1 (preds 0) {
-    v5 = LoadConst<ImmortalBool[True]>
+    v6 = LoadConst<ImmortalBool[True]>
     Branch<3>
   }
 
   bb 2 (preds 0) {
-    v5 = LoadConst<ImmortalBool[False]>
+    v6 = LoadConst<ImmortalBool[False]>
     Branch<3>
   }
 
@@ -1405,26 +1547,66 @@ TEST_F(HIRBuildTest, MatchMapping) {
     Snapshot {
       CurInstrOffset 4
       Locals<1> v0
-      Stack<2> v0 v5
+      Stack<2> v0 v6
     }
-    v1 = Assign v0
-    Return v5
+    v7 = Assign v0
+    Return v6
   }
 }
 )";
 #endif
-  EXPECT_EQ(fullPrinter().ToString(*(irfunc)), expected);
+  EXPECT_EQ(fullPrinter().toString(*(irfunc)), expected);
 }
 
 TEST_F(HIRBuildTest, MatchSequence) {
   uint8_t bc[] = {LOAD_FAST, 0, MATCH_SEQUENCE, 0, RETURN_VALUE, 0};
   std::unique_ptr<Function> irfunc = build_test(bc, {Py_None});
 
-#if PY_VERSION_HEX >= 0x030C0000
+#if PY_VERSION_HEX >= 0x030E0000 && defined(Py_GIL_DISABLED)
   const char* expected = R"(fun jittestmodule:funcname {
   bb 0 {
     v0 = LoadArg<0; "param0">
     v1 = LoadCurrentFunc
+    LoadFrame
+    v2 = TagIfDeferred v0
+    Snapshot {
+      CurInstrOffset 0
+      Locals<1> v2
+    }
+    v3 = LoadField<ob_type@24, Type, borrowed> v2
+    v4 = LoadField<tp_flags@184, CUInt64, borrowed> v3
+    v5 = LoadConst<CUInt64[32]>
+    v6 = IntBinaryOp<And> v4 v5
+    CondBranch<1, 2> v6
+  }
+
+  bb 1 (preds 0) {
+    v7 = LoadConst<ImmortalBool[True]>
+    Branch<3>
+  }
+
+  bb 2 (preds 0) {
+    v7 = LoadConst<ImmortalBool[False]>
+    Branch<3>
+  }
+
+  bb 3 (preds 1, 2) {
+    Snapshot {
+      CurInstrOffset 4
+      Locals<1> v2
+      Stack<2> v2 v7
+    }
+    v8 = Assign v2
+    Return v7
+  }
+}
+)";
+#elif PY_VERSION_HEX >= 0x030E0000
+  const char* expected = R"(fun jittestmodule:funcname {
+  bb 0 {
+    v0 = LoadArg<0; "param0">
+    v1 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<1> v0
@@ -1452,39 +1634,35 @@ TEST_F(HIRBuildTest, MatchSequence) {
       Locals<1> v0
       Stack<2> v0 v6
     }
-    v2 = Assign v0
+    v7 = Assign v0
     Return v6
   }
 }
 )";
-#else
+#elif PY_VERSION_HEX >= 0x030C0000
   const char* expected = R"(fun jittestmodule:funcname {
   bb 0 {
     v0 = LoadArg<0; "param0">
+    v1 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<1> v0
     }
-    v0 = CheckVar<"param0"> v0 {
-      FrameState {
-        CurInstrOffset 0
-        Locals<1> v0
-      }
-    }
-    v1 = LoadField<ob_type@8, Type, borrowed> v0
-    v2 = LoadField<tp_flags@168, CUInt64, borrowed> v1
-    v3 = LoadConst<CUInt64[32]>
-    v4 = IntBinaryOp<And> v2 v3
-    CondBranch<1, 2> v4
+    v2 = LoadField<ob_type@8, Type, borrowed> v0
+    v3 = LoadField<tp_flags@168, CUInt64, borrowed> v2
+    v4 = LoadConst<CUInt64[32]>
+    v5 = IntBinaryOp<And> v3 v4
+    CondBranch<1, 2> v5
   }
 
   bb 1 (preds 0) {
-    v5 = LoadConst<ImmortalBool[True]>
+    v6 = LoadConst<ImmortalBool[True]>
     Branch<3>
   }
 
   bb 2 (preds 0) {
-    v5 = LoadConst<ImmortalBool[False]>
+    v6 = LoadConst<ImmortalBool[False]>
     Branch<3>
   }
 
@@ -1492,26 +1670,72 @@ TEST_F(HIRBuildTest, MatchSequence) {
     Snapshot {
       CurInstrOffset 4
       Locals<1> v0
-      Stack<2> v0 v5
+      Stack<2> v0 v6
     }
-    v1 = Assign v0
-    Return v5
+    v7 = Assign v0
+    Return v6
   }
 }
 )";
 #endif
-  EXPECT_EQ(fullPrinter().ToString(*(irfunc)), expected);
+  EXPECT_EQ(fullPrinter().toString(*(irfunc)), expected);
 }
 
 TEST_F(HIRBuildTest, MatchKeys) {
   uint8_t bc[] = {LOAD_FAST, 0, LOAD_FAST, 1, MATCH_KEYS, 0, RETURN_VALUE, 0};
   std::unique_ptr<Function> irfunc = build_test(bc, {Py_None, Py_None});
 
-#if PY_VERSION_HEX >= 0x030C0000
+#if PY_VERSION_HEX >= 0x030E0000 && defined(Py_GIL_DISABLED)
   const char* expected = R"(fun jittestmodule:funcname {
   bb 0 {
     v0 = LoadArg<0; "param0">
     v2 = LoadCurrentFunc
+    LoadFrame
+    v3 = TagIfDeferred v0
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v3 v1
+    }
+    v4 = MatchKeys v3 v1 {
+      FrameState {
+        CurInstrOffset 4
+        Locals<2> v3 v1
+        Stack<2> v3 v1
+      }
+    }
+    v5 = LoadConst<ImmortalNoneType>
+    v6 = PrimitiveCompare<Equal> v4 v5
+    CondBranch<1, 2> v6
+  }
+
+  bb 1 (preds 0) {
+    v4 = RefineType<NoneType> v4
+    Branch<3>
+  }
+
+  bb 2 (preds 0) {
+    v4 = RefineType<TupleExact> v4
+    Branch<3>
+  }
+
+  bb 3 (preds 1, 2) {
+    Snapshot {
+      CurInstrOffset 6
+      Locals<2> v3 v1
+      Stack<3> v3 v1 v4
+    }
+    v7 = Assign v3
+    v8 = Assign v1
+    Return v4
+  }
+}
+)";
+#else
+  const char* expected = R"(fun jittestmodule:funcname {
+  bb 0 {
+    v0 = LoadArg<0; "param0">
+    v2 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<2> v0 v1
@@ -1544,10 +1768,44 @@ TEST_F(HIRBuildTest, MatchKeys) {
       Locals<2> v0 v1
       Stack<3> v0 v1 v3
     }
-    v6 = Assign v3
-    v3 = Assign v0
-    v4 = Assign v1
-    Return v6
+    v6 = Assign v0
+    v7 = Assign v1
+    Return v3
+  }
+}
+)";
+#endif
+  EXPECT_EQ(fullPrinter().toString(*(irfunc)), expected);
+}
+
+TEST_F(HIRBuildTest, ListExtend) {
+  uint8_t bc[] = {LOAD_FAST, 0, LOAD_FAST, 1, LIST_EXTEND, 1, RETURN_VALUE, 0};
+  std::unique_ptr<Function> irfunc = build_test(bc, {Py_None, Py_None});
+
+#if PY_VERSION_HEX >= 0x030E0000 && defined(Py_GIL_DISABLED)
+  const char* expected = R"(fun jittestmodule:funcname {
+  bb 0 {
+    v0 = LoadArg<0; "param0">
+    v2 = LoadCurrentFunc
+    LoadFrame
+    v3 = TagIfDeferred v0
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v3 v1
+    }
+    v4 = ListExtend v3 v1 {
+      FrameState {
+        CurInstrOffset 4
+        Locals<2> v3 v1
+        Stack<1> v3
+      }
+    }
+    Snapshot {
+      CurInstrOffset 6
+      Locals<2> v3 v1
+      Stack<1> v3
+    }
+    Return v3
   }
 }
 )";
@@ -1555,73 +1813,8 @@ TEST_F(HIRBuildTest, MatchKeys) {
   const char* expected = R"(fun jittestmodule:funcname {
   bb 0 {
     v0 = LoadArg<0; "param0">
-    Snapshot {
-      CurInstrOffset 0
-      Locals<2> v0 v1
-    }
-    v0 = CheckVar<"param0"> v0 {
-      FrameState {
-        CurInstrOffset 0
-        Locals<2> v0 v1
-      }
-    }
-    v1 = CheckVar<"param1"> v1 {
-      FrameState {
-        CurInstrOffset 2
-        Locals<2> v0 v1
-        Stack<1> v0
-      }
-    }
-    v2 = MatchKeys v0 v1 {
-      FrameState {
-        CurInstrOffset 4
-        Locals<2> v0 v1
-        Stack<2> v0 v1
-      }
-    }
-    v3 = LoadConst<NoneType>
-    v4 = PrimitiveCompare<Equal> v2 v3
-    CondBranch<1, 2> v4
-  }
-
-  bb 1 (preds 0) {
-    v2 = RefineType<NoneType> v2
-    v5 = LoadConst<ImmortalBool[False]>
-    Branch<3>
-  }
-
-  bb 2 (preds 0) {
-    v2 = RefineType<TupleExact> v2
-    v5 = LoadConst<ImmortalBool[True]>
-    Branch<3>
-  }
-
-  bb 3 (preds 1, 2) {
-    Snapshot {
-      CurInstrOffset 6
-      Locals<2> v0 v1
-      Stack<4> v0 v1 v2 v5
-    }
-    v4 = Assign v2
-    v2 = Assign v0
-    v3 = Assign v1
-    Return v5
-  }
-}
-)";
-#endif
-  EXPECT_EQ(fullPrinter().ToString(*(irfunc)), expected);
-}
-
-TEST_F(HIRBuildTest, ListExtend) {
-  uint8_t bc[] = {LOAD_FAST, 0, LOAD_FAST, 1, LIST_EXTEND, 1, RETURN_VALUE, 0};
-  std::unique_ptr<Function> irfunc = build_test(bc, {Py_None, Py_None});
-
-#if PY_VERSION_HEX >= 0x030C0000
-  const char* expected = R"(fun jittestmodule:funcname {
-  bb 0 {
-    v0 = LoadArg<0; "param0">
     v2 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<2> v0 v1
@@ -1642,67 +1835,42 @@ TEST_F(HIRBuildTest, ListExtend) {
   }
 }
 )";
-#else
-  const char* expected = R"(fun jittestmodule:funcname {
-  bb 0 {
-    v0 = LoadArg<0; "param0">
-    Snapshot {
-      CurInstrOffset 0
-      Locals<2> v0 v1
-    }
-    v0 = CheckVar<"param0"> v0 {
-      FrameState {
-        CurInstrOffset 0
-        Locals<2> v0 v1
-      }
-    }
-    v1 = CheckVar<"param1"> v1 {
-      FrameState {
-        CurInstrOffset 2
-        Locals<2> v0 v1
-        Stack<1> v0
-      }
-    }
-    v2 = ListExtend v0 v1 {
-      FrameState {
-        CurInstrOffset 4
-        Locals<2> v0 v1
-        Stack<1> v0
-      }
-    }
-    Snapshot {
-      CurInstrOffset 6
-      Locals<2> v0 v1
-      Stack<1> v0
-    }
-    Return v0
-  }
-}
-)";
 #endif
-  EXPECT_EQ(fullPrinter().ToString(*(irfunc)), expected);
+  EXPECT_EQ(fullPrinter().toString(*(irfunc)), expected);
 }
 
 TEST_F(HIRBuildTest, ListToTuple) {
   uint8_t bc[] = {
-      LOAD_FAST,
-      0,
-#if PY_VERSION_HEX < 0x030C0000
-      LIST_TO_TUPLE,
-      0,
-#else
-      CALL_INTRINSIC_1,
-      INTRINSIC_LIST_TO_TUPLE,
-#endif
-      RETURN_VALUE,
-      0};
+      LOAD_FAST, 0, CALL_INTRINSIC_1, INTRINSIC_LIST_TO_TUPLE, RETURN_VALUE, 0};
   std::unique_ptr<Function> irfunc = build_test(bc, {Py_None});
 
-#if PY_VERSION_HEX >= 0x030E0000
+#if PY_VERSION_HEX >= 0x030E0000 && defined(Py_GIL_DISABLED)
   const char* expected = R"(fun jittestmodule:funcname {
   bb 0 {
     v0 = LoadArg<0; "param0">
     v1 = LoadCurrentFunc
+    LoadFrame
+    v2 = TagIfDeferred v0
+    Snapshot {
+      CurInstrOffset 0
+      Locals<1> v2
+    }
+    v3 = CallIntrinsic<INTRINSIC_LIST_TO_TUPLE> v2
+    Snapshot {
+      CurInstrOffset 4
+      Locals<1> v2
+      Stack<1> v3
+    }
+    Return v3
+  }
+}
+)";
+#elif PY_VERSION_HEX >= 0x030E0000
+  const char* expected = R"(fun jittestmodule:funcname {
+  bb 0 {
+    v0 = LoadArg<0; "param0">
+    v1 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<1> v0
@@ -1717,11 +1885,12 @@ TEST_F(HIRBuildTest, ListToTuple) {
   }
 }
 )";
-#elif PY_VERSION_HEX >= 0x030C0000
+#else
   const char* expected = R"(fun jittestmodule:funcname {
   bb 0 {
     v0 = LoadArg<0; "param0">
     v1 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<1> v0
@@ -1736,50 +1905,46 @@ TEST_F(HIRBuildTest, ListToTuple) {
   }
 }
 )";
-#else
-  const char* expected = R"(fun jittestmodule:funcname {
-  bb 0 {
-    v0 = LoadArg<0; "param0">
-    Snapshot {
-      CurInstrOffset 0
-      Locals<1> v0
-    }
-    v0 = CheckVar<"param0"> v0 {
-      FrameState {
-        CurInstrOffset 0
-        Locals<1> v0
-      }
-    }
-    v1 = MakeTupleFromList v0 {
-      FrameState {
-        CurInstrOffset 2
-        Locals<1> v0
-      }
-    }
-    Snapshot {
-      CurInstrOffset 4
-      Locals<1> v0
-      Stack<1> v1
-    }
-    Return v1
-  }
-}
-)";
 #endif
-  EXPECT_EQ(fullPrinter().ToString(*(irfunc)), expected);
+  EXPECT_EQ(fullPrinter().toString(*(irfunc)), expected);
 }
 
 TEST_F(HIRBuildTest, LoadFastAndClear) {
-#if PY_VERSION_HEX >= 0x030C0000
   uint8_t bc[] = {
       LOAD_FAST_AND_CLEAR, 1, LOAD_FAST_CHECK, 0, POP_TOP, 0, RETURN_VALUE, 0};
 
   std::unique_ptr<Function> irfunc = build_test(bc, {Py_None, Py_None});
 
+#if PY_VERSION_HEX >= 0x030E0000 && defined(Py_GIL_DISABLED)
   const char* expected = R"(fun jittestmodule:funcname {
   bb 0 {
     v0 = LoadArg<0; "param0">
     v2 = LoadCurrentFunc
+    LoadFrame
+    v3 = TagIfDeferred v0
+    Snapshot {
+      CurInstrOffset 0
+      Locals<2> v3 v1
+    }
+    v4 = Assign v1
+    v1 = LoadConst<Nullptr>
+    v3 = CheckVar<"param0"> v3 {
+      FrameState {
+        CurInstrOffset 2
+        Locals<2> v3 v1
+        Stack<1> v4
+      }
+    }
+    Return v4
+  }
+}
+)";
+#else
+  const char* expected = R"(fun jittestmodule:funcname {
+  bb 0 {
+    v0 = LoadArg<0; "param0">
+    v2 = LoadCurrentFunc
+    LoadFrame
     Snapshot {
       CurInstrOffset 0
       Locals<2> v0 v1
@@ -1797,12 +1962,11 @@ TEST_F(HIRBuildTest, LoadFastAndClear) {
   }
 }
 )";
-
-  EXPECT_EQ(fullPrinter().ToString(*(irfunc)), expected);
 #endif
+
+  EXPECT_EQ(fullPrinter().toString(*(irfunc)), expected);
 }
 
-#if PY_VERSION_HEX >= 0x030C0000
 TEST_F(HIRBuildTest, AtQuiescentStateInEvalBreakerCheck) {
   const char* src = R"(
 def test():
@@ -1817,7 +1981,7 @@ def test():
   bool found_at_quiescent_state = false;
   for (auto& block : irfunc->cfg.blocks) {
     for (auto& instr : block) {
-      if (instr.IsAtQuiescentState()) {
+      if (instr.isAtQuiescentState()) {
         found_at_quiescent_state = true;
         break;
       }
@@ -1827,12 +1991,8 @@ def test():
     }
   }
 
-#ifdef Py_GIL_DISABLED
-  EXPECT_TRUE(found_at_quiescent_state)
-      << "AtQuiescentState should be present in free-threaded builds";
-#else
-  EXPECT_FALSE(found_at_quiescent_state)
-      << "AtQuiescentState should not be present in non-free-threaded builds";
-#endif
+  EXPECT_EQ(found_at_quiescent_state, kFreeThreadedBuild)
+      << "AtQuiescentState presence should match the build mode";
 }
-#endif
+
+} // namespace cinderx

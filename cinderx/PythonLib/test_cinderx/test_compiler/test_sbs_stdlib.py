@@ -1,4 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
+
 import ast
 import dis
 import hashlib
@@ -6,6 +7,10 @@ from io import StringIO
 from os import path
 from tokenize import detect_encoding
 from unittest import TestCase
+
+from cinderx.test_support import skip_module_if_oss
+
+skip_module_if_oss()
 
 from cinderx.compiler.dis_stable import Disassembler
 from cinderx.compiler.pycodegen import compile as py_compile
@@ -63,7 +68,6 @@ def add_test(modname, fname):
                 node = ast.parse(code, modname, "exec")
             except SyntaxError:
                 return
-            # pyre-ignore[16]: module doesn't have filename
             node.filename = modname
 
             try:
@@ -75,7 +79,6 @@ def add_test(modname, fname):
 
             codeobj = py_compile(node, modname, "exec")
             newdump = StringIO()
-            # pyre-ignore[6]: maybe not CodeType
             Disassembler().dump_code(codeobj, newdump)
 
             try:
@@ -96,11 +99,11 @@ def add_test(modname, fname):
 
 
 REPO_ROOT = path.join(path.dirname(__file__), "..", "..", "..")
-libpath = path.join(REPO_ROOT, "Lib")
+libpath = path.join(REPO_ROOT, "Lib").replace(path.sep, "/")
 if path.exists(libpath):
     glob_test(libpath, "**/*.py", add_test)
 else:
-    libpath = LIB_PATH = path.dirname(dis.__file__)
+    libpath = LIB_PATH = path.dirname(dis.__file__).replace(path.sep, "/")
     glob_test(LIB_PATH, "**/*.py", add_test)
     IGNORE_PATTERNS = tuple(
         pattern.replace("test/test_compiler/", "test_compiler/")

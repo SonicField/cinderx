@@ -2,12 +2,11 @@
 
 #include "cinderx/Jit/codegen/arch/x86_64.h"
 
-// NOLINTNEXTLINE(facebook-unused-include-check)
-#include "cinderx/Jit/codegen/arch/detection.h"
+#include "cinderx/Common/define.h"
 
 #ifdef CINDER_X86_64
 
-namespace jit::codegen {
+namespace cinderx::jit::codegen {
 
 PhyLocation PhyLocation::parse(std::string_view name) {
 #define FIND_GP_REG(V64, V32, V16, V8)  \
@@ -37,7 +36,7 @@ PhyLocation PhyLocation::parse(std::string_view name) {
 }
 
 std::string PhyLocation::toString() const {
-  if (is_memory()) {
+  if (isMemory()) {
     return fmt::format("[RBP({})]", loc);
   } else if (bitSize == 32) {
     return std::string{name32(static_cast<RegId>(loc))};
@@ -49,6 +48,6 @@ std::string PhyLocation::toString() const {
   return std::string{name(static_cast<RegId>(loc))};
 }
 
-} // namespace jit::codegen
+} // namespace cinderx::jit::codegen
 
 #endif

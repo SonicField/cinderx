@@ -45,6 +45,8 @@
 #include "setobject.h"
 
 
+#include "cinderx/module_c_state.h"
+
 #define USE_COMPUTED_GOTOS 0
 #include "ceval_macros.h"
 
@@ -145,6 +147,13 @@ dummy_func(
     switch (opcode) {
 
 // BEGIN BYTECODES //
+        override inst(LOAD_COMMON_CONSTANT, ( -- value)) {
+            // Use our own copy of common constants to avoid depending on the
+            // offset of interp->common_consts within PyInterpreterState.
+            assert(oparg < NUM_COMMON_CONSTANTS);
+            value = PyStackRef_FromPyObjectNew(Ci_common_consts[oparg]);
+        }
+
         override inst(LOAD_ATTR_GETATTRIBUTE_OVERRIDDEN, (unused/1, type_version/2, func_version/2, getattribute/4, owner -- unused)) {
             PyObject *owner_o = PyStackRef_AsPyObjectBorrow(owner);
 
@@ -187,7 +196,9 @@ dummy_func(
             // Check if the call can be inlined or not
             if (Py_TYPE(callable_o) == &PyFunction_Type &&
                 !IS_PEP523_HOOKED(tstate) &&
-                ((PyFunctionObject *)callable_o)->vectorcall == _PyFunction_Vectorcall)
+                FT_ATOMIC_LOAD_PTR_RELAXED(
+                    ((PyFunctionObject *)callable_o)->vectorcall) ==
+                    _PyFunction_Vectorcall)
             {
                 int code_flags = ((PyCodeObject*)PyFunction_GET_CODE(callable_o))->co_flags;
                 PyObject *locals = code_flags & CO_OPTIMIZED ? NULL : Py_NewRef(PyFunction_GET_GLOBALS(callable_o));
@@ -281,7 +292,9 @@ dummy_func(
             // Check if the call can be inlined or not
             if (Py_TYPE(callable_o) == &PyFunction_Type &&
                 !IS_PEP523_HOOKED(tstate) &&
-                ((PyFunctionObject *)callable_o)->vectorcall == _PyFunction_Vectorcall)
+                FT_ATOMIC_LOAD_PTR_RELAXED(
+                    ((PyFunctionObject *)callable_o)->vectorcall) ==
+                    _PyFunction_Vectorcall)
             {
                 int code_flags = ((PyCodeObject*)PyFunction_GET_CODE(callable_o))->co_flags;
                 PyObject *locals = code_flags & CO_OPTIMIZED ? NULL : Py_NewRef(PyFunction_GET_GLOBALS(callable_o));
@@ -380,7 +393,9 @@ dummy_func(
             else {
                 if (Py_TYPE(func) == &PyFunction_Type &&
                     !IS_PEP523_HOOKED(tstate) &&
-                    ((PyFunctionObject *)func)->vectorcall == _PyFunction_Vectorcall) {
+                    FT_ATOMIC_LOAD_PTR_RELAXED(
+                        ((PyFunctionObject *)func)->vectorcall) ==
+                        _PyFunction_Vectorcall) {
                     PyObject *callargs = PyStackRef_AsPyObjectSteal(callargs_st);
                     assert(PyTuple_CheckExact(callargs));
                     PyObject *kwargs = PyStackRef_IsNull(kwargs_st) ? NULL : PyStackRef_AsPyObjectSteal(kwargs_st);
@@ -492,9 +507,17 @@ dummy_func(
 
         override inst(LIST_APPEND, (list, unused[oparg-1], v -- list, unused[oparg-1])) {
 #ifdef Py_GIL_DISABLED
-            // T250369690: Need thread-safe checked collections
-            int err = _PyList_AppendTakeRef((PyListObject *)PyStackRef_AsPyObjectBorrow(list),
-                                           PyStackRef_AsPyObjectSteal(v));
+            PyObject *lst = PyStackRef_AsPyObjectBorrow(list);
+            int err;
+            if (PyList_Check(lst)) {
+                err = PyList_Append(lst, PyStackRef_AsPyObjectBorrow(v));
+            }
+            else {
+                // T250369690: Need thread-safe checked collections
+                err = Ci_ListOrCheckedList_Append(
+                    (PyListObject *)lst, PyStackRef_AsPyObjectBorrow(v));
+            }
+            PyStackRef_CLOSE(v);
             ERROR_IF(err < 0);
 #else
             int err = Ci_ListOrCheckedList_Append(
@@ -503,6 +526,89 @@ dummy_func(
             ERROR_IF(err < 0);
 #endif
         }
+
+        override op(_LOAD_ATTR, (owner -- attr, self_or_null[oparg&1])) {
+#if PY_VERSION_HEX >= 0x030E0400
+            // New version in Python 3.14.4 that uses _Py_LoadAttr_StackRefSteal.
+
+            PyObject *name = GETITEM(FRAME_CO_NAMES, oparg >> 1);
+            if (oparg & 1) {
+                /* Designed to work in tandem with CALL, pushes two values. */
+                attr = _Py_LoadAttr_StackRefSteal(tstate, owner, name, self_or_null);
+                DEAD(owner);
+                ERROR_IF(PyStackRef_IsNull(attr));
+            }
+            else {
+                /* Classic, pushes one value. */
+                PyObject *attr_o = PyObject_GetAttr(PyStackRef_AsPyObjectBorrow(owner), name);
+                PyStackRef_CLOSE(owner);
+                ERROR_IF(attr_o == NULL);
+                attr = PyStackRef_FromPyObjectSteal(attr_o);
+            }
+#else
+            // Older version pre-3.14.4.
+
+            PyObject *name = GETITEM(FRAME_CO_NAMES, oparg >> 1);
+            PyObject *attr_o = NULL;
+            if (oparg & 1) {
+                int is_meth = _PyObject_GetMethod(PyStackRef_AsPyObjectBorrow(owner), name, &attr_o);
+                if (is_meth) {
+                    /* We can bypass temporary bound method object.
+                       meth is unbound method and obj is self.
+                       meth | self | arg1 | ... | argN
+                     */
+                    assert(attr_o != NULL);  // No errors on this branch
+                    self_or_null[0] = owner;  // Transfer ownership
+                    DEAD(owner);
+                }
+                else {
+                    /* meth is not an unbound method (but a regular attr, or
+                       something was returned by a descriptor protocol).  Set
+                       the second element of the stack to NULL, to signal
+                       CALL that it's not a method call.
+                       meth | NULL | arg1 | ... | argN
+                    */
+                    PyStackRef_CLOSE(owner);
+                    ERROR_IF(attr_o == NULL);
+                    self_or_null[0] = PyStackRef_NULL;
+                }
+            }
+            else {
+                /* Classic, pushes one value. */
+                attr_o = PyObject_GetAttr(PyStackRef_AsPyObjectBorrow(owner), name);
+                PyStackRef_CLOSE(owner);
+                ERROR_IF(attr_o == NULL);
+            }
+            attr = PyStackRef_FromPyObjectSteal(attr_o);
+#endif
+        }
+
+        // Meta Python bumps the type version when shared keys change, so
+        // _GUARD_TYPE_VERSION covers it; upstream Python still needs this check.
+        op(_GUARD_KEYS_VERSION, (keys_version/2, owner -- owner)) {
+#ifndef META_PYTHON
+            PyTypeObject *owner_cls = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
+            PyHeapTypeObject *owner_heap_type = (PyHeapTypeObject *)owner_cls;
+            PyDictKeysObject *keys = owner_heap_type->ht_cached_keys;
+            DEOPT_IF(FT_ATOMIC_LOAD_UINT32_RELAXED(keys->dk_version) != keys_version);
+#else
+            (void)keys_version;
+#endif
+        }
+
+        macro(LOAD_ATTR_METHOD_WITH_VALUES) =
+            unused/1 +
+            _GUARD_TYPE_VERSION +
+            _GUARD_DORV_VALUES_INST_ATTR_FROM_DICT +
+            _GUARD_KEYS_VERSION +
+            _LOAD_ATTR_METHOD_WITH_VALUES;
+
+        macro(LOAD_ATTR_NONDESCRIPTOR_WITH_VALUES) =
+            unused/1 +
+            _GUARD_TYPE_VERSION +
+            _GUARD_DORV_VALUES_INST_ATTR_FROM_DICT +
+            _GUARD_KEYS_VERSION +
+            _LOAD_ATTR_NONDESCRIPTOR_WITH_VALUES;
 
         override inst(EXTENDED_OPCODE, (args[oparg>>2] -- top[oparg&0x03])) {
             // Decode any extended oparg

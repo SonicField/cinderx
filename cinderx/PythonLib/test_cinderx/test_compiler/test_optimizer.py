@@ -5,6 +5,18 @@ import ast
 import math
 import sys
 
+from cinderx.compiler.flow_graph_optimizer import (
+    _common_constant_oparg,
+    CONSTANT_EMPTY_STR,
+    CONSTANT_EMPTY_TUPLE,
+    CONSTANT_FALSE,
+    CONSTANT_MINUS_ONE,
+    CONSTANT_NONE,
+    CONSTANT_TRUE,
+    convert_load_const_to_load_common_constant,
+    FlowGraphConstOptimizer315,
+    FlowGraphConstOptimizer316,
+)
 from cinderx.compiler.optimizer import (
     AstOptimizer,
     enum_format_str_components,
@@ -17,6 +29,11 @@ from cinderx.compiler.unparse import to_expr
 from cinderx.test_support import passIf
 
 from .common import CompilerTest
+
+# A constant sequence long enough to exceed STACK_USE_GUIDELINE, so it is built
+# with repeated appends rather than a single BUILD_LIST/BUILD_SET.
+BIG_CONST_TUPLE: tuple[int, ...] = tuple(range(100, 140))
+BIG_CONST_ELTS: str = ", ".join(str(i) for i in BIG_CONST_TUPLE)
 
 
 class AstOptimizerTests(CompilerTest):
@@ -114,13 +131,19 @@ class AstOptimizerTests(CompilerTest):
 
     def test_opt_debug_del(self):
         code = "def f(): del __debug__"
+        if sys.version_info >= (3, 15):
+            load_true_op = "LOAD_COMMON_CONSTANT"
+            load_true_arg = 9
+        else:
+            load_true_op = "LOAD_CONST"
+            load_true_arg = True
         outer_graph = self.to_graph(code)
         for outer_instr in self.graph_to_instrs(outer_graph):
             if outer_instr.opname == "LOAD_CONST" and isinstance(
                 outer_instr.oparg, CodeGenerator
             ):
                 graph = outer_instr.oparg.graph
-                self.assertInGraph(graph, "LOAD_CONST", True)
+                self.assertInGraph(graph, load_true_op, load_true_arg)
                 self.assertNotInGraph(graph, "DELETE_FAST", "__debug__")
 
         outer_graph = self.to_graph_no_opt(code)
@@ -129,7 +152,7 @@ class AstOptimizerTests(CompilerTest):
                 outer_instr.oparg, CodeGenerator
             ):
                 graph = outer_instr.oparg.graph
-                self.assertNotInGraph(graph, "LOAD_CONST", True)
+                self.assertNotInGraph(graph, load_true_op, load_true_arg)
                 self.assertInGraph(graph, "DELETE_FAST", "__debug__")
 
     @passIf(sys.version_info >= (3, 14), "AST optimizer does less on 3.14")
@@ -364,30 +387,6 @@ class AstOptimizerTests(CompilerTest):
         code = self.compare_graph('x = "fuu"[10]')
         code.assert_both("BINARY_SUBSCR")
 
-    @passIf(sys.version_info >= (3, 12), "needs updating for 3.12")
-    def test_folding_of_unaryops_on_constants(self):
-        for line, elem in (
-            ("x = -0.5", -0.5),  # unary negative
-            ("x = -0.0", -0.0),  # -0.0
-            ("x = -(1.0-1.0)", -0.0),  # -0.0 after folding
-            ("x = -0", 0),  # -0
-            ("x = ~-2", 1),  # unary invert
-            ("x = +1", 1),  # unary positive
-        ):
-            code = self.compare_graph(line)
-            # can't assert added here because -0/0 compares equal
-            code.assert_in_opt("LOAD_CONST", elem)
-            code.assert_all_removed("UNARY_")
-
-        # Verify that unfoldables are skipped
-        for line, elem, opname in (
-            ('-"abc"', "abc", "UNARY_NEGATIVE"),
-            ('~"abc"', "abc", "UNARY_INVERT"),
-        ):
-            code = self.compare_graph(line)
-            code.assert_both("LOAD_CONST", elem)
-            code.assert_both(opname)
-
     def test_enum_format_str_components(self) -> None:
         test_cases = [
             ("%s", ["", FormatInfo("s")]),
@@ -468,3 +467,129 @@ class AstOptimizerTests(CompilerTest):
             ).value,
             "10",
         )
+
+    def test_empty_tuple_load_common_constant(self) -> None:
+        # The empty tuple was added to the LOAD_COMMON_CONSTANT table in 3.16
+        # (magic 3701); on earlier versions it stays a plain LOAD_CONST.
+        graph = self.to_graph("x = ()")
+        if sys.version_info >= (3, 16):
+            self.assertInGraph(graph, "LOAD_COMMON_CONSTANT", CONSTANT_EMPTY_TUPLE)
+            self.assertNotInGraph(graph, "LOAD_CONST", ())
+        else:
+            self.assertInGraph(graph, "LOAD_CONST", ())
+            self.assertNotInGraph(graph, "LOAD_COMMON_CONSTANT", CONSTANT_EMPTY_TUPLE)
+
+    def test_frozenset_call_optimization(self) -> None:
+        # 3.16 (gh-150027) optimizes frozenset({...}) into a guarded
+        # INTRINSIC_BUILD_FROZENSET build; earlier versions emit a plain call.
+        graph = self.to_graph("x = frozenset({a, b})")
+        if sys.version_info >= (3, 16):
+            self.assertInGraph(graph, "CALL_INTRINSIC_1")
+        else:
+            self.assertNotInGraph(graph, "CALL_INTRINSIC_1")
+
+    @passIf(sys.version_info < (3, 14), "3.12 folds big constant sequences in codegen")
+    def test_big_const_list_iteration(self) -> None:
+        # Sequences over STACK_USE_GUIDELINE elements are built with repeated
+        # appends. 3.16 folds such a chain into a constant tuple when the
+        # result is only iterated over; earlier versions keep the build.
+        graph = self.to_graph(f"for x in [{BIG_CONST_ELTS}]: pass")
+        if sys.version_info >= (3, 16):
+            self.assertInGraph(graph, "LOAD_CONST", BIG_CONST_TUPLE)
+            self.assertNotInGraph(graph, "BUILD_LIST")
+        else:
+            self.assertInGraph(graph, "BUILD_LIST", 0)
+            self.assertNotInGraph(graph, "LOAD_CONST", BIG_CONST_TUPLE)
+
+    @passIf(sys.version_info < (3, 14), "3.12 folds big constant sequences in codegen")
+    def test_big_const_set_membership(self) -> None:
+        # Same as above for sets, which fold into a frozenset.
+        graph = self.to_graph(f"y = x in {{{BIG_CONST_ELTS}}}")
+        if sys.version_info >= (3, 16):
+            self.assertInGraph(graph, "LOAD_CONST", frozenset(BIG_CONST_TUPLE))
+            self.assertNotInGraph(graph, "BUILD_SET")
+        else:
+            self.assertInGraph(graph, "BUILD_SET", 0)
+            self.assertNotInGraph(graph, "LOAD_CONST", frozenset(BIG_CONST_TUPLE))
+
+    @passIf(sys.version_info < (3, 14), "3.12 folds big constant sequences in codegen")
+    def test_big_const_list_not_folded_when_used_as_a_list(self) -> None:
+        # The fold is only valid when the sequence is consumed by GET_ITER or
+        # CONTAINS_OP; a list that escapes must still be built as a list.
+        graph = self.to_graph(f"x = [{BIG_CONST_ELTS}]")
+        self.assertInGraph(graph, "BUILD_LIST", 0)
+        self.assertNotInGraph(graph, "LOAD_CONST", BIG_CONST_TUPLE)
+
+
+class _FakeInstr:
+    __slots__ = ("opname", "oparg", "ioparg")
+
+    def __init__(self, opname: str, oparg: object) -> None:
+        self.opname = opname
+        self.oparg = oparg
+        self.ioparg = 0
+
+
+class _FakeBlock:
+    __slots__ = ("insts",)
+
+    def __init__(self, insts: list[_FakeInstr]) -> None:
+        self.insts = insts
+
+
+class LoadCommonConstantTest(CompilerTest):
+    """Version-independent tests for the LOAD_COMMON_CONSTANT mapping.
+
+    These exercise the optimizer logic directly so they run under any
+    interpreter, without needing a 3.16 runtime.
+    """
+
+    def test_common_constant_oparg_shared_values(self) -> None:
+        # The 3.15 set is unaffected by the empty-tuple flag.
+        for allow in (False, True):
+            self.assertEqual(
+                _common_constant_oparg(None, allow_empty_tuple=allow), CONSTANT_NONE
+            )
+            self.assertEqual(
+                _common_constant_oparg(True, allow_empty_tuple=allow), CONSTANT_TRUE
+            )
+            self.assertEqual(
+                _common_constant_oparg(False, allow_empty_tuple=allow), CONSTANT_FALSE
+            )
+            self.assertEqual(
+                _common_constant_oparg("", allow_empty_tuple=allow), CONSTANT_EMPTY_STR
+            )
+            self.assertEqual(
+                _common_constant_oparg(-1, allow_empty_tuple=allow), CONSTANT_MINUS_ONE
+            )
+
+    def test_common_constant_oparg_empty_tuple_gated(self) -> None:
+        # Empty tuple only maps when explicitly allowed (3.16+).
+        self.assertIsNone(_common_constant_oparg(()))
+        self.assertIsNone(_common_constant_oparg((), allow_empty_tuple=False))
+        self.assertEqual(
+            _common_constant_oparg((), allow_empty_tuple=True), CONSTANT_EMPTY_TUPLE
+        )
+        # Non-empty tuples are never common constants.
+        self.assertIsNone(_common_constant_oparg((1,), allow_empty_tuple=True))
+
+    def test_convert_pass_respects_flag(self) -> None:
+        def make_blocks() -> list[_FakeBlock]:
+            return [_FakeBlock([_FakeInstr("LOAD_CONST", ())])]
+
+        # Default (3.15 behavior): empty tuple left as LOAD_CONST.
+        blocks = make_blocks()
+        convert_load_const_to_load_common_constant(blocks)
+        self.assertEqual(blocks[0].insts[0].opname, "LOAD_CONST")
+
+        # 3.16 behavior: rewritten to LOAD_COMMON_CONSTANT with the right oparg.
+        blocks = make_blocks()
+        convert_load_const_to_load_common_constant(blocks, allow_empty_tuple=True)
+        instr = blocks[0].insts[0]
+        self.assertEqual(instr.opname, "LOAD_COMMON_CONSTANT")
+        self.assertEqual(instr.oparg, CONSTANT_EMPTY_TUPLE)
+        self.assertEqual(instr.ioparg, CONSTANT_EMPTY_TUPLE)
+
+    def test_const_optimizer_flag_wiring(self) -> None:
+        self.assertFalse(FlowGraphConstOptimizer315._allow_empty_tuple_const)
+        self.assertTrue(FlowGraphConstOptimizer316._allow_empty_tuple_const)

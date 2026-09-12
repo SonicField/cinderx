@@ -17,7 +17,7 @@ from opcode import (
 
 from .opcodebase import Opcode
 
-STATIC_OPMAP: dict[str, int] = {}
+STATIC_OPMAP: dict[str, int] = {**opmap}
 STATIC_OPNAMES: list[str] = [f"<{i}>" for i in range(256)]
 STATIC_CONST_OPCODES: list[int] = []
 
@@ -27,7 +27,20 @@ if sys.version_info >= (3, 12):
     # pyre-fixme[21]: Could not find name `_specializations` in `opcode` (stubbed).
     from opcode import _cache_format, _inline_cache_entries, _specializations, hasarg
 
-    from cinderx import opcode as cinderx_opcode
+    if sys.version_info >= (3, 15):
+        opmap = dict(opmap)
+        _cache_format = dict(_cache_format)
+        _inline_cache_entries = dict(_inline_cache_entries)
+        _specializations = dict(_specializations)
+
+    try:
+        from cinderx import opcode as cinderx_opcode
+    except ImportError:
+        # Editable install: opcode.py hasn't been copied by build_py.
+        import importlib
+
+        _ver_name = f"{sys.version_info.major}_{sys.version_info.minor}"
+        cinderx_opcode = importlib.import_module(f"opcodes.{_ver_name}.opcode")
 
     cinderx_opcode.init(
         STATIC_OPNAMES if sys.version_info >= (3, 14) else opname,
@@ -37,26 +50,26 @@ if sys.version_info >= (3, 12):
         hasjabs,
         STATIC_CONST_OPCODES if sys.version_info >= (3, 14) else hasconst,
         hasarg,
-        # pyre-fixme[16]: Module `opcode` has no attribute `_cache_format`.
         _cache_format,
-        # pyre-fixme[16]: Module `opcode` has no attribute `_specializations`.
         _specializations,
-        # pyre-fixme[16]: Module `opcode` has no attribute `_inline_cache_entries`.
         _inline_cache_entries,
     )
     if sys.version_info >= (3, 14):
         opname[126] = "EXTENDED_OPCODE"
         opmap["EXTENDED_OPCODE"] = 126
         hasarg.append(126)
-
-    opmap.update(STATIC_OPMAP)
+    else:
+        opmap.update(STATIC_OPMAP)
 
     if "dis" in sys.modules:
         # Fix up dis module to use the CinderX opcodes
         import dis
 
+        # pyrefly: ignore [missing-attribute]
         dis._all_opname = list(opname)
+        # pyrefly: ignore [missing-attribute]
         dis._all_opmap = dict(opmap)
+        # pyrefly: ignore [missing-attribute]
         dis._empty_slot = [
             slot
             # pyre-fixme[16]: Module `dis` has no attribute `_all_opname`.
@@ -66,7 +79,8 @@ if sys.version_info >= (3, 12):
 
 
 opcode: Opcode = Opcode()
-for opname, opnum in opmap.items():
+# pyrefly: ignore [bad-assignment]
+for opname, opnum in STATIC_OPMAP.items():
     if opnum in hasname:
         opcode.name_op(opname, opnum)
     elif opnum in hasjrel:
@@ -237,12 +251,12 @@ opcode.stack_effects.update(
 )
 
 if sys.version_info >= (3, 12):
-    # pyre-fixme[21]: Could not find name `_intrinsic_1_descs` in `opcode` (stubbed).
-    # pyre-fixme[21]: Could not find name `_intrinsic_2_descs` in `opcode` (stubbed).
-    # pyre-fixme[21]: Could not find name `_nb_ops` in `opcode` (stubbed).
     from opcode import (
+        # pyrefly: ignore [missing-module-attribute]
         _intrinsic_1_descs as INTRINSIC_1,
+        # pyrefly: ignore [missing-module-attribute]
         _intrinsic_2_descs as INTRINSIC_2,
+        # pyrefly: ignore [missing-module-attribute]
         _nb_ops as NB_OPS,
     )
 else:
@@ -812,11 +826,17 @@ if sys.version_info >= (3, 14):
         opcode.popped.update(
             FOR_ITER=2,
             POP_ITER=2,
+            SEND=3,
+            END_SEND=3,
+            CLEANUP_THROW=4,
         )
         opcode.pushed.update(
             FOR_ITER=3,
             GET_ITER=2,
+            SEND=3,
+            CLEANUP_THROW=3,
         )
+        opcode.stack_effects["END_SEND"] = -2
     for opname, popped in opcode.popped.items():
         pushed = opcode.pushed[opname]
         if isinstance(popped, int) and isinstance(pushed, int):
@@ -946,7 +966,6 @@ elif sys.version_info >= (3, 12):
 
 
 def find_op_idx(opname: str) -> int:
-    # pyre-fixme[16]: Module `opcode` has no attribute `_nb_ops`.
     for i, (name, _symbol) in enumerate(NB_OPS):
         if name == opname:
             return i

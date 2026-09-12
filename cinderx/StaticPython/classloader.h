@@ -1,13 +1,7 @@
 /* Copyright (c) Meta Platforms, Inc. and affiliates. */
-#ifndef Ci_CLASSLOADER_H
-#define Ci_CLASSLOADER_H
+#pragma once
 
 #include "cinderx/python.h"
-
-#if PY_VERSION_HEX < 0x030C0000
-#include "cinder/exports.h"
-#include "cinder/hooks.h"
-#endif
 
 #include "cinderx/Common/extra-py-flags.h"
 #include "cinderx/StaticPython/awaitable.h"
@@ -24,8 +18,6 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-extern PyObject* CiExc_StaticTypeError;
 
 #ifndef Py_LIMITED_API
 
@@ -208,4 +200,3 @@ void _PyClassLoader_ClearValueCache();
 #ifdef __cplusplus
 }
 #endif
-#endif /* !Ci_CLASSLOADER_H */

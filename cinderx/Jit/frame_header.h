@@ -4,41 +4,45 @@
 
 #include "cinderx/python.h"
 
+#include "cinderx/Common/define.h"
 #include "cinderx/Common/ref.h"
 
-namespace jit {
+#include <cstddef>
+#include <cstdint>
+
+namespace cinderx::jit {
 
 int frameHeaderSize(BorrowedRef<PyCodeObject> code);
 
-#if PY_VERSION_HEX < 0x030C0000
-
-#include "internal/pycore_shadow_frame_struct.h"
-
 // FrameHeader lives at the beginning of the stack frame for JIT-compiled
-// functions. Note these will be garbage in generator objects.
+// functions.  This is followed by the _PyInterpreterFrame.
 struct FrameHeader {
-  JITShadowFrame shadow_frame;
-};
-
-void assertShadowCallStackConsistent(PyThreadState* tstate);
-
-const char* shadowFrameKind(_PyShadowFrame* sf);
-
-#else
-
-// FrameHeader lives at the beginning of the stack frame for JIT-compiled
-// functions. In 3.12+ this will be followed by the _PyInterpreterFrame.
-struct FrameHeader {
+#if defined(CINDER_AARCH64)
+  // The thread this frame is running on. AArch64 leaves the return address of
+  // an active call in the callee's frame record rather than at a fixed offset
+  // from the caller's frame pointer, so recovering the frame's current IP
+  // means walking the native stack it lives on. See frame.cpp.
+  PyThreadState* tstate;
+#endif
+#if defined(Py_GIL_DISABLED)
+  // Index into the CodeRuntime's deopt metadata array, giving GC an exact
+  // active callsite for deferred-RC root scanning. Updated before each
+  // instruction that can deopt.
+  std::size_t deopt_idx;
+#endif
   union {
+#if PY_VERSION_HEX < 0x030E0000
     PyFunctionObject* func;
-    uintptr_t rtfs;
+#endif
+    uintptr_t frame_status;
   };
 };
 
-#define JIT_FRAME_RTFS 0x01
+inline constexpr size_t kFrameHeaderOverhead = sizeof(FrameHeader);
+
+#define JIT_FRAME_INLINED 0x01
 #define JIT_FRAME_INITIALIZED 0x02
-#define JIT_FRAME_MASK 0x03
+#define JIT_FRAME_DEOPT_PATCHED 0x04
+#define JIT_FRAME_MASK 0x07
 
-#endif
-
-} // namespace jit
+} // namespace cinderx::jit

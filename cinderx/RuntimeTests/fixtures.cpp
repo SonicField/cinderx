@@ -2,10 +2,6 @@
 
 #include "cinderx/RuntimeTests/fixtures.h"
 
-#if PY_VERSION_HEX < 0x030C0000
-#include "cinder/exports.h"
-#endif
-
 #include "cinderx/Jit/hir/builder.h"
 #include "cinderx/Jit/hir/parser.h"
 #include "cinderx/Jit/hir/phi_elimination.h"
@@ -13,6 +9,35 @@
 #include "cinderx/Jit/hir/simplify.h"
 #include "cinderx/Jit/hir/ssa.h"
 #include "cinderx/Jit/pyjit.h"
+
+namespace cinderx {
+
+namespace {
+
+std::string s_program_name;
+
+} // namespace
+
+void setPythonProgramName(std::string name) {
+  s_program_name = std::move(name);
+}
+
+void initializePython() {
+  PyConfig config;
+  PyConfig_InitPythonConfig(&config);
+
+  PyStatus status = PyConfig_SetBytesString(
+      &config, &config.program_name, s_program_name.c_str());
+  if (!PyStatus_Exception(status)) {
+    status = Py_InitializeFromConfig(&config);
+  }
+  PyConfig_Clear(&config);
+
+  JIT_CHECK(
+      !PyStatus_Exception(status),
+      "Failed to initialize Python: {}",
+      status.err_msg != nullptr ? status.err_msg : "<no error message>");
+}
 
 std::unique_ptr<jit::hir::Function> RuntimeTest::buildHIR(
     BorrowedRef<PyFunctionObject> func) {
@@ -27,7 +52,7 @@ std::unique_ptr<jit::hir::Function> RuntimeTest::buildHIR(
 }
 
 void HIRTest::TestBody() {
-  using namespace jit::hir;
+  using namespace cinderx::jit::hir;
 
   std::string test_name = "<unknown>";
   const testing::TestInfo* info =
@@ -38,7 +63,7 @@ void HIRTest::TestBody() {
 
   std::unique_ptr<Function> irfunc;
   if (src_is_hir_) {
-    irfunc = HIRParser{}.ParseHIR(src_.c_str());
+    irfunc = HIRParser{}.parseHIR(src_.c_str());
     ASSERT_FALSE(passes_.empty())
         << "HIR tests don't make sense without a pass to test";
     ASSERT_NE(irfunc, nullptr);
@@ -58,19 +83,21 @@ void HIRTest::TestBody() {
     if (!src_is_hir_ &&
         !(passes_.size() == 1 &&
           std::string(passes_.at(0)->name()) == "@AllPasses")) {
-      SSAify{}.Run(*irfunc);
+      SSAify{}.run(*irfunc);
       // Perform some straightforward cleanup on Python inputs to make the
       // output more reasonable. This implies that tests for the passes used
       // here are most useful as HIR-only tests.
-      Simplify{}.Run(*irfunc);
-      PhiElimination{}.Run(*irfunc);
+      Simplify{}.run(*irfunc);
+      PhiElimination{}.run(*irfunc);
     }
     for (auto& pass : passes_) {
-      pass->Run(*irfunc);
+      pass->run(*irfunc);
     }
     ASSERT_TRUE(checkFunc(*irfunc, std::cout));
   }
   HIRPrinter printer;
-  auto hir = printer.ToString(*irfunc.get());
+  auto hir = printer.toString(*irfunc.get());
   EXPECT_EQ(hir, expected_hir_);
 }
+
+} // namespace cinderx

@@ -1,0 +1,90 @@
+// Copyright (c) Meta Platforms, Inc. and affiliates.
+
+#pragma once
+
+#include "cinderx/Common/define.h"
+
+#include <cstddef>
+
+// JIT TSAN instrumentation is currently implemented for Linux x86-64. Other
+// platforms can still use TSAN for non-JIT code.
+#if CINDER_TSAN_ENABLED && defined(CINDER_X86_64) && defined(__linux__)
+#define CINDER_JIT_TSAN_ENABLED 1
+#else
+#define CINDER_JIT_TSAN_ENABLED 0
+#endif
+
+namespace cinderx::jit::lir {
+class Operand;
+}
+
+namespace cinderx::jit::codegen {
+
+struct Environ;
+
+inline constexpr bool kCinderJitTsanEnabled = CINDER_JIT_TSAN_ENABLED;
+
+// Current coverage scope: these helpers are only wired into kMove and
+// kMoveRelaxed lowering. Other LIR opcodes that can touch memory (for example
+// arithmetic, cmp/test, push/pop, div/idiv, and indirect calls) are not TSAN
+// instrumented yet.
+
+#if CINDER_JIT_TSAN_ENABLED
+
+// Emit TSAN read instrumentation before a memory load.
+// access_size_in_bytes must match the width of the emitted memory access.
+void emitTsanRead(
+    Environ& env,
+    const jit::lir::Operand* mem_operand,
+    size_t access_size_in_bytes);
+
+// Emit TSAN write instrumentation before a memory store.
+// access_size_in_bytes must match the width of the emitted memory access.
+void emitTsanWrite(
+    Environ& env,
+    const jit::lir::Operand* mem_operand,
+    size_t access_size_in_bytes);
+
+// Try to emit a replacement TSAN atomic read for relaxed atomic loads.
+// access_size_in_bytes must match the memory width of the original LIR move.
+// Returns false when the caller should emit the move.
+bool tryEmitTsanRelaxedAtomicRead(
+    Environ& env,
+    const jit::lir::Operand* output_operand,
+    const jit::lir::Operand* mem_operand,
+    size_t access_size_in_bytes);
+
+// Try to emit a replacement TSAN atomic write for relaxed atomic stores.
+// access_size_in_bytes must match the memory width of the original LIR move.
+// Returns false when the caller should emit the move.
+bool tryEmitTsanRelaxedAtomicWrite(
+    Environ& env,
+    const jit::lir::Operand* mem_operand,
+    const jit::lir::Operand* value_operand,
+    size_t access_size_in_bytes);
+
+#else
+
+inline void emitTsanRead(Environ&, const jit::lir::Operand*, size_t) {}
+
+inline void emitTsanWrite(Environ&, const jit::lir::Operand*, size_t) {}
+
+inline bool tryEmitTsanRelaxedAtomicRead(
+    Environ&,
+    const jit::lir::Operand*,
+    const jit::lir::Operand*,
+    size_t) {
+  return false;
+}
+
+inline bool tryEmitTsanRelaxedAtomicWrite(
+    Environ&,
+    const jit::lir::Operand*,
+    const jit::lir::Operand*,
+    size_t) {
+  return false;
+}
+
+#endif // CINDER_JIT_TSAN_ENABLED
+
+} // namespace cinderx::jit::codegen

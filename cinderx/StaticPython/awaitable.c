@@ -2,11 +2,14 @@
 
 #include "cinderx/StaticPython/awaitable.h"
 
+#include "cinderx/Common/py-portability.h"
 #include "cinderx/Common/string.h"
 #include "cinderx/UpstreamBorrow/borrowed.h"
+#include "cinderx/module_c_state.h"
 
 static int
 awaitable_traverse(_PyClassLoader_Awaitable* self, visitproc visit, void* arg) {
+  Py_VISIT(Py_TYPE(self));
   Py_VISIT(self->state);
   Py_VISIT(self->coro);
   Py_VISIT(self->iter);
@@ -21,13 +24,15 @@ static int awaitable_clear(_PyClassLoader_Awaitable* self) {
 }
 
 static void awaitable_dealloc(_PyClassLoader_Awaitable* self) {
+  PyTypeObject* type = Py_TYPE(self);
   PyObject_GC_UnTrack((PyObject*)self);
   awaitable_clear(self);
-  Py_TYPE(self)->tp_free(self);
+  type->tp_free(self);
+  Py_DECREF(type);
 }
 
 static PyObject* awaitable_get_iter(_PyClassLoader_Awaitable* self) {
-  PyObject* iter = Cix_PyCoro_GetAwaitableIter(self->coro);
+  PyObject* iter = _PyCoro_GetAwaitableIter(self->coro);
   if (iter == NULL) {
     return NULL;
   }
@@ -39,7 +44,7 @@ static PyObject* awaitable_get_iter(_PyClassLoader_Awaitable* self) {
 #endif
 
   if (PyCoro_CheckExact(iter)) {
-    PyObject* yf = Cix_PyGen_yf((PyGenObject*)iter);
+    PyObject* yf = _PyGen_yf((PyGenObject*)iter);
     if (yf != NULL) {
       Py_DECREF(yf);
       Py_DECREF(iter);
@@ -116,13 +121,6 @@ static void awaitable_setawaiter(
 }
 
 #ifdef ENABLE_GENERATOR_AWAITER
-
-#if PY_VERSION_HEX < 0x030C0000
-
-#define Ci_AsyncMethodsWithExtra PyAsyncMethodsWithExtra
-#define Ci_TPFLAGS_HAVE_AM_EXTRA Py_TPFLAGS_HAVE_AM_EXTRA
-
-#endif
 
 static Ci_AsyncMethodsWithExtra awaitable_as_async = {
     .ame_async_methods =
@@ -238,22 +236,25 @@ static PyMemberDef awaitable_memberlist[] = {
     {NULL} /* Sentinel */
 };
 
-static PyTypeObject _PyClassLoader_AwaitableType = {
-    PyVarObject_HEAD_INIT(NULL, 0).tp_name = "awaitable_wrapper",
-    sizeof(_PyClassLoader_Awaitable),
-    0,
-    .tp_dealloc = (destructor)awaitable_dealloc,
-    .tp_as_async = (PyAsyncMethods*)&awaitable_as_async,
-    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC | Py_TPFLAGS_BASETYPE |
-        Ci_TPFLAGS_HAVE_AM_EXTRA,
-    .tp_traverse = (traverseproc)awaitable_traverse,
-    .tp_clear = (inquiry)awaitable_clear,
-    .tp_iter = PyObject_SelfIter,
-    .tp_iternext = (iternextfunc)awaitable_next,
-    .tp_methods = awaitable_methods,
-    .tp_alloc = PyType_GenericAlloc,
-    .tp_free = PyObject_GC_Del,
-    .tp_members = awaitable_memberlist,
+static PyType_Slot awaitable_slots[] = {
+    {Py_tp_dealloc, (void*)awaitable_dealloc},
+    {Py_tp_traverse, (void*)awaitable_traverse},
+    {Py_tp_clear, (void*)awaitable_clear},
+    {Py_tp_methods, (void*)awaitable_methods},
+    {Py_tp_members, (void*)awaitable_memberlist},
+    {Py_tp_iter, (void*)PyObject_SelfIter},
+    {Py_tp_iternext, (void*)awaitable_next},
+    {Py_am_await, (void*)awaitable_await},
+    {Py_am_send, (void*)awaitable_itersend},
+    {0, NULL},
+};
+
+static PyType_Spec awaitable_spec = {
+    .name = "_static.awaitable_wrapper",
+    .basicsize = sizeof(_PyClassLoader_Awaitable),
+    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC | Py_TPFLAGS_BASETYPE |
+        Py_TPFLAGS_IMMUTABLETYPE | Ci_TPFLAGS_HAVE_AM_EXTRA,
+    .slots = awaitable_slots,
 };
 
 PyObject* _PyClassLoader_NewAwaitableWrapper(
@@ -262,28 +263,38 @@ PyObject* _PyClassLoader_NewAwaitableWrapper(
     PyObject* state,
     awaitable_cb cb,
     awaitable_presend onsend) {
-  if (PyType_Ready(&_PyClassLoader_AwaitableType) < 0) {
+  PyTypeObject* type = Ci_GetAwaitableWrapperType();
+  if (type == NULL) {
+    type = (PyTypeObject*)PyType_FromSpec(&awaitable_spec);
+    if (type == NULL) {
+      return NULL;
+    }
+
+    // PyType_FromSpec builds tp_as_async from the Py_am_* slots but doesn't
+    // know about the extra setawaiter slot.  Overwrite it with our static
+    // struct that includes the extra method, mirroring AsyncLazyValueCompute.
+    //
+    // This is a little odd in that we're mutating a type that's been marked as
+    // immutable, but since nothing uses the type yet it should be safe.
+    type->tp_as_async = (PyAsyncMethods*)&awaitable_as_async;
+    Ci_SetAwaitableWrapperType(type);
+
+    // Drop the reference from PyType_FromSpec(), rely on the reference in the
+    // module state.
+    Py_DECREF(type);
+  }
+
+  _PyClassLoader_Awaitable* awaitable =
+      PyObject_GC_New(_PyClassLoader_Awaitable, type);
+  if (awaitable == NULL) {
     return NULL;
   }
-  _PyClassLoader_Awaitable* awaitable =
-      PyObject_GC_New(_PyClassLoader_Awaitable, &_PyClassLoader_AwaitableType);
 
   Py_INCREF(state);
   awaitable->state = state;
   awaitable->cb = cb;
   awaitable->onsend = onsend;
   awaitable->awaiter = NULL;
-
-#if PY_VERSION_HEX < 0x030C0000
-  if (eager) {
-    Ci_PyWaitHandleObject* handle = (Ci_PyWaitHandleObject*)coro;
-    Py_INCREF(handle->wh_coro_or_result);
-    awaitable->coro = handle->wh_coro_or_result;
-    awaitable->iter = handle->wh_coro_or_result;
-    handle->wh_coro_or_result = (PyObject*)awaitable;
-    return coro;
-  }
-#endif
 
   awaitable->coro = coro;
   awaitable->iter = NULL;

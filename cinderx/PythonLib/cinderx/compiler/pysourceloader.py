@@ -20,9 +20,8 @@ from types import CodeType
 from .pycodegen import compile_code
 
 
-# pyre-fixme[13]: path inherited but not initialized
 class PySourceFileLoader(SourceFileLoader):
-    # pyre-fixme[14]: source_to_code invalid override
+    # pyrefly: ignore [bad-override]
     def source_to_code(
         self,
         data: ast.Expression | ast.Interactive | ast.Module | str,

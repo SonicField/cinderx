@@ -4,9 +4,9 @@
 
 #include "cinderx/python.h"
 
+#include "cinderx/Common/containers.h"
 #include "cinderx/Common/ref.h"
 #include "cinderx/Jit/bytecode_offsets.h"
-#include "cinderx/Jit/containers.h"
 
 #include <asmjit/asmjit.h>
 
@@ -14,7 +14,7 @@
 #include <optional>
 #include <vector>
 
-namespace jit {
+namespace cinderx::jit {
 
 namespace hir {
 struct FrameState;
@@ -26,13 +26,7 @@ class Instr;
 struct CodeObjLoc {
   explicit CodeObjLoc(BorrowedRef<PyFrameObject> frame)
       : code{Ref<PyCodeObject>::steal(PyFrame_GetCode(frame))} {
-    instr_offset = BCIndex{
-#if PY_VERSION_HEX < 0x030B0000
-        frame->f_lasti
-#else
-        PyFrame_GetLasti(frame)
-#endif
-    };
+    instr_offset = BCIndex{PyFrame_GetLasti(frame)};
   }
 
   CodeObjLoc(BorrowedRef<PyCodeObject> code, BCOffset instr_offset)
@@ -110,7 +104,6 @@ class DebugInfo {
     }
 
     bool operator==(const LocNode& other) const = default;
-    bool operator!=(const LocNode& other) const = default;
   };
 
   static const uint16_t kNoCallerID = UINT16_MAX;
@@ -147,7 +140,7 @@ class DebugInfo {
   // Index into the graph, keyed by address in the generated code
   //
   // Consider storing in a vector sorted by address instead.
-  jit::UnorderedMap<uintptr_t, LocNode> addr_locs_;
+  UnorderedMap<uintptr_t, LocNode> addr_locs_;
 };
 
-} // namespace jit
+} // namespace cinderx::jit

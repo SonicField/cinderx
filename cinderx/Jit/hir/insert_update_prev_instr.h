@@ -4,17 +4,17 @@
 
 #include "cinderx/Jit/hir/pass.h"
 
-namespace jit::hir {
+namespace cinderx::jit::hir {
 
-class InsertUpdatePrevInstr : public Pass {
+class InsertUpdatePrevInstr final : public Pass {
  public:
   InsertUpdatePrevInstr() : Pass("InsertUpdatePrevInstr") {}
 
-  void Run(Function& irfunc) override;
+  void run(Function& irfunc) override;
 
-  static std::unique_ptr<InsertUpdatePrevInstr> Factory() {
+  static std::unique_ptr<InsertUpdatePrevInstr> factory() {
     return std::make_unique<InsertUpdatePrevInstr>();
   }
 };
 
-} // namespace jit::hir
+} // namespace cinderx::jit::hir

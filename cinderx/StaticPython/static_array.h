@@ -1,13 +1,8 @@
 /* Copyright (c) Meta Platforms, Inc. and affiliates. */
 
-#ifndef Ci_STATIC_ARRAY_H
-#define Ci_STATIC_ARRAY_H
+#pragma once
 
 #include "Python.h"
-
-#if PY_VERSION_HEX < 0x030C0000
-#include "cinder/exports.h"
-#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -28,6 +23,4 @@ PyObject* _Ci_StaticArray_Get(PyObject* array, Py_ssize_t index);
 
 #ifdef __cplusplus
 }
-#endif
-
 #endif

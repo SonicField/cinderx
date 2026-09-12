@@ -2,12 +2,11 @@
 
 #include "cinderx/Jit/codegen/arch/unknown.h"
 
-// NOLINTNEXTLINE(facebook-unused-include-check)
-#include "cinderx/Jit/codegen/arch/detection.h"
+#include "cinderx/Common/define.h"
 
 #ifdef CINDER_UNKNOWN
 
-namespace jit::codegen {
+namespace cinderx::jit::codegen {
 
 PhyLocation PhyLocation::parse(std::string_view name) {
 #define FIND_GP_REG(V)                \
@@ -31,12 +30,12 @@ PhyLocation PhyLocation::parse(std::string_view name) {
 }
 
 std::string PhyLocation::toString() const {
-  if (is_memory()) {
+  if (isMemory()) {
     return fmt::format("[FP({})]", loc);
   }
   return std::string{name(static_cast<RegId>(loc))};
 }
 
-} // namespace jit::codegen
+} // namespace cinderx::jit::codegen
 
 #endif

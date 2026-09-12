@@ -13,10 +13,6 @@
 #include "cinderx/StaticPython/typed_method_def.h"
 #include "cinderx/StaticPython/vtable.h"
 
-#if PY_VERSION_HEX < 0x030C0000
-#include "cinder/exports.h"
-#endif
-
 #define _PyClassMethod_Check(op) (Py_TYPE(op) == &PyClassMethod_Type)
 
 // For simple signatures which are the most common that take and return Python
@@ -106,7 +102,7 @@ _PyClassLoader_ThunkSignature* _PyClassLoader_GetThunkSignatureFromCode(
   }
 
   // Long signature or primitive return, we need to allocate a signature object.
-  sig = _PyClassLoader_ThunkSignature_New(arg_count);
+  sig = _PyClassLoader_ThunkSignature_New(arg_count + extra_args);
   if (sig == NULL) {
     return NULL;
   }
@@ -235,21 +231,46 @@ static _PyClassLoader_StaticCallReturn return_to_native_typecode(
   return ret;
 }
 
+// Number of native arguments passed via registers (excluding the state arg).
+// On x86-64 SysV: rsi, rdx, rcx, r8, r9 = 5 register args.
+// On x86-64 Windows: rdx, r8, r9 = 3 register args.
+// On ARM64: x1-x7 = 7 register args.
+#if defined(__aarch64__) || defined(_M_ARM64)
+#define NATIVE_REG_ARG_COUNT 7
+// The stack arg pointer points directly to the first stack arg.
+#define NATIVE_STACK_ARG_OFFSET 0
+#elif defined(_M_X64) || defined(_M_AMD64) || defined(__x86_64__)
+#ifdef _WIN32
+#define NATIVE_REG_ARG_COUNT 3
+// The stack arg pointer points to the saved frame pointer, so we skip
+// the frame pointer, return address, and 4 shadow space slots.
+#define NATIVE_STACK_ARG_OFFSET 6
+#else
+#define NATIVE_REG_ARG_COUNT 5
+// The stack arg pointer points to the saved frame pointer, so we skip
+// the frame pointer and the return address to reach the first stack arg.
+#define NATIVE_STACK_ARG_OFFSET 2
+#endif
+#endif
+
 int _PyClassLoader_HydrateArgsFromSig(
     _PyClassLoader_ThunkSignature* sig,
     Py_ssize_t arg_count,
     void** args,
     PyObject** call_args,
     PyObject** free_args) {
-  PyObject** extra_args = (PyObject**)args[5];
+  PyObject** extra_args = (PyObject**)args[NATIVE_REG_ARG_COUNT];
   for (Py_ssize_t i = 0; i < arg_count; i++) {
     void* original;
-    if (i < 5) {
+    if (i < NATIVE_REG_ARG_COUNT) {
       original = args[i]; // skip the v-table state
     } else {
-      // The original args came in on the stack, so we have to skip the frame
-      // pointer, the return address and then add one more.
-      original = extra_args[i - 3];
+      // The original args came in on the stack.  On x86-64 the stack pointer
+      // saved in the args array points to the frame pointer, so we have to
+      // skip over it and the return address.  On ARM64 the pointer is directly
+      // to the first stack arg.
+      original =
+          extra_args[(i - NATIVE_REG_ARG_COUNT) + NATIVE_STACK_ARG_OFFSET];
     }
 
     if (sig->ta_has_primitives && sig->ta_argtype[i] != TYPED_OBJECT) {
@@ -332,25 +353,7 @@ PyObject* _PyVTable_coroutine_property_vectorcall(
 
   int eager;
 
-#if PY_VERSION_HEX < 0x030C0000
-  PyObject* descr = state->tcs_value;
-  eager = Ci_PyWaitHandle_CheckExact(coro);
-  if (eager) {
-    Ci_PyWaitHandleObject* handle = (Ci_PyWaitHandleObject*)coro;
-    if (handle->wh_waiter == NULL) {
-      if (_PyClassLoader_CheckReturnType(
-              Py_TYPE(descr),
-              handle->wh_coro_or_result,
-              (_PyClassLoader_RetTypeInfo*)state)) {
-        return coro;
-      }
-      Ci_PyWaitHandle_Release(coro);
-      return NULL;
-    }
-  }
-#else
   eager = 0;
-#endif
   return _PyClassLoader_NewAwaitableWrapper(
       coro, eager, (PyObject*)state, _PyClassLoader_CheckReturnCallback, NULL);
 }
@@ -676,7 +679,56 @@ StaticMethodInfo _PyVTable_load_generic(PyObject* state, PyObject* self) {
   return return_to_native_typecode(obj, sig->ta_rettype);
 }
 
+// macOS prefixes all C symbols with an underscore.
+#ifdef __APPLE__
+#define THUNK_NATIVE_NAME "__PyVTable_thunk_native"
+#else
+#define THUNK_NATIVE_NAME "_PyVTable_thunk_native"
+#endif
+
 #if defined(_M_X64) || defined(_M_AMD64) || defined(__x86_64__)
+#ifdef _WIN32
+__attribute__((naked))
+PyObject* _PyVTable_native_entry(PyObject* state, void** args) {
+  __asm__(
+      "push %rbp\n"
+      "mov %rsp, %rbp\n"
+      /* Allocate 16 bytes for the struct return buffer. Windows x64 */
+      /* returns structs >8 bytes via a hidden first pointer argument. */
+      "sub $16, %rsp\n"
+      /* Save the frame pointer for overflow arg access */
+      "push %rbp\n"
+      /* Push the Windows x64 register args (RDX, R8, R9) onto the */
+      /* stack so we can recover them in hydrate_args.  RCX holds the */
+      /* state argument which we pass through separately. */
+      "push %r9\n"
+      "push %r8\n"
+      "push %rdx\n"
+      /* Set up call to _PyVTable_thunk_native(thunk, args): */
+      /* RCX = &return_buffer (hidden struct return pointer) */
+      /* RDX = thunk/state (was in RCX on entry) */
+      /* R8  = args array pointer */
+      "mov %rcx, %rax\n"
+      "lea -16(%rbp), %rcx\n"
+      "mov %rax, %rdx\n"
+      "mov %rsp, %r8\n"
+      /* Allocate shadow space for the call */
+      "sub $32, %rsp\n"
+      "call " THUNK_NATIVE_NAME
+      "\n"
+      /* Restore the struct return values into RAX/RDX to match the */
+      /* JIT's native calling convention (RAX:RDX pair like SysV) */
+      "mov -16(%rbp), %rax\n"
+      "mov -8(%rbp), %rdx\n"
+      /* We don't know if we're returning a floating point value or not */
+      /* so we assume we are, and always populate the xmm registers */
+      /* even if we don't need to */
+      "movq %rax, %xmm0\n"
+      "movq %rdx, %xmm1\n"
+      "leave\n"
+      "ret\n");
+}
+#else
 __attribute__((naked))
 PyObject* _PyVTable_native_entry(PyObject* state, void** args) {
   __asm__(
@@ -695,7 +747,8 @@ PyObject* _PyVTable_native_entry(PyObject* state, void** args) {
       "push %rdx\n"
       "push %rsi\n"
       "mov %rsp, %rsi\n"
-      "call _PyVTable_thunk_native\n"
+      "call " THUNK_NATIVE_NAME
+      "\n"
       /* We don't know if we're returning a floating point value or not */
       /* so we assume we are, and always populate the xmm registers */
       /* even if we don't need to */
@@ -704,10 +757,45 @@ PyObject* _PyVTable_native_entry(PyObject* state, void** args) {
       "leave\n"
       "ret\n");
 }
+#endif
+#elif defined(__aarch64__) || defined(_M_ARM64)
+__attribute__((naked))
+PyObject* _PyVTable_native_entry(PyObject* state, void** args) {
+  __asm__(
+      /* Save frame pointer and link register */
+      "stp x29, x30, [sp, #-16]!\n"
+      "mov x29, sp\n"
+      /* We want to push the arguments passed natively onto the stack */
+      /* so that we can recover them in hydrate_args.  So we store them */
+      /* in a stack-allocated array and pass the address as the 2nd */
+      /* argument.  Note we don't need to save x0 as it's the state */
+      /* argument which we're passing in anyway. */
+      /* Calculate pointer to stack overflow args (original entry sp) */
+      "add x9, x29, #16\n"
+      /* Store x1-x7 and the stack arg pointer into the array */
+      "stp x1, x2, [sp, #-64]!\n"
+      "stp x3, x4, [sp, #16]\n"
+      "stp x5, x6, [sp, #32]\n"
+      "stp x7, x9, [sp, #48]\n"
+      /* Set x1 to point to the args array */
+      "mov x1, sp\n"
+      "bl " THUNK_NATIVE_NAME
+      "\n"
+      /* We don't know if we're returning a floating point value or not */
+      /* so we assume we are, and always populate the FP registers */
+      /* even if we don't need to */
+      "fmov d0, x0\n"
+      "fmov d1, x1\n"
+      /* Restore frame and return */
+      "mov sp, x29\n"
+      "ldp x29, x30, [sp], #16\n"
+      "ret\n");
+}
 #else
 PyObject* _PyVTable_native_entry(PyObject* state, void** args) {
   PyErr_SetString(
-      PyExc_RuntimeError, "native entry points not available on non x-64");
+      PyExc_RuntimeError,
+      "native entry points not available on this architecture");
   return NULL;
 }
 #endif

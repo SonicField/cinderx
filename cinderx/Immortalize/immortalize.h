@@ -6,9 +6,7 @@
 
 #include <stdbool.h>
 
-#if PY_VERSION_HEX < 0x030C0000
-#define _Py_IMMORTAL_REFCNT kImmortalInitialCount
-#endif
+namespace cinderx {
 
 /*
  * Immortalizes a Python object but does not check if that makes sense to do so.
@@ -18,7 +16,7 @@
 #define IMMORTALIZE(OBJ) Py_SET_IMMORTAL(OBJ)
 #elif PY_VERSION_HEX >= 0x030E0000
 #define IMMORTALIZE(OBJ) Py_SET_REFCNT((OBJ), _Py_IMMORTAL_INITIAL_REFCNT)
-#elif PY_VERSION_HEX >= 0x030C0000
+#else
 #define IMMORTALIZE(OBJ) Py_SET_REFCNT((OBJ), _Py_IMMORTAL_REFCNT)
 #endif
 
@@ -35,7 +33,7 @@ bool immortalize(PyObject* obj);
 
 /*
  * Immortalize the Python objects currently on the heap.
- *
- * NOTE: In 3.10.cinder, this imports `gc` and calls `gc.immortalize_heap()`
  */
 PyObject* immortalize_heap(PyObject* mod);
+
+} // namespace cinderx

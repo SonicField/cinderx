@@ -2,8 +2,9 @@
 
 #include "cinderx/Jit/jit_time_log.h"
 
+#include "cinderx/Common/containers.h"
 #include "cinderx/Common/log.h"
-#include "cinderx/Jit/containers.h"
+#include "cinderx/Jit/config.h"
 
 #include <fmt/core.h>
 #include <fmt/format.h>
@@ -12,12 +13,11 @@
 #include <sstream>
 #include <vector>
 
-namespace jit {
-
-static std::vector<std::string> capture_compilation_times_for;
+namespace cinderx::jit {
 
 void parseAndSetFuncList(const std::string& flag_value) {
-  capture_compilation_times_for.clear();
+  auto& func_list = getMutableConfig().capture_compilation_times_for;
+  func_list.clear();
 
   std::stringstream ss(flag_value);
 
@@ -25,7 +25,7 @@ void parseAndSetFuncList(const std::string& flag_value) {
     std::string substr;
     getline(ss, substr, ',');
     if (!substr.empty()) {
-      capture_compilation_times_for.emplace_back(substr);
+      func_list.emplace_back(substr);
     }
   }
 }
@@ -63,7 +63,7 @@ bool isMatch(const std::string& word, const std::string& pattern) {
 }
 
 bool captureCompilationTimeFor(const std::string& function_name) {
-  for (const std::string& pattern : capture_compilation_times_for) {
+  for (const std::string& pattern : getConfig().capture_compilation_times_for) {
     if (isMatch(function_name, pattern)) {
       return true;
     }
@@ -75,7 +75,7 @@ void CompilationPhaseTimer::dumpPhaseTimingsAndTidy() {
   // flatten phase timings into one vector
   std::vector<std::tuple<int, SubPhaseTimer*>> toproc;
   std::vector<std::tuple<int, SubPhaseTimer*, int, bool, int>> flat_rows;
-  jit::UnorderedMap<SubPhaseTimer*, int> subphase_to_group_total_time;
+  UnorderedMap<SubPhaseTimer*, int> subphase_to_group_total_time;
 
   toproc.emplace_back(0, root_.get());
   while (!toproc.empty()) {
@@ -208,4 +208,4 @@ void CompilationPhaseTimer::end() {
   current_phase_stack_.pop_back();
 }
 
-} // namespace jit
+} // namespace cinderx::jit

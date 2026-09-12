@@ -63,8 +63,8 @@ def make_fixed_modules() -> Mapping[str, Mapping[str, object]]:
 FIXED_MODULES: Mapping[str, Mapping[str, object]] = make_fixed_modules()
 
 
-TVar = TypeVar("TScope")
-TScopeData = TypeVar("TData", covariant=True)
+TVar = TypeVar("TVar")
+TScopeData = TypeVar("TScopeData", covariant=True)
 
 SymbolMap = dict[AST, SymbolTable]
 
@@ -274,7 +274,10 @@ class ScopeContextManager(Generic[TVar, TScopeData]):
         return self.scope
 
     def __exit__(
-        self, exc_type: type[Exception], exc_val: Exception, exc_tb: object
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: object,
     ) -> None:
         self.parent.pop()
 
@@ -498,9 +501,13 @@ class AstRewriter(NodeVisitor):
 def lineinfo(node: TAst, target: AST | None = None) -> TAst:
     if not target:
         # set lineno to -1 to indicate non-user code
+        # pyrefly: ignore [missing-attribute]
         node.lineno = -1
+        # pyrefly: ignore [missing-attribute]
         node.col_offset = -1
+        # pyrefly: ignore [missing-attribute]
         node.end_lineno = -1
+        # pyrefly: ignore [missing-attribute]
         node.end_col_offset = -1
     else:
         copy_location(node, target)

@@ -15,18 +15,9 @@
 #include "internal/pycore_genobject.h"
 #endif
 
-#if PY_VERSION_HEX < 0x030C0000
-#define CI_INTERP_IMPORT_FIELD(interp, field) interp->field
-#else
 #define CI_INTERP_IMPORT_FIELD(interp, field) interp->imports.field
-#endif
 
 #include "internal/pycore_interp.h"
-
-#if PY_VERSION_HEX < 0x030C0000
-#define _PyType_GetDict(type) ((type)->tp_dict)
-#define _PyObject_CallNoArgs _PyObject_CallNoArg
-#endif
 
 #if PY_VERSION_HEX < 0x030D0000
 
@@ -63,10 +54,13 @@ static inline int PyTime_MonotonicRaw(PyTime_t* result) {
 
 // Basic renames that went into 3.14.
 #define _PyGen_GetGeneratorFromFrame _PyFrame_GetGenerator
+#define PyThreadState_GetUnchecked _PyThreadState_UncheckedGet
+
+// Technically the internal version is different in that it doesn't check types,
+// but we always use it with unicode objects.
+#define PyUnicode_Equal _PyUnicode_Equal
 
 #endif
-
-#if PY_VERSION_HEX >= 0x030C0000
 
 // Fetch a _PyInterpreterFrame from a PyThreadState.
 inline _PyInterpreterFrame* interpFrameFromThreadState(PyThreadState* tstate) {
@@ -136,8 +130,6 @@ inline void setFrameInstruction(_PyInterpreterFrame* frame, _Py_CODEUNIT* loc) {
 #endif
 }
 
-#endif // PY_VERSION_HEX >= 0x030C0000
-
 #if PY_VERSION_HEX >= 0x030E0000
 #define _CiArg_UnpackKeywords(                                        \
     args, nargs, kwargs, kwnames, parser, minpos, maxpos, minkw, buf) \
@@ -175,7 +167,7 @@ static inline PyCodeObject* frameCode(_PyInterpreterFrame* frame) {
 static inline void setFrameCode(_PyInterpreterFrame* frame, PyObject* code) {
   frame->f_executable = PyStackRef_FromPyObjectNew(code);
 }
-#elif PY_VERSION_HEX >= 0x30C0000
+#else
 #define FRAME_EXECUTABLE f_code
 #define FRAME_EXECUTABLE_OFFSET offsetof(_PyInterpreterFrame, f_code)
 #define FRAME_INSTR prev_instr
@@ -187,13 +179,8 @@ inline PyCodeObject* frameCode(_PyInterpreterFrame* frame) {
 static inline void setFrameCode(_PyInterpreterFrame* frame, PyObject* code) {
   frame->f_code = (PyCodeObject*)Py_NewRef(code);
 }
-#else
-inline PyCodeObject* frameCode(PyFrameObject* frame) {
-  return frame->f_code;
-}
 #endif
 
-#if PY_VERSION_HEX >= 0x030C0000
 static inline PyObject* frameExecutable(_PyInterpreterFrame* frame) {
 #if PY_VERSION_HEX >= 0x030E0000
   return PyStackRef_AsPyObjectBorrow(frame->f_executable);
@@ -201,7 +188,6 @@ static inline PyObject* frameExecutable(_PyInterpreterFrame* frame) {
   return (PyObject*)frameCode(frame);
 #endif
 }
-#endif
 
 // Code object flag that will prevent JIT compilation.
 //

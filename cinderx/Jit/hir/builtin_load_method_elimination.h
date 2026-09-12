@@ -4,17 +4,17 @@
 
 #include "cinderx/Jit/hir/pass.h"
 
-namespace jit::hir {
+namespace cinderx::jit::hir {
 
-class BuiltinLoadMethodElimination : public Pass {
+class BuiltinLoadMethodElimination final : public Pass {
  public:
   BuiltinLoadMethodElimination() : Pass("BuiltinLoadMethodElimination") {}
 
-  void Run(Function& irfunc) override;
+  void run(Function& irfunc) override;
 
-  static std::unique_ptr<BuiltinLoadMethodElimination> Factory() {
+  static std::unique_ptr<BuiltinLoadMethodElimination> factory() {
     return std::make_unique<BuiltinLoadMethodElimination>();
   }
 };
 
-} // namespace jit::hir
+} // namespace cinderx::jit::hir

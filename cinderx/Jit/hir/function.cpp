@@ -2,38 +2,40 @@
 
 #include "cinderx/Jit/hir/function.h"
 
-namespace jit::hir {
+#include "cinderx/Common/log.h"
+#include "cinderx/Jit/hir/dominance.h"
+
+namespace cinderx::jit::hir {
 
 // Be intentional about HIR structure sizes.  There's no hard limit on what
 // these sizes have to be, but we should be aware when we change them.
 //
-// Ignore it for libc++ for now though, too tricky to track multiple
+// Ignore it for libc++ and Windows for now though, too tricky to track multiple
 // implementations.
-#ifndef _LIBCPP_VERSION
-static_assert(sizeof(Function) == 48 * kPointerSize);
-static_assert(sizeof(CFG) == 5 * kPointerSize);
-static_assert(sizeof(BasicBlock) == 20 * kPointerSize);
-static_assert(sizeof(Instr) == 6 * kPointerSize);
+#if !defined(_LIBCPP_VERSION)
+static_assert(kOS == OS::kWindows || sizeof(Function) == 56 * kPointerSize);
+static_assert(kOS == OS::kWindows || sizeof(CFG) == 5 * kPointerSize);
+static_assert(kOS == OS::kWindows || sizeof(BasicBlock) == 20 * kPointerSize);
+static_assert(kOS == OS::kWindows || sizeof(Instr) == 6 * kPointerSize);
 #endif
 
 Function::Function() {}
 
-Function::~Function() {
-  // Serialize as we alter ref-counts on potentially global objects.
-  ThreadedCompileSerialize guard;
-  code.reset();
-  builtins.reset();
-  globals.reset();
-  prim_args_info.reset();
+Function::~Function() = default;
+
+void Function::setCode(BorrowedRef<PyCodeObject> new_code) {
+  code = new_code;
 }
 
-void Function::setCode(BorrowedRef<PyCodeObject> code_2) {
-  this->code.reset(code_2);
-  uses_runtime_func = usesRuntimeFunc(code_2);
-  frameMode = getConfig().frame_mode;
+std::size_t Function::numBlocks() const {
+  return cfg.numBlocks();
 }
 
-std::size_t Function::CountInstrs(InstrPredicate pred) const {
+std::size_t Function::numInstrs() const {
+  return cfg.numInstrs();
+}
+
+std::size_t Function::countInstrs(InstrPredicate pred) const {
   std::size_t result = 0;
   for (const auto& block : cfg.blocks) {
     for (const auto& instr : block) {
@@ -83,12 +85,34 @@ bool Function::canDeopt() const {
   return false;
 }
 
+const DominatorTree& Function::domTree() {
+  if (dom_tree_ == nullptr) {
+    dom_tree_ = std::make_unique<DominatorTree>(cfg.entry_block);
+  }
+  // Catch any CFG-mutating pass that forgot to invalidate.  Recompute a fresh
+  // tree and confirm the cache still matches the current CFG.  This happens in
+  // debug builds only for performance reasons.
+  if constexpr (kDebug) {
+    DominatorTree fresh{cfg.entry_block};
+    JIT_CHECK(
+        dom_tree_->sameDominanceAs(fresh),
+        "Cached dominator tree for {} is stale; a CFG-mutating pass failed to "
+        "call Function::invalidateDomTree()",
+        fullname);
+  }
+  return *dom_tree_;
+}
+
+void Function::invalidateDomTree() {
+  dom_tree_.reset();
+}
+
 BorrowedRef<PyCodeObject> Function::codeFor(const Instr& instr) const {
-  if (instr.IsBeginInlinedFunction()) {
+  if (instr.isBeginInlinedFunction()) {
     auto bif = static_cast<const BeginInlinedFunction*>(&instr);
     return bif->func()->func_code;
   }
-  if (instr.IsLoadGlobalCached()) {
+  if (instr.isLoadGlobalCached()) {
     auto load_global = static_cast<const LoadGlobalCached*>(&instr);
     return load_global->code();
   }
@@ -110,4 +134,4 @@ OpcodeCounts count_opcodes(const Function& func) {
   return counts;
 }
 
-} // namespace jit::hir
+} // namespace cinderx::jit::hir

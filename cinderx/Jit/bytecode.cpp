@@ -2,7 +2,7 @@
 
 #include "cinderx/Jit/bytecode.h"
 
-namespace jit {
+namespace cinderx::jit {
 
 BCOffset BytecodeInstruction::baseOffset() const {
   return baseOffset_;
@@ -71,7 +71,6 @@ int BytecodeInstruction::uninstrumentedOpcode() const {
 }
 
 int BytecodeInstruction::specializedOpcode() const {
-#if PY_VERSION_HEX >= 0x030C0000
   int opcode = uninstrumentedOpcode();
 
   switch (opcode) {
@@ -80,6 +79,9 @@ int BytecodeInstruction::specializedOpcode() const {
     case BINARY_OP_ADD_UNICODE:
     case BINARY_OP_MULTIPLY_FLOAT:
     case BINARY_OP_MULTIPLY_INT:
+    case BINARY_OP_SUBSCR_DICT:
+    case BINARY_OP_SUBSCR_LIST_INT:
+    case BINARY_OP_SUBSCR_TUPLE_INT:
     case BINARY_OP_SUBTRACT_FLOAT:
     case BINARY_OP_SUBTRACT_INT:
     case BINARY_SUBSCR_DICT:
@@ -90,6 +92,12 @@ int BytecodeInstruction::specializedOpcode() const {
     case COMPARE_OP_STR:
     case LOAD_ATTR_MODULE:
     case STORE_SUBSCR_DICT:
+    case STORE_SUBSCR_LIST_INT:
+    case TO_BOOL_BOOL:
+    case TO_BOOL_INT:
+    case TO_BOOL_LIST:
+    case TO_BOOL_NONE:
+    case TO_BOOL_STR:
     case UNPACK_SEQUENCE_LIST:
     case UNPACK_SEQUENCE_TUPLE:
     case UNPACK_SEQUENCE_TWO_TUPLE:
@@ -97,9 +105,6 @@ int BytecodeInstruction::specializedOpcode() const {
     default:
       return unspecialize(opcode);
   }
-#else
-  return opcode();
-#endif
 }
 
 int BytecodeInstruction::oparg() const {
@@ -131,6 +136,10 @@ bool BytecodeInstruction::isBranch() const {
     default:
       return false;
   }
+}
+
+bool BytecodeInstruction::isBackwardBranch() const {
+  return isBranch() && getJumpTarget() <= baseOffset();
 }
 
 bool BytecodeInstruction::isReturn() const {
@@ -176,7 +185,7 @@ BCOffset BytecodeInstruction::getJumpTarget() const {
   // We make this tweak here so it applies both when generating the branching
   // HIR operation, and when creating block boundaries for bytecode. The END_FOR
   // will end up on its own in an unreachable block.
-  if (PY_VERSION_HEX >= 0x030B0000 && opcode() == FOR_ITER) {
+  if (opcode() == FOR_ITER) {
     BytecodeInstruction target_bc{code_, target};
     JIT_CHECK(target_bc.opcode() == END_FOR, "Expected END_FOR");
     return target_bc.nextInstrOffset();
@@ -190,13 +199,9 @@ BCOffset BytecodeInstruction::nextInstrOffset() const {
 }
 
 _Py_CODEUNIT BytecodeInstruction::word() const {
-#if PY_VERSION_HEX >= 0x030C0000
   int opcode = unspecialize(uninstrumentedOpcode());
   int oparg = _Py_OPARG(codeUnit(code_)[opcodeIndex().value()]);
   return _Py_MAKE_CODEUNIT(opcode, oparg);
-#else
-  return codeUnit(code_)[opcodeIndex().value()];
-#endif
 }
 
 bool BytecodeInstruction::isAbsoluteControlFlow() const {
@@ -212,8 +217,7 @@ bool BytecodeInstruction::isAbsoluteControlFlow() const {
     case POP_JUMP_IF_ZERO:
     case POP_JUMP_IF_FALSE:
     case POP_JUMP_IF_TRUE:
-      // These instructions switched from absolute to relative in 3.11.
-      return PY_VERSION_HEX < 0x030B0000;
+      return false;
     default:
       return false;
   }
@@ -227,9 +231,7 @@ BytecodeInstructionBlock::BytecodeInstructionBlock(
     BorrowedRef<PyCodeObject> code,
     BCIndex start,
     BCIndex end)
-    : code_{ThreadedRef<PyCodeObject>::create(code)},
-      start_idx_{start},
-      end_idx_{end} {}
+    : code_{code}, start_idx_{start}, end_idx_{end} {}
 
 BytecodeInstructionBlock::Iterator BytecodeInstructionBlock::begin() const {
   return Iterator{code_, start_idx_, end_idx_};
@@ -265,4 +267,4 @@ BorrowedRef<PyCodeObject> BytecodeInstructionBlock::code() const {
   return code_;
 }
 
-} // namespace jit
+} // namespace cinderx::jit

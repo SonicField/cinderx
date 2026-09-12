@@ -7,27 +7,30 @@
 #include "cinderx/Jit/codegen/autogen.h"
 #include "cinderx/Jit/codegen/environ.h"
 #include "cinderx/Jit/codegen/gen_asm.h"
+#include "cinderx/Jit/codegen/tsan.h"
 #include "cinderx/Jit/jit_rt.h"
 #include "cinderx/Jit/lir/inliner.h"
 #include "cinderx/Jit/lir/instruction.h"
+#include "cinderx/Jit/lir/linear_scan.h"
 #include "cinderx/Jit/lir/parser.h"
 #include "cinderx/Jit/lir/postalloc.h"
 #include "cinderx/Jit/lir/postgen.h"
-#include "cinderx/Jit/lir/regalloc.h"
 #include "cinderx/RuntimeTests/fixtures.h"
 #include "cinderx/module_state.h"
 
+#include <cstddef>
+// NOLINTNEXTLINE(facebook-hte-BadInclude-regex)
 #include <regex>
 #include <sstream>
 
-#ifdef BUCK_BUILD
+#ifdef CINDERX_RUNTIME_TESTS_USE_BUCK_RESOURCES
 #include "tools/cxx/Resources.h"
 #endif
 
-using namespace jit;
-using namespace jit::lir;
+using namespace cinderx::jit;
+using namespace cinderx::jit::lir;
 
-namespace jit::codegen {
+namespace cinderx::jit::codegen {
 
 class BackendTest : public RuntimeTest {
  public:
@@ -51,7 +54,8 @@ class BackendTest : public RuntimeTest {
     post_rewrite.run();
 
     asmjit::CodeHolder code;
-    ICodeAllocator* code_allocator = cinderx::getModuleState()->codeAllocator();
+    ICodeAllocator* code_allocator =
+        cinderx::getModuleState()->code_allocator.get();
     code.init(code_allocator->asmJitEnvironment());
 
     arch::Builder as(&code);
@@ -96,17 +100,18 @@ class BackendTest : public RuntimeTest {
     // Push used callee-saved registers.
     std::vector<int> pushed_regs;
     pushed_regs.reserve(saved_regs.count());
-    while (!saved_regs.Empty()) {
-      as.push(asmjit::x86::gpq(saved_regs.GetFirst().loc));
-      pushed_regs.push_back(saved_regs.GetFirst().loc);
-      saved_regs.RemoveFirst();
+    while (!saved_regs.empty()) {
+      as.push(asmjit::x86::gpq(saved_regs.getFirst().loc));
+      pushed_regs.push_back(saved_regs.getFirst().loc);
+      saved_regs.removeFirst();
     }
 
     if (arg_buffer_size > 0) {
       as.sub(asmjit::x86::rsp, arg_buffer_size);
     }
 
-    NativeGenerator gen(nullptr);
+    NativeGeneratorFactory factory;
+    NativeGenerator gen(nullptr, factory);
     gen.env_ = std::move(environ);
     gen.lir_func_.reset(lir_func);
     gen.generateAssemblyBody(code);
@@ -127,15 +132,28 @@ class BackendTest : public RuntimeTest {
     JIT_CHECK(allocate_stack % kStackAlign == 0, "unaligned");
     as.sub(asmjit::a64::sp, asmjit::a64::sp, allocate_stack);
 
-    // Push used callee-saved registers.
-    std::vector<int> pushed_regs;
-    pushed_regs.reserve(saved_regs.count());
-    while (!saved_regs.Empty()) {
+    // Push used callee-saved registers, handling GP and FP separately.
+    auto gp_regs = saved_regs & ALL_GP_REGISTERS;
+    auto vecd_regs = saved_regs & ALL_VECD_REGISTERS;
+
+    std::vector<int> pushed_gp_regs;
+    pushed_gp_regs.reserve(gp_regs.count());
+    while (!gp_regs.empty()) {
       as.str(
-          asmjit::a64::x(saved_regs.GetFirst().loc),
+          asmjit::a64::x(gp_regs.getFirst().loc),
           asmjit::a64::ptr_pre(asmjit::a64::sp, -16));
-      pushed_regs.push_back(saved_regs.GetFirst().loc);
-      saved_regs.RemoveFirst();
+      pushed_gp_regs.push_back(gp_regs.getFirst().loc);
+      gp_regs.removeFirst();
+    }
+
+    std::vector<int> pushed_vecd_regs;
+    pushed_vecd_regs.reserve(vecd_regs.count());
+    while (!vecd_regs.empty()) {
+      as.str(
+          asmjit::a64::d(vecd_regs.getFirst().loc - VECD_REG_BASE),
+          asmjit::a64::ptr_pre(asmjit::a64::sp, -16));
+      pushed_vecd_regs.push_back(vecd_regs.getFirst().loc);
+      vecd_regs.removeFirst();
     }
 
     if (arg_buffer_size > 0) {
@@ -143,7 +161,8 @@ class BackendTest : public RuntimeTest {
       as.sub(asmjit::a64::sp, asmjit::a64::sp, arg_buffer_size);
     }
 
-    NativeGenerator gen(nullptr);
+    NativeGeneratorFactory factory;
+    NativeGenerator gen(nullptr, factory);
     gen.env_ = std::move(environ);
     gen.lir_func_.reset(lir_func);
     gen.generateAssemblyBody(code);
@@ -152,7 +171,15 @@ class BackendTest : public RuntimeTest {
       as.add(asmjit::a64::sp, asmjit::a64::sp, arg_buffer_size);
     }
 
-    for (auto riter = pushed_regs.rbegin(); riter != pushed_regs.rend();
+    for (auto riter = pushed_vecd_regs.rbegin();
+         riter != pushed_vecd_regs.rend();
+         ++riter) {
+      as.ldr(
+          asmjit::a64::d(*riter - VECD_REG_BASE),
+          asmjit::a64::ptr_post(asmjit::a64::sp, 16));
+    }
+
+    for (auto riter = pushed_gp_regs.rbegin(); riter != pushed_gp_regs.rend();
          ++riter) {
       as.ldr(
           asmjit::a64::x(*riter), asmjit::a64::ptr_post(asmjit::a64::sp, 16));
@@ -162,7 +189,8 @@ class BackendTest : public RuntimeTest {
     as.ldp(arch::fp, arch::lr, asmjit::a64::ptr_post(asmjit::a64::sp, 16));
     as.ret(arch::lr);
 #else
-    NativeGenerator gen(nullptr);
+    NativeGeneratorFactory factory;
+    NativeGenerator gen(nullptr, factory);
     CINDER_UNSUPPORTED
 #endif
 
@@ -172,7 +200,8 @@ class BackendTest : public RuntimeTest {
     EXPECT_EQ(result.error, asmjit::kErrorOk);
     EXPECT_TRUE(code_allocator->contains(result.addr))
         << "Compiled function should exist within the CodeAllocator";
-    gen.lir_func_.release();
+    Function* caller_owned_lir_func = gen.lir_func_.release();
+    EXPECT_EQ(caller_owned_lir_func, lir_func);
     return result.addr;
   }
 
@@ -182,6 +211,60 @@ class BackendTest : public RuntimeTest {
     }
   }
 
+#if defined(CINDER_AARCH64)
+  // Compile pre-allocated LIR (physical registers + stack slots) directly to
+  // machine code, bypassing register allocation.  Used for tests that need
+  // precise control over which registers and stack slots are used.
+  void* CompilePreAllocated(Function* lir_func, int spill_size) {
+    Environ environ;
+    InitEnviron(environ);
+
+    // Skip PostGenerationRewrite and LinearScanAllocator — the instructions
+    // are already in post-alloc form with physical registers and stack slots.
+    environ.shadow_frames_and_spill_size = spill_size;
+    environ.changed_regs = {};
+
+    PostRegAllocRewrite post_rewrite(lir_func, &environ);
+    post_rewrite.run();
+
+    asmjit::CodeHolder code;
+    ICodeAllocator* code_allocator =
+        cinderx::getModuleState()->code_allocator.get();
+    code.init(code_allocator->asmJitEnvironment());
+
+    arch::Builder as(&code);
+    environ.as = &as;
+
+    // Prologue: save frame pointer and link register, set up frame.
+    as.stp(arch::fp, arch::lr, asmjit::a64::ptr_pre(asmjit::a64::sp, -16));
+    as.mov(arch::fp, asmjit::a64::sp);
+
+    // Allocate stack space for spill slots.
+    int allocate_stack = spill_size;
+    if (allocate_stack % kStackAlign != 0) {
+      allocate_stack += kStackAlign - (allocate_stack % kStackAlign);
+    }
+    as.sub(asmjit::a64::sp, asmjit::a64::sp, allocate_stack);
+
+    NativeGeneratorFactory factory;
+    NativeGenerator gen(nullptr, factory);
+    gen.env_ = std::move(environ);
+    gen.lir_func_.reset(lir_func);
+    gen.generateAssemblyBody(code);
+
+    // Epilogue: restore stack and frame pointer, return.
+    as.mov(asmjit::a64::sp, arch::fp);
+    as.ldp(arch::fp, arch::lr, asmjit::a64::ptr_post(asmjit::a64::sp, 16));
+    as.ret(arch::lr);
+
+    as.finalize();
+
+    AllocateResult result = code_allocator->addCode(&code);
+    EXPECT_EQ(result.error, asmjit::kErrorOk);
+    return result.addr;
+  }
+#endif
+
   void CheckCast(Function* lir_func) {
     auto func =
         (PyObject * (*)(PyObject*, PyTypeObject*)) SimpleCompile(lir_func);
@@ -189,7 +272,7 @@ class BackendTest : public RuntimeTest {
     auto test_noerror = [&](PyObject* a_in, PyTypeObject* b_in) -> void {
       auto ret_test = func(a_in, b_in);
       ASSERT_TRUE(PyErr_Occurred() == nullptr);
-      auto ret_jitrt = JITRT_Cast(a_in, b_in);
+      auto ret_jitrt = rt::cast(a_in, b_in);
       ASSERT_TRUE(PyErr_Occurred() == nullptr);
       ASSERT_EQ(ret_test, ret_jitrt);
     };
@@ -199,7 +282,7 @@ class BackendTest : public RuntimeTest {
       ASSERT_TRUE(PyErr_ExceptionMatches(PyExc_TypeError));
       PyErr_Clear();
 
-      auto ret_jitrt = JITRT_Cast(a_in, b_in);
+      auto ret_jitrt = rt::cast(a_in, b_in);
       ASSERT_TRUE(PyErr_ExceptionMatches(PyExc_TypeError));
       PyErr_Clear();
 
@@ -277,6 +360,8 @@ def get_user_id(user):
       << "Incorrect user id returned";
 }
 
+#ifdef ENABLE_INTERPRETER_LOOP
+// Call counts are maintained by the CinderX interpreter.
 TEST_F(BackendTest, CallCountTest) {
   const char* src = R"(
 def foo(x: int) -> int:
@@ -292,17 +377,75 @@ for i in range(30):
   BorrowedRef<PyCodeObject> code =
       reinterpret_cast<PyFunctionObject*>(foo.get())->func_code;
 
-#if PY_VERSION_HEX < 0x030C0000
-  uint64_t ncalls = code->co_mutable->ncalls;
-#else
   auto extra = codeExtra(code);
   ASSERT_NE(extra, nullptr) << "Failed to load code object extra data";
   uint64_t ncalls = Ci_code_extra_get_calls(extra);
-#endif
 
   // TASK(T190615535): This is waiting on the 3.12 custom interpreter loop.
   // Once we have that in place, we can start incrementing call counts in 3.12.
   ASSERT_EQ(ncalls, 30);
+}
+#endif
+
+TEST_F(BackendTest, ExplicitLIRSubKeepsRhsRegisterLiveAcrossOutputDefine) {
+#if !defined(CINDER_X86_64)
+  SKIP("x86_64-specific allocator/codegen repro");
+#else
+  auto lirfunc = std::make_unique<Function>();
+  auto bb = lirfunc->allocateBasicBlock();
+  auto epilogue = lirfunc->allocateBasicBlock();
+
+  constexpr PhyLocation kLhsReg = R10;
+  constexpr std::array<PhyLocation, 13> kPressureRegs = {
+      RCX, RDX, RBX, RSI, RDI, R8, R9, R10, R11, R12, R13, R14, R15};
+
+  std::vector<Instruction*> pressure;
+  pressure.reserve(kPressureRegs.size());
+  // Bind vregs to almost every GP register without emitting code so the
+  // allocator has to make a real choice at the Sub instruction.
+  for (PhyLocation reg : kPressureRegs) {
+    pressure.push_back(bb->allocateInstr(
+        Opcode::kBind,
+        nullptr,
+        OutVReg{Operand::k64bit},
+        PhyReg{reg, Operand::k64bit}));
+  }
+
+  bb->allocateInstr(
+      Opcode::kMove, nullptr, OutPhyReg{kLhsReg, Operand::k64bit}, Imm{7});
+  auto rhs = bb->allocateInstr(
+      Opcode::kMove, nullptr, OutVReg{Operand::k64bit}, Imm{3});
+  auto sub = bb->allocateInstr(
+      Opcode::kSub,
+      nullptr,
+      OutVReg{Operand::k64bit},
+      PhyReg{kLhsReg, Operand::k64bit},
+      VReg{rhs});
+  bb->allocateInstr(
+      Opcode::kMove,
+      nullptr,
+      OutPhyReg{arch::reg_general_return_loc, Operand::k64bit},
+      VReg{sub});
+  bb->allocateInstr(Opcode::kReturn, nullptr);
+  IncomingEdge epilogue_edge = bb->addSuccessor(epilogue);
+  // Keep the bound registers live across the Sub by threading them into the
+  // successor block. Without this, the pressure would end before the bug site.
+  for (Instruction* live_out : pressure) {
+    Instruction* phi = epilogue->allocateInstr(
+        Opcode::kPhi, nullptr, OutVReg{Operand::k64bit});
+    phi->addPhiInput(epilogue_edge, live_out);
+  }
+
+  auto func = reinterpret_cast<uint64_t (*)()>(SimpleCompile(lirfunc.get()));
+
+  ASSERT_TRUE(sub->output()->isReg());
+  ASSERT_TRUE(sub->getInput(1)->isReg());
+  // Before the fix, both operands could land in RAX here, producing
+  // `mov rax, r10; sub rax, rax` and returning 0 instead of 4.
+  EXPECT_NE(
+      sub->output()->getPhyRegister(), sub->getInput(1)->getPhyRegister());
+  EXPECT_EQ(func(), 4);
+#endif
 }
 
 // floating-point arithmetic test
@@ -310,29 +453,28 @@ TEST_F(BackendTest, FPArithmetic) {
   double a = 3.12;
   double b = 1.1616;
 
-  auto test = [&](Instruction::Opcode opcode) -> double {
+  auto test = [&](Opcode opcode) -> double {
     auto lirfunc = std::make_unique<Function>();
     auto bb = lirfunc->allocateBasicBlock();
 
     auto pa = bb->allocateInstr(
-        Instruction::kMove,
-        nullptr,
-        OutVReg(),
-        Imm(reinterpret_cast<uint64_t>(&a)));
+        Opcode::kMove, nullptr, OutVReg(), Imm(reinterpret_cast<uint64_t>(&a)));
     auto fa = bb->allocateInstr(
-        Instruction::kMove, nullptr, OutVReg(OperandBase::kDouble), Ind(pa));
+        Opcode::kLoad, nullptr, OutVReg(Operand::kDouble), Ind(pa));
 
     auto pb = bb->allocateInstr(
-        Instruction::kMove,
-        nullptr,
-        OutVReg(),
-        Imm(reinterpret_cast<uint64_t>(&b)));
+        Opcode::kMove, nullptr, OutVReg(), Imm(reinterpret_cast<uint64_t>(&b)));
     auto fb = bb->allocateInstr(
-        Instruction::kMove, nullptr, OutVReg(OperandBase::kDouble), Ind(pb));
+        Opcode::kLoad, nullptr, OutVReg(Operand::kDouble), Ind(pb));
 
     auto sum = bb->allocateInstr(
-        opcode, nullptr, OutVReg(OperandBase::kDouble), VReg(fa), VReg(fb));
-    bb->allocateInstr(Instruction::kReturn, nullptr, VReg(sum));
+        opcode, nullptr, OutVReg(Operand::kDouble), VReg(fa), VReg(fb));
+    bb->allocateInstr(
+        Opcode::kMove,
+        nullptr,
+        OutPhyReg{arch::reg_double_return_loc, Operand::kDouble},
+        VReg(sum));
+    bb->allocateInstr(Opcode::kReturn, nullptr);
 
     // need this because the register allocator assumes the basic blocks
     // end with Return should have one and only one successor.
@@ -344,39 +486,38 @@ TEST_F(BackendTest, FPArithmetic) {
     return func();
   };
 
-  ASSERT_DOUBLE_EQ(test(Instruction::kFadd), a + b);
-  ASSERT_DOUBLE_EQ(test(Instruction::kFsub), a - b);
-  ASSERT_DOUBLE_EQ(test(Instruction::kFmul), a * b);
-  ASSERT_DOUBLE_EQ(test(Instruction::kFdiv), a / b);
+  ASSERT_DOUBLE_EQ(test(Opcode::kFadd), a + b);
+  ASSERT_DOUBLE_EQ(test(Opcode::kFsub), a - b);
+  ASSERT_DOUBLE_EQ(test(Opcode::kFmul), a * b);
+  ASSERT_DOUBLE_EQ(test(Opcode::kFdiv), a / b);
 }
 
 TEST_F(BackendTest, FPCompare) {
   double a = 3.12;
   double b = 1.1616;
 
-  auto test = [&](Instruction::Opcode opcode) -> double {
+  auto test = [&](Condition cond) -> double {
     auto lirfunc = std::make_unique<Function>();
     auto bb = lirfunc->allocateBasicBlock();
 
     auto pa = bb->allocateInstr(
-        Instruction::kMove,
-        nullptr,
-        OutVReg(),
-        Imm(reinterpret_cast<uint64_t>(&a)));
+        Opcode::kMove, nullptr, OutVReg(), Imm(reinterpret_cast<uint64_t>(&a)));
     auto fa = bb->allocateInstr(
-        Instruction::kMove, nullptr, OutVReg(OperandBase::kDouble), Ind(pa));
+        Opcode::kLoad, nullptr, OutVReg(Operand::kDouble), Ind(pa));
 
     auto pb = bb->allocateInstr(
-        Instruction::kMove,
-        nullptr,
-        OutVReg(),
-        Imm(reinterpret_cast<uint64_t>(&b)));
+        Opcode::kMove, nullptr, OutVReg(), Imm(reinterpret_cast<uint64_t>(&b)));
     auto fb = bb->allocateInstr(
-        Instruction::kMove, nullptr, OutVReg(OperandBase::kDouble), Ind(pb));
+        Opcode::kLoad, nullptr, OutVReg(Operand::kDouble), Ind(pb));
 
-    auto compare =
-        bb->allocateInstr(opcode, nullptr, OutVReg(), VReg(fa), VReg(fb));
-    bb->allocateInstr(Instruction::kReturn, nullptr, VReg(compare));
+    auto compare = bb->allocateInstr(
+        Opcode::kCompare, nullptr, cond, OutVReg(), VReg(fa), VReg(fb));
+    bb->allocateInstr(
+        Opcode::kMove,
+        nullptr,
+        OutPhyReg{arch::reg_general_return_loc},
+        VReg(compare));
+    bb->allocateInstr(Opcode::kReturn, nullptr);
 
     // need this because the register allocator assumes the basic blocks
     // end with Return should have one and only one successor.
@@ -388,12 +529,12 @@ TEST_F(BackendTest, FPCompare) {
     return func();
   };
 
-  ASSERT_DOUBLE_EQ(test(Instruction::kEqual), a == b);
-  ASSERT_DOUBLE_EQ(test(Instruction::kNotEqual), a != b);
-  ASSERT_DOUBLE_EQ(test(Instruction::kGreaterThanUnsigned), a > b);
-  ASSERT_DOUBLE_EQ(test(Instruction::kLessThanUnsigned), a < b);
-  ASSERT_DOUBLE_EQ(test(Instruction::kGreaterThanEqualUnsigned), a >= b);
-  ASSERT_DOUBLE_EQ(test(Instruction::kLessThanEqualUnsigned), a <= b);
+  ASSERT_DOUBLE_EQ(test(Condition::kEqual), a == b);
+  ASSERT_DOUBLE_EQ(test(Condition::kNotEqual), a != b);
+  ASSERT_DOUBLE_EQ(test(Condition::kUnsignedGT), a > b);
+  ASSERT_DOUBLE_EQ(test(Condition::kUnsignedLT), a < b);
+  ASSERT_DOUBLE_EQ(test(Condition::kUnsignedGE), a >= b);
+  ASSERT_DOUBLE_EQ(test(Condition::kUnsignedLE), a <= b);
 }
 
 namespace {
@@ -420,36 +561,13 @@ double rt_func(
       f + g + h;
 }
 
-template <typename... Arg>
-struct AllocateOperand;
-
-template <typename Arg, typename... Args>
-struct AllocateOperand<Arg, Args...> {
-  Instruction* instr;
-  explicit AllocateOperand(Instruction* i) : instr(i) {}
-
-  void operator()(Arg arg, Args... args) {
-    if constexpr (std::is_same_v<int, Arg>) {
-      instr->allocateImmediateInput(arg);
-    } else {
-      instr->allocateFPImmediateInput(arg);
-    }
-
-    (AllocateOperand<Args...>(instr))(args...);
+template <typename Arg>
+auto makeOperand(Arg arg) {
+  if constexpr (std::is_same_v<int, Arg>) {
+    return Imm{static_cast<uint64_t>(arg)};
+  } else {
+    return FPImm{arg};
   }
-};
-
-template <>
-struct AllocateOperand<> {
-  Instruction* instr;
-  explicit AllocateOperand(Instruction* i) : instr(i) {}
-
-  void operator()() {}
-};
-
-template <typename... Ts>
-auto getAllocateOperand(Instruction* instr, std::tuple<Ts...>) {
-  return AllocateOperand<Ts...>(instr);
 }
 } // namespace
 
@@ -478,14 +596,26 @@ TEST_F(BackendTest, ManyArguments) {
   auto bb = lirfunc->allocateBasicBlock();
 
   Instruction* call = bb->allocateInstr(
-      Instruction::kCall,
+      Opcode::kCall,
       nullptr,
       OutVReg(),
       Imm(reinterpret_cast<uint64_t>(rt_func)));
 
-  std::apply(getAllocateOperand(call, args), args);
+  ASSERT_NE(call, nullptr);
+  Instruction& call_instr = *call;
 
-  bb->allocateInstr(Instruction::kReturn, nullptr, VReg(call));
+  std::apply(
+      [&call_instr](auto... args) {
+        call_instr.addOperands(makeOperand(args)...);
+      },
+      args);
+
+  bb->allocateInstr(
+      Opcode::kMove,
+      nullptr,
+      OutPhyReg{arch::reg_general_return_loc},
+      VReg(call));
+  bb->allocateInstr(Opcode::kReturn, nullptr);
 
   // need this because the register allocator assumes the basic blocks
   // end with Return should have one and only one successor.
@@ -518,21 +648,18 @@ TEST_F(BackendTest, FPMultipleCalls) {
 
   auto loadFP = [&](double* n) {
     auto m1 = bb->allocateInstr(
-        Instruction::kMove,
-        nullptr,
-        OutVReg(),
-        Imm(reinterpret_cast<uint64_t>(n)));
+        Opcode::kMove, nullptr, OutVReg(), Imm(reinterpret_cast<uint64_t>(n)));
     auto m2 = bb->allocateInstr(
-        Instruction::kMove, nullptr, OutVReg(OperandBase::kDouble), Ind(m1));
+        Opcode::kLoad, nullptr, OutVReg(Operand::kDouble), Ind(m1));
     return m2;
   };
 
   auto la = loadFP(&a);
   auto lb = loadFP(&b);
   auto sum1 = bb->allocateInstr(
-      Instruction::kCall,
+      Opcode::kCall,
       nullptr,
-      OutVReg(OperandBase::kDouble),
+      OutVReg(Operand::kDouble),
       Imm(reinterpret_cast<uint64_t>(add)),
       VReg(la),
       VReg(lb));
@@ -540,22 +667,27 @@ TEST_F(BackendTest, FPMultipleCalls) {
   auto lc = loadFP(&c);
   auto ld = loadFP(&d);
   auto sum2 = bb->allocateInstr(
-      Instruction::kCall,
+      Opcode::kCall,
       nullptr,
-      OutVReg(OperandBase::kDouble),
+      OutVReg(Operand::kDouble),
       Imm(reinterpret_cast<uint64_t>(add)),
       VReg(lc),
       VReg(ld));
 
   auto sum = bb->allocateInstr(
-      Instruction::kCall,
+      Opcode::kCall,
       nullptr,
-      OutVReg(OperandBase::kDouble),
+      OutVReg(Operand::kDouble),
       Imm(reinterpret_cast<uint64_t>(add)),
       VReg(sum1),
       VReg(sum2));
 
-  bb->allocateInstr(Instruction::kReturn, nullptr, VReg(sum));
+  bb->allocateInstr(
+      Opcode::kMove,
+      nullptr,
+      OutPhyReg{arch::reg_double_return_loc, Operand::kDouble},
+      VReg(sum));
+  bb->allocateInstr(Opcode::kReturn, nullptr);
 
   auto epilogue = lirfunc->allocateBasicBlock();
   bb->addSuccessor(epilogue);
@@ -571,20 +703,14 @@ TEST_F(BackendTest, MoveSequenceOptTest) {
   auto bb = lirfunc->allocateBasicBlock();
 
   bb->allocateInstr(
-      Instruction::kMove,
-      nullptr,
-      OutStk(-16),
-      PhyReg(arch::reg_scratch_0_loc));
+      Opcode::kStore, nullptr, OutStk(-16), PhyReg(arch::reg_scratch_0_loc));
   bb->allocateInstr(
-      Instruction::kMove, nullptr, OutStk(-24), PhyReg(ARGUMENT_REGS[1].loc));
+      Opcode::kStore, nullptr, OutStk(-24), PhyReg(ARGUMENT_REGS[1].loc));
   bb->allocateInstr(
-      lir::Instruction::kMove,
-      nullptr,
-      OutStk(-32),
-      PhyReg(ARGUMENT_REGS[3].loc));
+      lir::Opcode::kStore, nullptr, OutStk(-32), PhyReg(ARGUMENT_REGS[3].loc));
 
   auto call = bb->allocateInstr(
-      Instruction::kCall,
+      Opcode::kCall,
       nullptr,
       Imm(0),
       lir::Stk(-16),
@@ -598,22 +724,37 @@ TEST_F(BackendTest, MoveSequenceOptTest) {
 
   /*
   BB %0
-  [RBP - 16]:Object = Move RAX:Object
-  [RBP - 24]:Object = Move RSI:Object
+  [RBP - 16]:Object = Store RAX:Object
+  [RBP - 24]:Object = Store RSI:Object
         RDI:Object = Move RAX:Object
+        RSI:Object = Load [RBP - 24]:Object
         RDX:Object = Move RCX:Object
                      Call Object
+
+  [RBP - 32] is deleted: lastUse with no later stack reads.
+  RSI = Load [RBP - 24] is a self-reload (RSI spilled and loaded back to RSI).
+  It is left intact because reg == out_reg skips the rewrite.
   */
-  ASSERT_EQ(bb->getNumInstrs(), 5);
+  ASSERT_EQ(bb->getNumInstrs(), 6);
   auto& instrs = bb->instructions();
 
   auto iter = instrs.begin();
 
-  ASSERT_EQ((*(iter++))->opcode(), Instruction::kMove);
-  ASSERT_EQ((*(iter++))->opcode(), Instruction::kMove);
-  ASSERT_EQ((*(iter++))->opcode(), Instruction::kMove);
-  ASSERT_EQ((*(iter++))->opcode(), Instruction::kMove);
-  ASSERT_EQ((*(iter++))->opcode(), Instruction::kCall);
+  auto* spill0 = (*(iter++)).get();
+  auto* spill1 = (*(iter++)).get();
+  auto* arg0 = (*(iter++)).get();
+  auto* arg1 = (*(iter++)).get();
+  auto* arg2 = (*(iter++)).get();
+  auto* call_instr = (*(iter++)).get();
+
+  ASSERT_EQ(spill0->opcode(), Opcode::kStore);
+  ASSERT_EQ(spill1->opcode(), Opcode::kStore);
+  ASSERT_EQ(arg0->opcode(), Opcode::kMove);
+  ASSERT_EQ(arg0->getInput(0)->type(), Operand::kReg);
+  ASSERT_EQ(arg1->opcode(), Opcode::kLoad);
+  ASSERT_EQ(arg1->getInput(0)->type(), Operand::kStack);
+  ASSERT_EQ(arg2->opcode(), Opcode::kMove);
+  ASSERT_EQ(call_instr->opcode(), Opcode::kCall);
 }
 
 TEST_F(BackendTest, MoveSequenceOpt2Test) {
@@ -622,13 +763,13 @@ TEST_F(BackendTest, MoveSequenceOpt2Test) {
   auto bb = lirfunc->allocateBasicBlock();
 
   bb->allocateInstr(
-      Instruction::kMove,
+      Opcode::kStore,
       nullptr,
       OutStk(-16),
       PhyReg(arch::reg_general_return_loc));
 
   bb->allocateInstr(
-      Instruction::kAdd,
+      Opcode::kAdd,
       nullptr,
       OutPhyReg(arch::reg_general_return_loc),
       PhyReg(ARGUMENT_REGS[1].loc),
@@ -638,9 +779,10 @@ TEST_F(BackendTest, MoveSequenceOpt2Test) {
   PostRegAllocRewrite post_rewrite(lirfunc.get(), &env);
   post_rewrite.run();
 
+#if defined(CINDER_X86_64)
   /*
   BB %0
-  [RBP - 16]:Object = Move RAX:Object
+  [RBP - 16]:Object = Store RAX:Object
         RAX:Object = Add RSI:Object, [RBP - 16]:Object
   */
   ASSERT_EQ(bb->getNumInstrs(), 2);
@@ -648,9 +790,98 @@ TEST_F(BackendTest, MoveSequenceOpt2Test) {
 
   auto iter = instrs.begin();
 
-  ASSERT_EQ((*(iter++))->opcode(), Instruction::kMove);
-  ASSERT_EQ((*iter)->opcode(), Instruction::kAdd);
-  ASSERT_EQ((*iter)->getInput(1)->type(), OperandBase::kStack);
+  ASSERT_EQ((*(iter++))->opcode(), Opcode::kStore);
+  ASSERT_EQ((*iter)->opcode(), Opcode::kAdd);
+  ASSERT_EQ((*iter)->getInput(1)->type(), Operand::kStack);
+#elif defined(CINDER_AARCH64)
+  ASSERT_EQ(bb->getNumInstrs(), 3);
+  auto& instrs = bb->instructions();
+
+  auto iter = instrs.begin();
+
+  ASSERT_EQ((*(iter++))->opcode(), Opcode::kStore);
+  // The scratch reload folds back to the register the spill came from, so it
+  // ends up a reg-to-reg Move rather than a Load.
+  ASSERT_EQ((*(iter++))->opcode(), Opcode::kMove);
+  ASSERT_EQ((*iter)->opcode(), Opcode::kAdd);
+  ASSERT_EQ((*iter)->getInput(1)->type(), Operand::kReg);
+  ASSERT_NE(
+      (*iter)->getInput(1)->getPhyRegister(), arch::reg_general_return_loc);
+#endif
+}
+
+TEST_F(BackendTest, MoveSequenceOptLeavesSelfReloadsIntact) {
+  auto lirfunc = std::make_unique<Function>();
+  auto bb = lirfunc->allocateBasicBlock();
+  auto epilogue = lirfunc->allocateBasicBlock();
+
+  const PhyLocation kSharedSlot{-16, 64};
+  const PhyLocation kReloadReg = ARGUMENT_REGS[0];
+  constexpr uint64_t kExpected = 4;
+
+  // Set up the previously failing case:
+  //
+  //   [RBP - 16] = Move RSI
+  //          RSI = Move [RBP - 16]   ; writes RSI, does not consume cached RSI
+  //          RAX = Move [RBP - 16]   ; later stack read still needs the spill
+  //
+  // A bad rewrite would turn the middle instruction into `RSI = Move RSI` and
+  // then conclude the spill is dead. This test checks that we keep both the
+  // spill store and the explicit self-reload in the block.
+  // Make a deleted spill observable instead of reading arbitrary stack data.
+  bb->allocateInstr(
+      Opcode::kStore,
+      nullptr,
+      OutStk{kSharedSlot, Operand::k64bit},
+      Imm{kExpected - kExpected, Operand::k64bit});
+  bb->allocateInstr(
+      Opcode::kMove,
+      nullptr,
+      OutPhyReg{kReloadReg, Operand::k64bit},
+      Imm{kExpected, Operand::k64bit});
+  bb->allocateInstr(
+      Opcode::kStore,
+      nullptr,
+      OutStk{kSharedSlot, Operand::k64bit},
+      PhyReg{kReloadReg, Operand::k64bit});
+
+  auto self_reload = bb->allocateInstr(
+      Opcode::kLoad,
+      nullptr,
+      OutPhyReg{kReloadReg, Operand::k64bit},
+      Stk{kSharedSlot, Operand::k64bit});
+  self_reload->getInput(0)->setLastUse();
+  bb->allocateInstr(
+      Opcode::kLoad,
+      nullptr,
+      OutPhyReg{arch::reg_general_return_loc, Operand::k64bit},
+      Stk{kSharedSlot, Operand::k64bit});
+  bb->allocateInstr(Opcode::kReturn, nullptr);
+  bb->addSuccessor(epilogue);
+
+  auto func = reinterpret_cast<uint64_t (*)()>(SimpleCompile(lirfunc.get()));
+
+  bool saw_spill = false;
+  bool saw_self_reload = false;
+  for (auto& instr : bb->instructions()) {
+    auto* out = instr->output();
+    if (instr->getNumInputs() == 0) {
+      continue;
+    }
+    auto* in = instr->getInput(0);
+    if (out->isStack() && out->getStackSlot().loc == kSharedSlot.loc &&
+        in->isReg() && in->getPhyRegister() == kReloadReg) {
+      saw_spill = true;
+    }
+    if (out->isReg() && out->getPhyRegister() == kReloadReg && in->isStack() &&
+        in->getStackSlot().loc == kSharedSlot.loc) {
+      saw_self_reload = true;
+    }
+  }
+
+  EXPECT_TRUE(saw_spill);
+  EXPECT_TRUE(saw_self_reload);
+  EXPECT_EQ(func(), kExpected);
 }
 
 TEST_F(BackendTest, CastTest) {
@@ -665,59 +896,66 @@ TEST_F(BackendTest, CastTest) {
   auto epilogue = lirfunc->allocateBasicBlock();
 
   // BB 1 : Py_TYPE(ob) == (tp)
-  auto a =
-      bb1->allocateInstr(Instruction::kLoadArg, nullptr, OutVReg(), Imm(0));
-  auto b =
-      bb1->allocateInstr(Instruction::kLoadArg, nullptr, OutVReg(), Imm(1));
+  auto a = bb1->allocateInstr(Opcode::kLoadArg, nullptr, OutVReg(), Imm(0));
+  auto b = bb1->allocateInstr(Opcode::kLoadArg, nullptr, OutVReg(), Imm(1));
 
   auto a_tp = bb1->allocateInstr(
-      Instruction::kMove,
-      nullptr,
-      OutVReg(),
-      Ind(a, offsetof(PyObject, ob_type)));
+      Opcode::kLoad, nullptr, OutVReg(), Ind(a, offsetof(PyObject, ob_type)));
   auto eq1 = bb1->allocateInstr(
-      Instruction::kEqual, nullptr, OutVReg(), VReg(a_tp), VReg(b));
-  bb1->allocateInstr(Instruction::kCondBranch, nullptr, VReg(eq1));
+      Opcode::kCompare,
+      nullptr,
+      Condition::kEqual,
+      OutVReg(),
+      VReg(a_tp),
+      VReg(b));
+  bb1->allocateInstr(Opcode::kCondBranch, nullptr, VReg(eq1));
   bb1->addSuccessor(bb3); // true
   bb1->addSuccessor(bb2); // false
 
   // BB2 : PyType_IsSubtype(Py_TYPE(ob), (tp))
   auto subtype = bb2->allocateInstr(
-      Instruction::kCall,
+      Opcode::kCall,
       nullptr,
       OutVReg(),
       Imm(reinterpret_cast<uint64_t>(PyType_IsSubtype)),
       VReg(a_tp),
       VReg(b));
-  bb2->allocateInstr(Instruction::kCondBranch, nullptr, VReg(subtype));
+  bb2->allocateInstr(Opcode::kCondBranch, nullptr, VReg(subtype));
   bb2->addSuccessor(bb3); // true
   bb2->addSuccessor(bb4); // false
 
   // BB3 : return object
-  bb3->allocateInstr(Instruction::kReturn, nullptr, VReg(a));
+  bb3->allocateInstr(
+      Opcode::kMove, nullptr, OutPhyReg{arch::reg_general_return_loc}, VReg(a));
+  bb3->allocateInstr(Opcode::kReturn, nullptr);
   bb3->addSuccessor(epilogue);
 
   // BB4 : return null
   auto a_name = bb4->allocateInstr(
-      Instruction::kMove,
+      Opcode::kLoad,
       nullptr,
       OutVReg(),
       Ind(a_tp, offsetof(PyTypeObject, tp_name)));
   auto b_name = bb4->allocateInstr(
-      Instruction::kMove,
+      Opcode::kLoad,
       nullptr,
       OutVReg(),
       Ind(b, offsetof(PyTypeObject, tp_name)));
   bb4->allocateInstr(
-      Instruction::kCall,
+      Opcode::kCall,
       nullptr,
       Imm(reinterpret_cast<uint64_t>(PyErr_Format)),
       Imm(reinterpret_cast<uint64_t>(PyExc_TypeError)),
       Imm(reinterpret_cast<uint64_t>(errmsg)),
       VReg(b_name),
       VReg(a_name));
-  auto nll = bb4->allocateInstr(Instruction::kMove, nullptr, OutVReg(), Imm(0));
-  bb4->allocateInstr(Instruction::kReturn, nullptr, VReg(nll));
+  auto nll = bb4->allocateInstr(Opcode::kMove, nullptr, OutVReg(), Imm(0));
+  bb4->allocateInstr(
+      Opcode::kMove,
+      nullptr,
+      OutPhyReg{arch::reg_general_return_loc},
+      VReg(nll));
+  bb4->allocateInstr(Opcode::kReturn, nullptr);
   bb4->addSuccessor(epilogue);
 
   CheckCast(lirfunc.get());
@@ -760,6 +998,129 @@ BB %8 - preds: %0
   ASSERT_EQ(ret, "hello1");
 }
 
+#if CINDER_JIT_TSAN_ENABLED
+
+TEST_F(BackendTest, TsanMovePreservesBehaviorAndFlags) {
+  // Pseudo-code:
+  //   lhs = 1
+  //   rhs = 1
+  //   cmp(1, 1)
+  //   loaded = *src    // TSAN read instrumentation
+  //   dst_addr = &dst
+  //   *dst_addr = loaded    // TSAN write instrumentation
+  //   return zero_flag_is_set ? loaded : 0
+  //
+  // kMove has FlagEffects::kNone, so TSAN instrumentation must preserve the
+  // flags from cmp until BranchZ.
+  constexpr uint64_t expected = 0x1122334455667788ULL;
+  uint64_t src = expected;
+  uint64_t dst = 0;
+
+  auto lirfunc = std::make_unique<Function>();
+  auto bb0 = lirfunc->allocateBasicBlock();
+  auto bb_taken = lirfunc->allocateBasicBlock();
+  auto bb_not_taken = lirfunc->allocateBasicBlock();
+  auto epilogue = lirfunc->allocateBasicBlock();
+
+  auto lhs = bb0->allocateInstr(Opcode::kMove, nullptr, OutVReg(), Imm{1});
+  auto rhs = bb0->allocateInstr(Opcode::kMove, nullptr, OutVReg(), Imm{1});
+  bb0->allocateInstr(Opcode::kCmp, nullptr, VReg(lhs), VReg(rhs));
+
+  auto loaded = bb0->allocateInstr(
+      Opcode::kMove,
+      nullptr,
+      OutVReg(Operand::k64bit),
+      MemImm{&src, Operand::k64bit});
+  bb0->allocateInstr(
+      Opcode::kMove,
+      nullptr,
+      OutPhyReg{R10},
+      Imm{reinterpret_cast<uint64_t>(&dst)});
+  bb0->allocateInstr(
+      Opcode::kStore, nullptr, OutInd{R10, 0, Operand::k64bit}, VReg{loaded});
+  bb0->allocateInstr(
+      Opcode::kBranchCC, nullptr, Condition::kZero, Lbl{bb_taken});
+  bb0->addSuccessor(bb_taken);
+  bb0->addSuccessor(bb_not_taken);
+
+  bb_taken->allocateInstr(
+      Opcode::kMove,
+      nullptr,
+      OutPhyReg{arch::reg_general_return_loc},
+      VReg{loaded});
+  bb_taken->allocateInstr(Opcode::kReturn, nullptr);
+  bb_taken->addSuccessor(epilogue);
+
+  bb_not_taken->allocateInstr(
+      Opcode::kMove, nullptr, OutPhyReg{arch::reg_general_return_loc}, Imm{0});
+  bb_not_taken->allocateInstr(Opcode::kReturn, nullptr);
+  bb_not_taken->addSuccessor(epilogue);
+
+  auto func = reinterpret_cast<uint64_t (*)()>(SimpleCompile(lirfunc.get()));
+  EXPECT_EQ(expected, func());
+  EXPECT_EQ(expected, dst);
+}
+
+TEST_F(BackendTest, TsanMoveRelaxedUsesAtomicAccesses) {
+  // Pseudo-code:
+  //   value = 0
+  //   rdi = expected
+  //   atomic_relaxed_store(&value, rdi)
+  //   byte = atomic_relaxed_load(&byte_src)
+  //   atomic_relaxed_store((uint8_t*)&byte_dst, byte)
+  //   return atomic_relaxed_load(&value)
+  //
+  // kMoveRelaxed TSAN helpers replace the memory access, so the original mov
+  // must not run a second load/store.
+  constexpr uint64_t expected = 0x8877665544332211ULL;
+  uint64_t value = 0;
+  uint8_t byte_src = 0x07;
+  uint16_t byte_dst = 0xAA00;
+
+  auto lirfunc = std::make_unique<Function>();
+  auto bb0 = lirfunc->allocateBasicBlock();
+  auto epilogue = lirfunc->allocateBasicBlock();
+
+  // RDI is also TSAN's address argument; the store must still use its value.
+  bb0->allocateInstr(Opcode::kMove, nullptr, OutPhyReg{RDI}, Imm{expected});
+  bb0->allocateInstr(
+      Opcode::kMoveRelaxed,
+      nullptr,
+      OutMemImm{&value, Operand::k64bit},
+      PhyReg{RDI});
+
+  auto byte = bb0->allocateInstr(
+      Opcode::kMoveRelaxed,
+      nullptr,
+      OutVReg(Operand::k8bit),
+      MemImm{&byte_src, Operand::k8bit});
+  bb0->allocateInstr(
+      Opcode::kMoveRelaxed,
+      nullptr,
+      OutMemImm{&byte_dst, Operand::k8bit},
+      VReg(byte));
+
+  auto word = bb0->allocateInstr(
+      Opcode::kMoveRelaxed,
+      nullptr,
+      OutVReg(Operand::k64bit),
+      MemImm{&value, Operand::k64bit});
+  bb0->allocateInstr(
+      Opcode::kMove,
+      nullptr,
+      OutPhyReg{arch::reg_general_return_loc},
+      VReg{word});
+  bb0->allocateInstr(Opcode::kReturn, nullptr);
+  bb0->addSuccessor(epilogue);
+
+  auto func = reinterpret_cast<uint64_t (*)()>(SimpleCompile(lirfunc.get()));
+  EXPECT_EQ(func(), expected);
+  EXPECT_EQ(value, expected);
+  EXPECT_EQ(byte_dst, 0xAA00 | 0x0007);
+}
+
+#endif // CINDER_JIT_TSAN_ENABLED
+
 TEST_F(BackendTest, SplitBasicBlockTest) {
   auto lirfunc = std::make_unique<Function>();
   auto bb1 = lirfunc->allocateBasicBlock();
@@ -768,31 +1129,30 @@ TEST_F(BackendTest, SplitBasicBlockTest) {
   auto bb4 = lirfunc->allocateBasicBlock();
   auto epilogue = lirfunc->allocateBasicBlock();
 
-  auto r1 =
-      bb1->allocateInstr(Instruction::kLoadArg, nullptr, OutVReg(), Imm(0));
-  bb1->allocateInstr(Instruction::kCondBranch, nullptr, VReg(r1));
+  auto r1 = bb1->allocateInstr(Opcode::kLoadArg, nullptr, OutVReg(), Imm(0));
+  bb1->allocateInstr(Opcode::kCondBranch, nullptr, VReg(r1));
   bb1->addSuccessor(bb2);
   bb1->addSuccessor(bb3);
 
-  auto r2 = bb2->allocateInstr(
-      Instruction::kAdd, nullptr, OutVReg(), VReg(r1), Imm(8));
-  bb2->addSuccessor(bb4);
+  auto r2 =
+      bb2->allocateInstr(Opcode::kAdd, nullptr, OutVReg(), VReg(r1), Imm(8));
+  IncomingEdge bb2_edge = bb2->addSuccessor(bb4);
 
-  auto r3 = bb3->allocateInstr(
-      Instruction::kAdd, nullptr, OutVReg(), VReg(r1), Imm(8));
-  auto r4 = bb3->allocateInstr(
-      Instruction::kAdd, nullptr, OutVReg(), VReg(r3), Imm(8));
-  bb3->addSuccessor(bb4);
+  auto r3 =
+      bb3->allocateInstr(Opcode::kAdd, nullptr, OutVReg(), VReg(r1), Imm(8));
+  auto r4 =
+      bb3->allocateInstr(Opcode::kAdd, nullptr, OutVReg(), VReg(r3), Imm(8));
+  IncomingEdge bb3_edge = bb3->addSuccessor(bb4);
 
-  auto r5 = bb4->allocateInstr(
-      Instruction::kPhi,
+  auto r5 = bb4->allocateInstr(Opcode::kPhi, nullptr, OutVReg());
+  r5->addPhiInput(bb2_edge, r2);
+  r5->addPhiInput(bb3_edge, r4);
+  bb4->allocateInstr(
+      Opcode::kMove,
       nullptr,
-      OutVReg(),
-      Lbl(bb2),
-      VReg(r2),
-      Lbl(bb3),
-      VReg(r4));
-  bb4->allocateInstr(Instruction::kReturn, nullptr, VReg(r5));
+      OutPhyReg{arch::reg_general_return_loc},
+      VReg(r5));
+  bb4->allocateInstr(Opcode::kReturn, nullptr);
   bb4->addSuccessor(epilogue);
 
   // split blocks and then test that function output is still correct
@@ -812,68 +1172,80 @@ TEST_F(BackendTest, SplitBasicBlockTest) {
 TEST_F(BackendTest, InlineJITRTCastTest) {
   Function caller;
   auto bb = caller.allocateBasicBlock();
-  auto r1 =
-      bb->allocateInstr(Instruction::kLoadArg, nullptr, OutVReg(), Imm(0));
-  auto r2 =
-      bb->allocateInstr(Instruction::kLoadArg, nullptr, OutVReg(), Imm(1));
+  auto r1 = bb->allocateInstr(Opcode::kLoadArg, nullptr, OutVReg(), Imm(0));
+  auto r2 = bb->allocateInstr(Opcode::kLoadArg, nullptr, OutVReg(), Imm(1));
   auto call_instr = bb->allocateInstr(
-      Instruction::kCall,
+      Opcode::kCall,
       nullptr,
       OutVReg(),
-      Imm(reinterpret_cast<uint64_t>(JITRT_Cast)),
+      Imm(reinterpret_cast<uint64_t>(rt::cast)),
       VReg(r1),
       VReg(r2));
-  bb->allocateInstr(Instruction::kReturn, nullptr, VReg(call_instr));
+  bb->allocateInstr(
+      Opcode::kMove,
+      nullptr,
+      OutPhyReg{arch::reg_general_return_loc},
+      VReg(call_instr));
+  bb->allocateInstr(Opcode::kReturn, nullptr);
   auto epilogue = caller.allocateBasicBlock();
   bb->addSuccessor(epilogue);
   LIRInliner inliner{&caller, call_instr};
-  inliner.inlineCall();
 
-  // Check that caller LIR is as expected.
-  auto expected_caller = fmt::format(
-      R"(Function:
-BB %0 - succs: %7
+  if constexpr (kOS == OS::kMacOS) {
+    ASSERT_FALSE(inliner.inlineCall());
+  } else {
+    ASSERT_TRUE(inliner.inlineCall());
+
+    // Check that caller LIR is as expected.
+    auto expected_caller = fmt::format(
+        R"(Function:
+BB %0 - succs: %8
        %1:Object = LoadArg 0(0x0):64bit
        %2:Object = LoadArg 1(0x1):64bit
 
-BB %7 - preds: %0 - succs: %9 %8
-      %14:Object = Move [%1:Object + 0x8]:Object
-      %15:Object = Equal %14:Object, %2:Object
-                   CondBranch %15:Object
+BB %8 - preds: %0 - succs: %10 %9
+      %15:Object = Load [%1:Object + {0:#x}]:Object
+      %16:Object = Equal %15:Object, %2:Object
+                   CondBranch %16:Object
 
-BB %8 - preds: %7 - succs: %9 %10
-      %17:Object = Call {0}({0:#x}):Object, %14:Object, %2:Object
-                   CondBranch %17:Object
+BB %9 - preds: %8 - succs: %10 %11
+      %18:Object = Call {2}({2:#x}):Object, %15:Object, %2:Object
+                   CondBranch %18:Object
 
-BB %10 - preds: %8 - succs: %11
-      %20:Object = Move [%14:Object + 0x18]:Object
-      %21:Object = Move [%2:Object + 0x18]:Object
-                   Call {1}({1:#x}):Object, {2}({2:#x}):Object, string_literal, %21:Object, %20:Object
-      %23:Object = Move 0(0x0):Object
+BB %11 - preds: %9 - succs: %12
+      %22:Object = Load [%15:Object + {1:#x}]:Object
+      %23:Object = Load [%2:Object + {1:#x}]:Object
+                   Call {3}({3:#x}):Object, {4}({4:#x}):Object, string_literal, %23:Object, %22:Object
+      %25:Object = Move 0(0x0):Object
 
-BB %9 - preds: %7 %8 - succs: %11
+BB %10 - preds: %8 %9 - succs: %12
 
-BB %11 - preds: %9 %10 - succs: %6
-      %25:Object = Phi (BB%9, %1:Object), (BB%10, %23:Object)
+BB %12 - preds: %10 %11 - succs: %7
+      %28:Object = Phi (BB%10, %1:Object), (BB%11, %25:Object)
 
-BB %6 - preds: %11 - succs: %5
-       %3:Object = Move %25:Object
-                   Return %3:Object
+BB %7 - preds: %12 - succs: %6
+       %3:Object = Move %28:Object
+{5:>16} = Move %3:Object
+                   Return
 
-BB %5 - preds: %6
+BB %6 - preds: %7
 
 )",
-      reinterpret_cast<uint64_t>(PyType_IsSubtype),
-      reinterpret_cast<uint64_t>(PyErr_Format),
-      reinterpret_cast<uint64_t>(PyExc_TypeError));
-  std::stringstream ss;
-  caller.sortBasicBlocks();
-  ss << caller;
-  // Replace the string literal address
-  std::regex reg(R"(\d+\(0x[0-9a-fA-F]+\):Object, %21:Object, %20:Object)");
-  std::string caller_str =
-      regex_replace(ss.str(), reg, "string_literal, %21:Object, %20:Object");
-  ASSERT_EQ(expected_caller, caller_str);
+        offsetof(PyObject, ob_type),
+        offsetof(PyTypeObject, tp_name),
+        reinterpret_cast<uint64_t>(PyType_IsSubtype),
+        reinterpret_cast<uint64_t>(PyErr_Format),
+        reinterpret_cast<uint64_t>(PyExc_TypeError),
+        fmt::format("{}:Object", arch::reg_general_return_loc.toString()));
+    std::stringstream ss;
+    caller.sortBasicBlocks();
+    ss << caller;
+    // Replace the string literal address
+    std::regex reg(R"(\d+\(0x[0-9a-fA-F]+\):Object, %23:Object, %22:Object)");
+    std::string caller_str =
+        regex_replace(ss.str(), reg, "string_literal, %23:Object, %22:Object");
+    ASSERT_EQ(expected_caller, caller_str);
+  }
 
   // Test execution of caller
   CheckCast(&caller);
@@ -882,18 +1254,21 @@ BB %5 - preds: %6
 TEST_F(BackendTest, PostgenJITRTCastTest) {
   auto caller = std::make_unique<Function>();
   auto bb = caller->allocateBasicBlock();
-  auto r1 =
-      bb->allocateInstr(Instruction::kLoadArg, nullptr, OutVReg(), Imm(0));
-  auto r2 =
-      bb->allocateInstr(Instruction::kLoadArg, nullptr, OutVReg(), Imm(1));
+  auto r1 = bb->allocateInstr(Opcode::kLoadArg, nullptr, OutVReg(), Imm(0));
+  auto r2 = bb->allocateInstr(Opcode::kLoadArg, nullptr, OutVReg(), Imm(1));
   auto call_instr = bb->allocateInstr(
-      Instruction::kCall,
+      Opcode::kCall,
       nullptr,
       OutVReg(),
-      Imm(reinterpret_cast<uint64_t>(JITRT_Cast)),
+      Imm(reinterpret_cast<uint64_t>(rt::cast)),
       VReg(r1),
       VReg(r2));
-  bb->allocateInstr(Instruction::kReturn, nullptr, VReg(call_instr));
+  bb->allocateInstr(
+      Opcode::kMove,
+      nullptr,
+      OutPhyReg{arch::reg_general_return_loc},
+      VReg(call_instr));
+  bb->allocateInstr(Opcode::kReturn, nullptr);
   auto epilogue = caller->allocateBasicBlock();
   bb->addSuccessor(epilogue);
 
@@ -903,51 +1278,157 @@ TEST_F(BackendTest, PostgenJITRTCastTest) {
   post_gen.run();
 
   // Check that caller LIR is as expected.
+#if defined(__APPLE__) && defined(Py_GIL_DISABLED)
   auto expected_caller = fmt::format(
       R"(Function:
-BB %0 - succs: %7
+BB %0 - succs: %6
+       %1:Object = Bind {0}:Object
+       %2:Object = Bind {1}:Object
+       %7:Object = Move %1:Object
+%8:ObjectUntagged = And %7:Object, 18446744073709551614(0xfffffffffffffffe):64bit
+       %9:Object = Move %2:Object
+%10:ObjectUntagged = And %9:Object, 18446744073709551614(0xfffffffffffffffe):64bit
+       %3:Object = Call {2}({2:#x}):64bit, %8:ObjectUntagged, %10:ObjectUntagged
+{3:>16} = Move %3:Object
+                   Return
+
+BB %6 - preds: %0
+
+)",
+      ARGUMENT_REGS[0],
+      ARGUMENT_REGS[1],
+      reinterpret_cast<uint64_t>(rt::cast),
+      fmt::format("{}:Object", arch::reg_general_return_loc.toString()));
+#elif defined(__APPLE__)
+  auto expected_caller = fmt::format(
+      R"(Function:
+BB %0 - succs: %6
+       %1:Object = Bind {0}:Object
+       %2:Object = Bind {1}:Object
+       %3:Object = Call {2}({2:#x}):64bit, %1:Object, %2:Object
+{3:>16} = Move %3:Object
+                   Return
+
+BB %6 - preds: %0
+
+)",
+      ARGUMENT_REGS[0],
+      ARGUMENT_REGS[1],
+      reinterpret_cast<uint64_t>(rt::cast),
+      fmt::format("{}:Object", arch::reg_general_return_loc.toString()));
+#elif defined(Py_GIL_DISABLED)
+  auto expected_caller = fmt::format(
+      R"(Function:
+BB %0 - succs: %8
        %1:Object = Bind {0}:Object
        %2:Object = Bind {1}:Object
 
-BB %7 - preds: %0 - succs: %9 %8
-      %14:Object = Move [%1:Object + 0x8]:Object
-      %15:Object = Equal %14:Object, %2:Object
-                   CondBranch %15:Object
+BB %8 - preds: %0 - succs: %10 %9
+      %29:Object = Move %1:Object
+%30:ObjectUntagged = And %29:Object, 18446744073709551614(0xfffffffffffffffe):64bit
+      %15:Object = Load [%30:ObjectUntagged + 0x18]:Object
+      %31:Object = Move %15:Object
+%32:ObjectUntagged = And %31:Object, 18446744073709551614(0xfffffffffffffffe):64bit
+      %33:Object = Move %2:Object
+%34:ObjectUntagged = And %33:Object, 18446744073709551614(0xfffffffffffffffe):64bit
+      %16:Object = Equal %32:ObjectUntagged, %34:ObjectUntagged
+                   CondBranch %16:Object
 
-BB %8 - preds: %7 - succs: %9 %10
-      %17:Object = Call {2}({2:#x}):Object, %14:Object, %2:Object
-                   CondBranch %17:Object
+BB %9 - preds: %8 - succs: %10 %11
+      %35:Object = Move %15:Object
+%36:ObjectUntagged = And %35:Object, 18446744073709551614(0xfffffffffffffffe):64bit
+      %37:Object = Move %2:Object
+%38:ObjectUntagged = And %37:Object, 18446744073709551614(0xfffffffffffffffe):64bit
+      %18:Object = Call {2}({2:#x}):Object, %36:ObjectUntagged, %38:ObjectUntagged
+                   CondBranch %18:Object
 
-BB %10 - preds: %8 - succs: %11
-      %20:Object = Move [%14:Object + 0x18]:Object
-      %21:Object = Move [%2:Object + 0x18]:Object
-                   Call {3}({3:#x}):Object, {4}({4:#x}):Object, string_literal, %21:Object, %20:Object
-      %23:Object = Move 0(0x0):Object
+BB %11 - preds: %9 - succs: %12
+      %39:Object = Move %15:Object
+%40:ObjectUntagged = And %39:Object, 18446744073709551614(0xfffffffffffffffe):64bit
+      %22:Object = Load [%40:ObjectUntagged + 0x28]:Object
+      %41:Object = Move %2:Object
+%42:ObjectUntagged = And %41:Object, 18446744073709551614(0xfffffffffffffffe):64bit
+      %23:Object = Load [%42:ObjectUntagged + 0x28]:Object
+      %43:Object = Move %23:Object
+%44:ObjectUntagged = And %43:Object, 18446744073709551614(0xfffffffffffffffe):64bit
+      %45:Object = Move %22:Object
+%46:ObjectUntagged = And %45:Object, 18446744073709551614(0xfffffffffffffffe):64bit
+                   Call {3}({3:#x}):Object, {4}({4:#x}):Object, string_literal, %44:ObjectUntagged, %46:ObjectUntagged
+      %25:Object = Move 0(0x0):Object
 
-BB %9 - preds: %7 %8 - succs: %11
+BB %10 - preds: %8 %9 - succs: %12
 
-BB %11 - preds: %9 %10 - succs: %6
-      %25:Object = Phi (BB%9, %1:Object), (BB%10, %23:Object)
+BB %12 - preds: %10 %11 - succs: %7
+      %28:Object = Phi (BB%10, %1:Object), (BB%11, %25:Object)
 
-BB %6 - preds: %11 - succs: %5
-       %3:Object = Move %25:Object
-                   Return %3:Object
+BB %7 - preds: %12 - succs: %6
+       %3:Object = Move %28:Object
+{5:>16} = Move %3:Object
+                   Return
 
-BB %5 - preds: %6
+BB %6 - preds: %7
 
 )",
       ARGUMENT_REGS[0],
       ARGUMENT_REGS[1],
       reinterpret_cast<uint64_t>(PyType_IsSubtype),
       reinterpret_cast<uint64_t>(PyErr_Format),
-      reinterpret_cast<uint64_t>(PyExc_TypeError));
+      reinterpret_cast<uint64_t>(PyExc_TypeError),
+      fmt::format("{}:Object", arch::reg_general_return_loc.toString()));
+#else
+  auto expected_caller = fmt::format(
+      R"(Function:
+BB %0 - succs: %8
+       %1:Object = Bind {0}:Object
+       %2:Object = Bind {1}:Object
+
+BB %8 - preds: %0 - succs: %10 %9
+      %15:Object = Load [%1:Object + 0x8]:Object
+      %16:Object = Equal %15:Object, %2:Object
+                   CondBranch %16:Object
+
+BB %9 - preds: %8 - succs: %10 %11
+)"
+      R"(      %18:Object = Call {2}({2:#x}):Object, %15:Object, %2:Object
+)"
+      R"(                   CondBranch %18:Object
+
+BB %11 - preds: %9 - succs: %12
+      %22:Object = Load [%15:Object + 0x18]:Object
+      %23:Object = Load [%2:Object + 0x18]:Object
+)"
+      R"(                   Call {3}({3:#x}):Object, {4}({4:#x}):Object, string_literal, %23:Object, %22:Object
+)"
+      R"(      %25:Object = Move 0(0x0):Object
+
+BB %10 - preds: %8 %9 - succs: %12
+
+BB %12 - preds: %10 %11 - succs: %7
+      %28:Object = Phi (BB%10, %1:Object), (BB%11, %25:Object)
+
+BB %7 - preds: %12 - succs: %6
+       %3:Object = Move %28:Object
+{5:>16} = Move %3:Object
+                   Return
+
+BB %6 - preds: %7
+
+)",
+      ARGUMENT_REGS[0],
+      ARGUMENT_REGS[1],
+      reinterpret_cast<uint64_t>(PyType_IsSubtype),
+      reinterpret_cast<uint64_t>(PyErr_Format),
+      reinterpret_cast<uint64_t>(PyExc_TypeError),
+      fmt::format("{}:Object", arch::reg_general_return_loc.toString()));
+#endif
   std::stringstream ss;
   caller->sortBasicBlocks();
   ss << *caller;
   // Replace the string literal address
-  std::regex reg(R"(\d+\(0x[0-9a-fA-F]+\):Object, %21:Object, %20:Object)");
+  std::regex reg(
+      R"((Call \d+\(0x[0-9a-fA-F]+\):Object, \d+\(0x[0-9a-fA-F]+\):Object, )\d+\(0x[0-9a-fA-F]+\):Object, (%[0-9]+:Object[A-Za-z]*), (%[0-9]+:Object[A-Za-z]*))");
   std::string caller_str =
-      regex_replace(ss.str(), reg, "string_literal, %21:Object, %20:Object");
+      regex_replace(ss.str(), reg, "$1string_literal, $2, $3");
   ASSERT_EQ(expected_caller, caller_str);
 }
 
@@ -1002,4 +1483,331 @@ BB %1
   }
 }
 
-} // namespace jit::codegen
+// Widening 32 bits to 64 has to reach the upper half of the destination: Zext
+// must clear it and Sext must fill it with the sign bit.  Neither lowers to the
+// movzx/movsx that the narrower widths use, so both get their own codegen path.
+TEST_F(BackendTest, Extend32BitsTo64Bits) {
+  auto compile = [this](Opcode extend) {
+    auto lirfunc = std::make_unique<Function>();
+    auto bb = lirfunc->allocateBasicBlock();
+
+    // Read only the lower half of the argument register, leaving the upper half
+    // holding bits that the extension is responsible for overwriting.
+    auto extended = bb->allocateInstr(
+        extend,
+        nullptr,
+        OutVReg{Operand::k64bit},
+        PhyReg{ARGUMENT_REGS[0], Operand::k32bit});
+    bb->allocateInstr(
+        Opcode::kMove,
+        nullptr,
+        OutPhyReg{arch::reg_general_return_loc, Operand::k64bit},
+        VReg{extended});
+    bb->allocateInstr(Opcode::kReturn, nullptr);
+
+    auto epilogue = lirfunc->allocateBasicBlock();
+    bb->addSuccessor(epilogue);
+
+    return reinterpret_cast<uint64_t (*)(uint64_t)>(
+        SimpleCompile(lirfunc.get()));
+  };
+
+  auto zext = compile(Opcode::kZext);
+  ASSERT_NE(zext, nullptr);
+  EXPECT_EQ(zext(0xDEADBEEFCAFEBABEULL), 0x00000000CAFEBABEULL);
+  EXPECT_EQ(zext(0xDEADBEEF0000002AULL), 0x000000000000002AULL);
+
+  auto sext = compile(Opcode::kSext);
+  ASSERT_NE(sext, nullptr);
+  EXPECT_EQ(sext(0xDEADBEEFCAFEBABEULL), 0xFFFFFFFFCAFEBABEULL);
+  EXPECT_EQ(sext(0xDEADBEEF0000002AULL), 0x000000000000002AULL);
+}
+
+#if defined(CINDER_AARCH64)
+// This test uses CompilePreAllocated to construct the exact instruction
+// sequence the buggy register allocator would emit:
+//   1. Store a 64-bit pointer in X19 and a 32-bit flag in X21
+//   2. Swap X19↔X21 using X13 as temp with kObject-width moves
+//   3. Return X21 (which should hold the original 64-bit pointer)
+//
+// With the fix (k64bit moves): the pointer is preserved in full.
+// Without the fix (k32bit moves): upper 32 bits are zeroed.
+TEST_F(BackendTest, RegSwapPreserves64BitPointers) {
+  auto lirfunc = std::make_unique<Function>();
+  auto bb1 = lirfunc->allocateBasicBlock();
+  auto bb2 = lirfunc->allocateBasicBlock();
+
+  // Use caller-saved registers that don't clash with argument registers
+  // or the scratch register (X13). X9 and X10 are available.
+  constexpr auto kReg_A = X9;
+  constexpr auto kReg_B = X10;
+
+  // BB1: Move arg0 (64-bit pointer) to X19, arg1 (32-bit flag) to X21.
+  // Then perform a 3-register swap X19↔X21 using X13 (scratch) as temp,
+  // emitting with kObject width — this is what the FIXED regalloc emits.
+  // (The buggy version would use k32bit for the second edge, truncating.)
+  bb1->allocateInstr(
+      Opcode::kMove,
+      nullptr,
+      OutPhyReg{kReg_A, DataType::kObject},
+      PhyReg{ARGUMENT_REGS[0], DataType::kObject});
+  bb1->allocateInstr(
+      Opcode::kMove,
+      nullptr,
+      OutPhyReg{kReg_B, DataType::k32bit},
+      PhyReg{ARGUMENT_REGS[1], DataType::k32bit});
+
+  // Swap X19↔X21 via X13, using k64bit (the fix) — preserves all 64 bits.
+  bb1->allocateInstr(
+      Opcode::kMove,
+      nullptr,
+      OutPhyReg{arch::reg_scratch_0_loc, DataType::kObject},
+      PhyReg{kReg_A, DataType::kObject});
+  bb1->allocateInstr(
+      Opcode::kMove,
+      nullptr,
+      OutPhyReg{kReg_A, DataType::kObject},
+      PhyReg{kReg_B, DataType::kObject});
+  bb1->allocateInstr(
+      Opcode::kMove,
+      nullptr,
+      OutPhyReg{kReg_B, DataType::kObject},
+      PhyReg{arch::reg_scratch_0_loc, DataType::kObject});
+
+  bb1->allocateInstr(Opcode::kBranch, nullptr, Lbl{bb2});
+  bb1->addSuccessor(bb2);
+
+  // BB2: Return X21 (should hold the original 64-bit pointer from X19).
+  bb2->allocateInstr(
+      Opcode::kMove,
+      nullptr,
+      OutPhyReg{arch::reg_general_return_loc, DataType::kObject},
+      PhyReg{kReg_B, DataType::kObject});
+
+  auto func = (uint64_t (*)(uint64_t, uint64_t))CompilePreAllocated(
+      lirfunc.release(), 16);
+  ASSERT_NE(func, nullptr);
+
+  // The pointer has non-zero upper 32 bits.
+  // If the swap truncated it, upper bits would be zero.
+  constexpr uint64_t kPtr = 0xDEADBEEFCAFEBABEULL;
+  constexpr uint64_t kFlag = 42;
+  uint64_t result = func(kPtr, kFlag);
+  EXPECT_EQ(result, kPtr) << "Register swap truncated 64-bit pointer: got 0x"
+                          << std::hex << result << ", expected 0x" << kPtr;
+
+  // Also verify the upper 32 bits survived.
+  EXPECT_EQ(result & 0xFFFFFFFF00000000ULL, 0xDEADBEEF00000000ULL)
+      << "Upper 32 bits of pointer destroyed during swap: got 0x" << std::hex
+      << result;
+}
+
+// Negative test: verify that k32bit swap moves DO truncate 64-bit values.
+// This confirms the bug pattern — if this test ever passes, the k32bit
+// codegen changed and the fix in rewriteLIREmitCopies may need revisiting.
+TEST_F(BackendTest, RegSwapK32bitTruncates64BitValues) {
+  auto lirfunc = std::make_unique<Function>();
+  auto bb1 = lirfunc->allocateBasicBlock();
+  auto bb2 = lirfunc->allocateBasicBlock();
+
+  constexpr auto kReg_A = X9;
+  constexpr auto kReg_B = X10;
+
+  // Same setup as RegSwapPreserves64BitPointers, but swap uses k32bit
+  // (the buggy data type that the unfixed regalloc would emit).
+  bb1->allocateInstr(
+      Opcode::kMove,
+      nullptr,
+      OutPhyReg{kReg_A, DataType::kObject},
+      PhyReg{ARGUMENT_REGS[0], DataType::kObject});
+  bb1->allocateInstr(
+      Opcode::kMove,
+      nullptr,
+      OutPhyReg{kReg_B, DataType::k32bit},
+      PhyReg{ARGUMENT_REGS[1], DataType::k32bit});
+
+  // Swap using k32bit — this SHOULD truncate the 64-bit pointer.
+  bb1->allocateInstr(
+      Opcode::kMove,
+      nullptr,
+      OutPhyReg{arch::reg_scratch_0_loc, DataType::k32bit},
+      PhyReg{kReg_A, DataType::k32bit});
+  bb1->allocateInstr(
+      Opcode::kMove,
+      nullptr,
+      OutPhyReg{kReg_A, DataType::k32bit},
+      PhyReg{kReg_B, DataType::k32bit});
+  bb1->allocateInstr(
+      Opcode::kMove,
+      nullptr,
+      OutPhyReg{kReg_B, DataType::k32bit},
+      PhyReg{arch::reg_scratch_0_loc, DataType::k32bit});
+
+  bb1->allocateInstr(Opcode::kBranch, nullptr, Lbl{bb2});
+  bb1->addSuccessor(bb2);
+
+  bb2->allocateInstr(
+      Opcode::kMove,
+      nullptr,
+      OutPhyReg{arch::reg_general_return_loc, DataType::kObject},
+      PhyReg{kReg_B, DataType::kObject});
+
+  auto func = (uint64_t (*)(uint64_t, uint64_t))CompilePreAllocated(
+      lirfunc.release(), 16);
+  ASSERT_NE(func, nullptr);
+
+  constexpr uint64_t kPtr = 0xDEADBEEFCAFEBABEULL;
+  uint64_t result = func(kPtr, 42);
+
+  // The k32bit swap SHOULD truncate — upper 32 bits should be zero.
+  // This confirms the bug pattern exists in the codegen layer.
+  EXPECT_NE(result, kPtr)
+      << "k32bit swap should NOT preserve full 64-bit value";
+  EXPECT_EQ(result & 0xFFFFFFFF00000000ULL, 0ULL)
+      << "k32bit swap should zero upper 32 bits, got 0x" << std::hex << result;
+}
+
+// pairAdjacentMemoryOps must not merge two moves whose offset is out of
+// stp/ldp range when either register is a scratch: the merged form has to
+// materialize its address in that same scratch, and for a store that would
+// overwrite the value before it is written out. PostRegAllocRewrite lowers
+// memory inputs by loading them into x13/x14, so this shape is routine.
+TEST_F(BackendTest, PeepholeSkipsScratchPairWhenOffsetOutOfRange) {
+  auto build = [](PhyLocation reg0, PhyLocation reg1, int32_t lo) {
+    auto func = std::make_unique<Function>();
+    auto* bb = func->allocateBasicBlock();
+    bb->allocateInstr(
+        Opcode::kStore,
+        nullptr,
+        OutStk{PhyLocation(lo, 64), DataType::k64bit},
+        PhyReg{reg0, DataType::k64bit});
+    bb->allocateInstr(
+        Opcode::kStore,
+        nullptr,
+        OutStk{PhyLocation(lo + 8, 64), DataType::k64bit},
+        PhyReg{reg1, DataType::k64bit});
+    runPostRegAllocPeephole(func.get());
+    int pairs = 0;
+    for (auto& instr : bb->instructions()) {
+      pairs += instr->isStorePair() ? 1 : 0;
+    }
+    return pairs;
+  };
+
+  // Out of range and holding a scratch register: must be left unmerged.
+  EXPECT_EQ(build(arch::reg_scratch_0_loc, X5, -520), 0);
+  EXPECT_EQ(build(X4, arch::reg_scratch_1_loc, -520), 0);
+  // Out of range but no scratch involved: still merged, off a scratch base.
+  EXPECT_EQ(build(X4, X5, -520), 1);
+  // In range: encodes directly, so scratch registers are harmless.
+  EXPECT_EQ(build(arch::reg_scratch_0_loc, arch::reg_scratch_1_loc, -24), 1);
+}
+
+// A pair whose offset is out of stp/ldp range is still issued as a single
+// instruction, with its address materialized in the scratch register once.
+// Resolving each half separately used to recompute the address into that same
+// scratch, so the second computation destroyed the first half's register.
+TEST_F(BackendTest, OutOfRangePairMergesOffScratchBase) {
+  constexpr uint64_t kLow = 0x1111111111111111ULL;
+  constexpr uint64_t kHigh = 0x2222222222222222ULL;
+  for (int32_t lo : {-24, -520}) {
+    for (int word = 0; word < 2; ++word) {
+      auto func = std::make_unique<Function>();
+      auto* bb = func->allocateBasicBlock();
+      // Hand-built pairs: a Move-based seed would be store-to-load forwarded
+      // by PostRegAllocRewrite and the memory traffic would vanish.
+      bb->allocateInstr(
+          Opcode::kStorePair,
+          nullptr,
+          Imm{static_cast<uint64_t>(static_cast<int64_t>(lo))},
+          PhyReg{arch::reg_frame_pointer_loc, DataType::k64bit},
+          PhyReg{ARGUMENT_REGS[0], DataType::k64bit},
+          PhyReg{ARGUMENT_REGS[1], DataType::k64bit});
+      bb->allocateInstr(
+          Opcode::kLoadPair,
+          nullptr,
+          OutPhyReg{X4, DataType::k64bit},
+          Imm{static_cast<uint64_t>(static_cast<int64_t>(lo))},
+          PhyReg{arch::reg_frame_pointer_loc, DataType::k64bit},
+          PhyReg{X5, DataType::k64bit});
+      bb->allocateInstr(
+          Opcode::kMove,
+          nullptr,
+          OutPhyReg{arch::reg_general_return_loc, DataType::k64bit},
+          PhyReg{word == 0 ? X4 : X5, DataType::k64bit});
+
+      auto fn = (uint64_t (*)(uint64_t, uint64_t))CompilePreAllocated(
+          func.release(), 1024);
+      ASSERT_NE(fn, nullptr);
+      EXPECT_EQ(fn(kLow, kHigh), word == 0 ? kLow : kHigh)
+          << "slot " << lo << " word " << word;
+    }
+  }
+}
+
+// PostRegAllocRewrite lowers an instruction's memory operands by loading each
+// into a scratch register, so the first operand's value sits in x13 while the
+// second operand's address is being computed. Materializing that address in
+// the shared scratch destroyed the first value; the address now goes in the
+// destination register instead.
+TEST_F(BackendTest, FarStackOperandsDoNotClobberEachOther) {
+  for (int32_t lo : {-24, -520}) {
+    auto func = std::make_unique<Function>();
+    auto* bb = func->allocateBasicBlock();
+    // Seed the slots with a hand-built StorePair: a Move-based seed would be
+    // store-to-load forwarded by PostRegAllocRewrite and the loads under test
+    // would never be emitted.
+    bb->allocateInstr(
+        Opcode::kStorePair,
+        nullptr,
+        Imm{static_cast<uint64_t>(static_cast<int64_t>(lo))},
+        PhyReg{arch::reg_frame_pointer_loc, DataType::k64bit},
+        PhyReg{ARGUMENT_REGS[0], DataType::k64bit},
+        PhyReg{ARGUMENT_REGS[1], DataType::k64bit});
+    bb->allocateInstr(
+        Opcode::kAdd,
+        nullptr,
+        OutPhyReg{arch::reg_general_return_loc, DataType::k64bit},
+        Stk{PhyLocation(lo, 64), DataType::k64bit},
+        Stk{PhyLocation(lo + 8, 64), DataType::k64bit});
+
+    auto fn = (uint64_t (*)(uint64_t, uint64_t))CompilePreAllocated(
+        func.release(), 1024);
+    ASSERT_NE(fn, nullptr);
+    EXPECT_EQ(fn(3, 4), 7u) << "adding slots " << lo << " and " << (lo + 8);
+  }
+}
+
+// The same collision on the store side: the value being written must not be
+// evicted by the address computation.
+TEST_F(BackendTest, FarStackStoreDoesNotClobberItsValue) {
+  for (int32_t slot : {-24, -520}) {
+    auto func = std::make_unique<Function>();
+    auto* bb = func->allocateBasicBlock();
+    bb->allocateInstr(
+        Opcode::kMove,
+        nullptr,
+        OutPhyReg{arch::reg_scratch_0_loc, DataType::k64bit},
+        PhyReg{ARGUMENT_REGS[0], DataType::k64bit});
+    bb->allocateInstr(
+        Opcode::kStore,
+        nullptr,
+        OutStk{PhyLocation(slot, 64), DataType::k64bit},
+        PhyReg{arch::reg_scratch_0_loc, DataType::k64bit});
+    bb->allocateInstr(
+        Opcode::kLoad,
+        nullptr,
+        OutPhyReg{arch::reg_general_return_loc, DataType::k64bit},
+        Stk{PhyLocation(slot, 64), DataType::k64bit});
+
+    auto fn = (uint64_t (*)(uint64_t, uint64_t))CompilePreAllocated(
+        func.release(), 1024);
+    ASSERT_NE(fn, nullptr);
+    EXPECT_EQ(fn(0x1234567890abcdefULL, 0), 0x1234567890abcdefULL)
+        << "storing x13 to slot " << slot;
+  }
+}
+
+#endif // CINDER_AARCH64
+
+} // namespace cinderx::jit::codegen

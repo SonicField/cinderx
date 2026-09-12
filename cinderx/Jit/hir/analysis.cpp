@@ -14,7 +14,7 @@
 
 #include <memory>
 
-namespace jit::hir {
+namespace cinderx::jit::hir {
 
 const RegisterSet kEmptyRegSet;
 
@@ -26,7 +26,7 @@ std::ostream& operator<<(std::ostream& os, const RegisterSet& regs) {
   });
   auto sep = "";
   for (auto reg : sorted_regs) {
-    fmt::print(os, "{}{}", sep, reg->name());
+    fmt::print(os, "{}{}", sep, *reg);
     sep = ", ";
   }
   return os << "}";
@@ -57,6 +57,8 @@ bool registerTypeMatches(Type op_type, OperandType expected_type) {
       return op_type <= TOptObject || op_type <= TCInt;
     case Constraint::kMatchAllAsCInt:
       return isSingleCInt(op_type);
+    case Constraint::kMatchAllAsCIntOrCBool:
+      return isSingleCInt(op_type) || op_type <= TCBool;
     case Constraint::kMatchAllAsPrimitive:
       return isSingleCInt(op_type) || op_type <= TCBool ||
           op_type <= TCDouble || op_type <= TCPtr;
@@ -67,6 +69,7 @@ bool registerTypeMatches(Type op_type, OperandType expected_type) {
 bool operandsMustMatch(OperandType op_type) {
   switch (op_type.kind) {
     case Constraint::kMatchAllAsCInt:
+    case Constraint::kMatchAllAsCIntOrCBool:
     case Constraint::kMatchAllAsPrimitive:
       return true;
 
@@ -81,19 +84,47 @@ bool operandsMustMatch(OperandType op_type) {
   JIT_ABORT("unknown constraint");
 }
 
+RegisterSet collectDataUses(const Function& func) {
+  RegisterSet uses;
+  for (auto& block : func.cfg.blocks) {
+    for (const Instr& instr : block) {
+      // UseType exists to tell GuardTypeRemoval that a type is relied upon; it
+      // is a no-op assertion rather than a consumer of the value.
+      if (instr.isUseType()) {
+        continue;
+      }
+      for (std::size_t i = 0, n = instr.numOperands(); i < n; ++i) {
+        if (Register* operand = instr.getOperand(i)) {
+          uses.insert(operand);
+        }
+      }
+      if (const DeoptBase* deopt = instr.asDeoptBase()) {
+        // The guilty register is reported to the deopt machinery, so it has to
+        // survive as a real object.  Its frame state deliberately does not
+        // count, and neither do its live registers, which are the same kind of
+        // restore-only reference (and are empty until RefcountInsertion).
+        if (Register* guilty = deopt->guiltyReg()) {
+          uses.insert(guilty);
+        }
+      }
+    }
+  }
+  return uses;
+}
+
 bool funcTypeChecks(const Function& func, std::ostream& err) {
   for (auto& block : func.cfg.blocks) {
     for (const Instr& instr : block) {
-      if (instr.NumOperands() > 1 &&
-          operandsMustMatch(instr.GetOperandType(0))) {
+      if (instr.numOperands() > 1 &&
+          operandsMustMatch(instr.getOperandType(0))) {
         Type join = TBottom;
-        for (std::size_t i = 0; i < instr.NumOperands(); i++) {
+        for (std::size_t i = 0; i < instr.numOperands(); i++) {
           JIT_DCHECK(
-              operandsMustMatch(instr.GetOperandType(i)),
+              operandsMustMatch(instr.getOperandType(i)),
               "Inconsistent operand type constraint");
-          join |= instr.GetOperand(i)->type();
+          join |= instr.getOperand(i)->type();
         }
-        OperandType expected_type = instr.GetOperandType(0);
+        OperandType expected_type = instr.getOperandType(0);
         if (!registerTypeMatches(join, expected_type)) {
           fmt::print(
               err,
@@ -107,9 +138,9 @@ bool funcTypeChecks(const Function& func, std::ostream& err) {
           return false;
         }
       } else {
-        for (std::size_t i = 0; i < instr.NumOperands(); i++) {
-          Register* op = instr.GetOperand(i);
-          OperandType expected_type = instr.GetOperandType(i);
+        for (std::size_t i = 0; i < instr.numOperands(); i++) {
+          Register* op = instr.getOperand(i);
+          OperandType expected_type = instr.getOperandType(i);
           if (!registerTypeMatches(op->type(), expected_type)) {
             fmt::print(
                 err,
@@ -132,160 +163,84 @@ bool funcTypeChecks(const Function& func, std::ostream& err) {
   return true;
 }
 
-void DataflowAnalysis::AddBasicBlock(const BasicBlock* cfg_block) {
-  auto res = df_blocks_.emplace(
-      std::piecewise_construct,
-      std::forward_as_tuple(cfg_block),
-      std::forward_as_tuple());
-  auto& df_block = res.first->second;
-  df_analyzer_.AddBlock(df_block);
-  setUninitialized(&df_block);
-
-  std::unordered_set<Register*> gen, kill;
-  ComputeGenKill(cfg_block, gen, kill);
-
-  for (auto reg : gen) {
-    df_analyzer_.SetBlockGenBit(df_block, reg);
+void RegisterAnalysis::run() {
+  // Register every HIR register as a dataflow object (one bit each). This must
+  // happen before any blocks are created, as it fixes the bit width.
+  for (const auto& it : irfunc_.env.getRegisters()) {
+    analyzer_.addObject(it.second.get());
   }
-  for (auto reg : kill) {
-    df_analyzer_.SetBlockKillBit(df_block, reg);
+
+  // Create a dataflow block per CFG block and record its gen/kill sets.
+  for (const auto& cfg_block : irfunc_.cfg.blocks) {
+    auto& df_block = analyzer_.createBlock();
+    blocks_.emplace(&cfg_block, &df_block);
+
+    RegisterSet gen, kill;
+    computeGenKill(&cfg_block, gen, kill);
+    for (auto reg : gen) {
+      analyzer_.setBlockGenBit(df_block, reg);
+    }
+    for (auto reg : kill) {
+      analyzer_.setBlockKillBit(df_block, reg);
+    }
+  }
+
+  // Mirror the CFG edges onto the dataflow blocks. The entry block has no
+  // predecessors and terminal blocks have no successors; the solver treats
+  // those as boundary blocks.
+  for (const auto& cfg_block : irfunc_.cfg.blocks) {
+    auto* df_block = blocks_.at(&cfg_block);
+    for (auto cfg_edge : cfg_block.outEdges()) {
+      df_block->connectTo(*blocks_.at(cfg_edge->to()));
+    }
+  }
+
+  analyzer_.solve(dir_, meet_);
+
+  if (getConfig().log.debug_dataflow_analysis) {
+    dump();
   }
 }
 
-void DataflowAnalysis::Initialize() {
-  // Add all registers -- this sets up the correct number of bits for the
-  // analysis
-  num_bits_ = irfunc_.env.GetRegisters().size();
-  for (const auto& it : irfunc_.env.GetRegisters()) {
-    df_analyzer_.AddObject(it.second.get());
-  }
-
-  // Compute the initial state for each block
-  for (const auto& cfg_block : irfunc_.cfg.blocks) {
-    AddBasicBlock(&cfg_block);
-  }
-
-  // Set up dataflow graph
-  df_analyzer_.AddBlock(df_entry_);
-  df_analyzer_.SetEntryBlock(df_entry_);
-
-  df_analyzer_.AddBlock(df_exit_);
-  df_analyzer_.SetExitBlock(df_exit_);
-
-  for (const auto& cfg_block : irfunc_.cfg.blocks) {
-    auto& df_block = df_blocks_[&cfg_block];
-
-    if (&cfg_block == irfunc_.cfg.entry_block) {
-      df_entry_.ConnectTo(df_block);
-    }
-
-    if (cfg_block.out_edges().empty()) {
-      df_block.ConnectTo(df_exit_);
-    } else {
-      for (auto cfg_edge : cfg_block.out_edges()) {
-        auto succ_cfg_block = cfg_edge->to();
-        JIT_CHECK(
-            df_blocks_.contains(succ_cfg_block),
-            "succ_cfg_block has to be in the hash table df_blocks_.");
-        auto& succ_df_block = df_blocks_.at(succ_cfg_block);
-        df_block.ConnectTo(succ_df_block);
-      }
-    }
-  }
-}
-
-RegisterSet DataflowAnalysis::GetIn(const BasicBlock* cfg_block) {
+RegisterSet RegisterAnalysis::getIn(const BasicBlock* block) const {
   RegisterSet in;
-  const auto& df_block = df_blocks_[cfg_block];
-  df_analyzer_.forEachBlockIn(df_block, [&](Register* r) { in.insert(r); });
+  analyzer_.forEachBlockIn(
+      *blocks_.at(block), [&](Register* r) { in.insert(r); });
   return in;
 }
 
-RegisterSet DataflowAnalysis::GetOut(const BasicBlock* cfg_block) {
+RegisterSet RegisterAnalysis::getOut(const BasicBlock* block) const {
   RegisterSet out;
-  const auto& df_block = df_blocks_[cfg_block];
-  df_analyzer_.forEachBlockOut(df_block, [&](Register* r) { out.insert(r); });
+  analyzer_.forEachBlockOut(
+      *blocks_.at(block), [&](Register* r) { out.insert(r); });
   return out;
 }
 
-void DataflowAnalysis::dump() {
-  if (!getConfig().log.debug) {
-    return;
-  }
+bool RegisterAnalysis::inBit(const BasicBlock* block, Register* reg) const {
+  return analyzer_.getBlockInBit(*blocks_.at(block), reg);
+}
 
+bool RegisterAnalysis::outBit(const BasicBlock* block, Register* reg) const {
+  return analyzer_.getBlockOutBit(*blocks_.at(block), reg);
+}
+
+void RegisterAnalysis::dump() const {
   std::string out = fmt::format("{} complete:\n", name());
   for (auto& block : irfunc_.cfg.blocks) {
     format_to(out, "  bb {}\n", block.id);
     auto format_set = [&](const RegisterSet& regs) {
       for (auto reg : regs) {
-        format_to(out, "    {}\n", reg->name());
+        format_to(out, "    {}\n", *reg);
       }
     };
     format_to(out, "  In:\n");
-    format_set(GetIn(&block));
+    format_set(getIn(&block));
     format_to(out, "  Out:\n");
-    format_set(GetOut(&block));
+    format_set(getOut(&block));
     format_to(out, "\n");
   }
 
-  JIT_DLOG("{}", out);
-}
-
-void BackwardDataflowAnalysis::Run() {
-  Initialize();
-
-  std::list<jit::optimizer::DataFlowBlock*> blocks;
-  for (auto& it : df_blocks_) {
-    if (&it.second != &df_entry_) {
-      blocks.emplace_back(&it.second);
-    }
-  }
-
-  while (!blocks.empty()) {
-    auto block = blocks.front();
-    blocks.pop_front();
-
-    auto new_out = ComputeNewOut(block);
-    bool changed = (new_out != block->out_);
-    block->out_ = std::move(new_out);
-
-    auto new_in = ComputeNewIn(block);
-    changed |= (new_in != block->in_);
-    block->in_ = std::move(new_in);
-
-    if (changed) {
-      std::copy(
-          block->pred_.begin(), block->pred_.end(), std::back_inserter(blocks));
-    }
-  }
-}
-
-void ForwardDataflowAnalysis::Run() {
-  Initialize();
-
-  std::list<jit::optimizer::DataFlowBlock*> blocks;
-  for (auto& it : df_blocks_) {
-    if (&it.second != &df_exit_) {
-      blocks.emplace_back(&it.second);
-    }
-  }
-
-  while (!blocks.empty()) {
-    auto block = blocks.front();
-    blocks.pop_front();
-
-    auto new_in = ComputeNewIn(block);
-    bool changed = (new_in != block->in_);
-    block->in_ = std::move(new_in);
-
-    auto new_out = ComputeNewOut(block);
-    changed |= (new_out != block->out_);
-    block->out_ = std::move(new_out);
-
-    if (changed) {
-      blocks.insert(blocks.end(), block->succ_.begin(), block->succ_.end());
-    }
-  }
+  JIT_LOG("{}", out);
 }
 
 template <typename OutputFunc, typename UseFunc>
@@ -297,7 +252,7 @@ static void analyzeInstrLiveness(
     define_output(output);
   }
 
-  if (instr.IsPhi()) {
+  if (instr.isPhi()) {
     // Phi uses happen at the end of the predecessor block.
     return;
   }
@@ -315,25 +270,25 @@ static void analyzeInstrLiveness(
       auto succ = instr.successor(i);
       int phi_idx = -1;
       for (auto& succ_instr : *succ) {
-        if (!succ_instr.IsPhi()) {
+        if (!succ_instr.isPhi()) {
           break;
         }
         auto& phi = static_cast<const Phi&>(succ_instr);
         if (phi_idx == -1) {
           phi_idx = phi.blockIndex(instr.block());
         }
-        use(phi.GetOperand(phi_idx));
+        use(phi.getOperand(phi_idx));
       }
     }
   }
 }
 
-LivenessAnalysis::LastUses LivenessAnalysis::GetLastUses() {
+LivenessAnalysis::LastUses LivenessAnalysis::getLastUses() {
   LastUses last_uses;
 
-  for (auto& pair : df_blocks_) {
+  for (auto& pair : blocks_) {
     auto block = pair.first;
-    auto live = GetOut(block);
+    auto live = getOut(block);
 
     for (auto it = block->rbegin(); it != block->rend(); ++it) {
       auto& instr = *it;
@@ -358,7 +313,7 @@ LivenessAnalysis::LastUses LivenessAnalysis::GetLastUses() {
   return last_uses;
 }
 
-void LivenessAnalysis::ComputeGenKill(
+void LivenessAnalysis::computeGenKill(
     const BasicBlock* cfg_block,
     RegisterSet& gen,
     RegisterSet& kill) {
@@ -373,60 +328,21 @@ void LivenessAnalysis::ComputeGenKill(
   }
 }
 
-jit::util::BitVector LivenessAnalysis::ComputeNewIn(
-    const jit::optimizer::DataFlowBlock* block) {
-  jit::util::BitVector new_in(num_bits_);
-  new_in = block->gen_ | (block->out_ - block->kill_);
-  return new_in;
-}
-
-jit::util::BitVector LivenessAnalysis::ComputeNewOut(
-    const jit::optimizer::DataFlowBlock* block) {
-  jit::util::BitVector new_out(num_bits_);
-  for (auto& succ : block->succ_) {
-    new_out |= succ->in_;
-  }
-  return new_out;
-}
-
-void LivenessAnalysis::setUninitialized(jit::optimizer::DataFlowBlock*) {
-  // Do nothing.
-}
-
-bool LivenessAnalysis::IsLiveIn(const BasicBlock* cfg_block, Register* reg) {
-  const auto& df_block = df_blocks_[cfg_block];
-  return df_analyzer_.GetBlockInBit(df_block, reg);
-}
-
-bool LivenessAnalysis::IsLiveOut(const BasicBlock* cfg_block, Register* reg) {
-  const auto& df_block = df_blocks_[cfg_block];
-  return df_analyzer_.GetBlockOutBit(df_block, reg);
-}
-
 AssignmentAnalysis::AssignmentAnalysis(const Function& irfunc, bool is_definite)
-    : ForwardDataflowAnalysis(irfunc), args_(), is_definite_(is_definite) {
+    : RegisterAnalysis(
+          irfunc,
+          jit::optimizer::Direction::Forward,
+          is_definite ? jit::optimizer::Meet::Intersect
+                      : jit::optimizer::Meet::Union),
+      is_definite_{is_definite} {
   for (const auto& instr : *irfunc_.cfg.entry_block) {
-    if (instr.IsLoadArg()) {
+    if (instr.isLoadArg()) {
       args_.insert(instr.output());
     }
   }
 }
 
-bool AssignmentAnalysis::IsAssignedIn(
-    const BasicBlock* cfg_block,
-    Register* reg) {
-  const auto& df_block = df_blocks_[cfg_block];
-  return df_analyzer_.GetBlockInBit(df_block, reg);
-}
-
-bool AssignmentAnalysis::IsAssignedOut(
-    const BasicBlock* cfg_block,
-    Register* reg) {
-  const auto& df_block = df_blocks_[cfg_block];
-  return df_analyzer_.GetBlockOutBit(df_block, reg);
-}
-
-void AssignmentAnalysis::ComputeGenKill(
+void AssignmentAnalysis::computeGenKill(
     const BasicBlock* block,
     RegisterSet& gen,
     RegisterSet& /* kill */) {
@@ -439,116 +355,15 @@ void AssignmentAnalysis::ComputeGenKill(
   }
 }
 
-jit::util::BitVector AssignmentAnalysis::ComputeNewIn(
-    const jit::optimizer::DataFlowBlock* block) {
-  if (block->pred_.empty()) {
-    jit::util::BitVector new_in(num_bits_);
-    return new_in;
-  }
-  auto it = block->pred_.begin();
-  auto pred = *it++;
-  jit::util::BitVector new_in = pred->out_;
-  while (it != block->pred_.end()) {
-    if (is_definite_) {
-      new_in &= (*it)->out_;
-    } else {
-      new_in |= (*it)->out_;
-    }
-    it++;
-  }
-  return new_in;
-}
-
-jit::util::BitVector AssignmentAnalysis::ComputeNewOut(
-    const jit::optimizer::DataFlowBlock* block) {
-  jit::util::BitVector new_out(num_bits_);
-  new_out = block->gen_ | (block->in_ - block->kill_);
-  return new_out;
-}
-
-void AssignmentAnalysis::setUninitialized(
-    jit::optimizer::DataFlowBlock* block) {
-  if (is_definite_) {
-    block->out_.fill(true);
-  }
-}
-
-DominatorAnalysis::DominatorAnalysis(const Function& irfunc)
-    : idoms_{}, dom_sets_{} {
-  // Calculate immediate dominators with the iterative two-finger algorithm.
-  // When it terminates, idoms_[block-id] will contain the block-id of the
-  // immediate dominator of each block.  idoms_[start] will be nullptr. This is
-  // the general algorithm but it will only loop twice for loop-free graphs.
-  std::vector<BasicBlock*> rpo = irfunc.cfg.GetRPOTraversal();
-  // Map block ids to their index in the RPO traversal
-  std::unordered_map<int, int> rpo_index{};
-  for (size_t i = 0; i < rpo.size(); i++) {
-    rpo_index[rpo[i]->id] = i;
-  }
-  auto start = rpo.begin();
-  const BasicBlock* entry = *start;
-  idoms_[entry->id] = entry;
-  start++;
-  for (bool changed = true; changed;) {
-    changed = false;
-    for (auto it = start; it != rpo.end(); it++) {
-      const BasicBlock* block = *it;
-      auto predIter = block->in_edges().begin();
-      auto predEnd = block->in_edges().end();
-      // pred1 = any already-processed predecessor
-      auto pred1 = const_cast<const BasicBlock*>((*predIter)->from());
-      while (!idoms_[pred1->id]) {
-        JIT_DCHECK(
-            predIter != predEnd,
-            "There should be an already-processed predecessor since we're "
-            "iterating in RPO");
-        pred1 = (*(++predIter))->from();
-      }
-      // for all other already-processed predecessors pred2 of block
-      for (++predIter; predIter != predEnd; ++predIter) {
-        auto pred2 = const_cast<const BasicBlock*>((*predIter)->from());
-        if (pred2 == pred1 || !idoms_[pred2->id]) {
-          continue;
-        }
-        // find earliest common predecessor of pred1 and pred2
-        // (lower RPO ids are earlier in flow and in dom-tree).
-        do {
-          while (rpo_index[pred1->id] < rpo_index[pred2->id]) {
-            pred2 = idoms_[pred2->id];
-          }
-          while (rpo_index[pred2->id] < rpo_index[pred1->id]) {
-            pred1 = idoms_[pred1->id];
-          }
-        } while (pred1 != pred2);
-      }
-      if (idoms_[block->id] != pred1) {
-        idoms_[block->id] = pred1;
-        changed = true;
-      }
-    }
-  }
-  idoms_[entry->id] = nullptr;
-  for (auto it = rpo.rbegin(); it != rpo.rend(); ++it) {
-    const BasicBlock* block = *it;
-    auto& block_dom_set_ = dom_sets_[block->id];
-    block_dom_set_.insert(block);
-    const BasicBlock* block_dom = idoms_[block->id];
-    if (block_dom != nullptr) {
-      dom_sets_[block_dom->id].insert(
-          block_dom_set_.begin(), block_dom_set_.end());
-    }
-  }
-}
-
 RegisterTypeHints::RegisterTypeHints(const Function& irfunc)
-    : dom_hint_{}, doms_{irfunc} {
+    : doms_{irfunc.cfg.entry_block} {
   for (const auto& block : irfunc.cfg.blocks) {
     for (const auto& instr : block) {
-      if (instr.IsHintType()) {
-        for (size_t i = 0; i < instr.NumOperands(); i++) {
-          dom_hint_[instr.GetOperand(i)][block.id] = &instr;
+      if (instr.isHintType()) {
+        for (size_t i = 0; i < instr.numOperands(); i++) {
+          dom_hint_[instr.getOperand(i)][block.id] = &instr;
         }
-      } else if (instr.IsPhi()) {
+      } else if (instr.isPhi()) {
         dom_hint_[instr.output()][block.id] = &instr;
       }
     }
@@ -574,4 +389,4 @@ const Instr* RegisterTypeHints::dominatingTypeHint(
   return hint_types[block->id];
 }
 
-} // namespace jit::hir
+} // namespace cinderx::jit::hir

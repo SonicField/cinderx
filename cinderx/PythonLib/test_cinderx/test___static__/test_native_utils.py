@@ -4,18 +4,25 @@ from __future__ import annotations
 from __static__.native_utils import invoke_native
 
 import _ctypes
+import sys
 import unittest
 from typing import final
 
-from cinderx.static import (
-    _clear_dlopen_cache,
-    _clear_dlsym_cache,
-    _sizeof_dlopen_cache,
-    _sizeof_dlsym_cache,
-    lookup_native_symbol,
-)
+from cinderx.test_support import passUnless
+
+try:
+    from cinderx.static import (
+        _clear_dlopen_cache,
+        _clear_dlsym_cache,
+        _sizeof_dlopen_cache,
+        _sizeof_dlsym_cache,
+        lookup_native_symbol,
+    )
+except ImportError:
+    pass
 
 
+@passUnless(sys.platform == "linux", "Only supported on Linux currently")
 @final
 class TestNativeInvoke(unittest.TestCase):
     def test_native_invoke(self) -> None:
@@ -30,11 +37,8 @@ class TestNativeInvoke(unittest.TestCase):
         target = "libc.so.6"
         symbol = "labs"
 
-        # pyre-ignore[16]: unknown attribute
         handle = _ctypes.dlopen(target)
-        # pyre-ignore[16]: unknown attribute
         ctypes_result = _ctypes.dlsym(handle, symbol)
-        # pyre-ignore[16]: unknown attribute
         _ctypes.dlclose(handle)
 
         result = lookup_native_symbol(target, symbol)
@@ -72,18 +76,21 @@ class TestNativeInvoke(unittest.TestCase):
         with self.assertRaisesRegex(
             TypeError, "lookup_native_symbol: Expected 2 arguments"
         ):
+            # pyre-ignore[20]: Intentional type error, checking runtime behavior.
             lookup_native_symbol("lol")
 
     def test_native_lookup_bad_lib_name(self) -> None:
         with self.assertRaisesRegex(
             TypeError, "classloader: 'lib_name' must be a str, got 'int'"
         ):
+            # pyre-ignore[6]: Intentional type error, checking runtime behavior.
             lookup_native_symbol(1, "labs")
 
     def test_native_lookup_bad_symbol_name(self) -> None:
         with self.assertRaisesRegex(
             TypeError, "classloader: 'symbol_name' must be a str, got 'int'"
         ):
+            # pyre-ignore[6]: Intentional type error, checking runtime behavior.
             lookup_native_symbol("libc.so.6", 42)
 
     def test_native_lookup_nonexistent_lib_name(self) -> None:

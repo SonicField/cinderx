@@ -6,10 +6,13 @@ import unittest
 
 import cinderx
 import cinderx.jit
+from cinderx.test_support import has_cpython_test_package, passIf, passUnless
 
-# pyre-ignore[21]: Pyre doesn't know about cpython/Lib/test.
-import test.test_gc
-from cinderx.test_support import passIf, passUnless
+if has_cpython_test_package():
+    # pyre-ignore[21]: Pyre doesn't know about cpython/Lib/test.
+    import test.test_gc as test_gc_module
+else:
+    test_gc_module = None
 
 
 def _restore_parallel_gc(settings: dict[str, int] | None) -> None:
@@ -54,39 +57,38 @@ class ParallelGCAPITests(unittest.TestCase):
 # Run all the GC tests with parallel GC enabled
 
 
-@passUnless(cinderx.has_parallel_gc(), "Testing the Parallel GC")
-# pyre-ignore[11]: Pyre doesn't know about cpython/Lib/test.
-class ParallelGCTests(test.test_gc.GCTests):
-    @passIf(cinderx.jit.is_enabled(), "Implementation detail of the interpreter")
-    def test_frame(self) -> None:
+if test_gc_module is not None:
+
+    @passUnless(cinderx.has_parallel_gc(), "Testing the Parallel GC")
+    class ParallelGCTests(test_gc_module.GCTests):
+        @passIf(cinderx.jit.is_enabled(), "Implementation detail of the interpreter")
+        def test_frame(self) -> None:
+            pass
+
+        @passIf(cinderx.jit.is_enabled(), "Implementation detail of the interpreter")
+        def test_get_objects_arguments(self) -> None:
+            pass
+
+    if cinderx.has_parallel_gc():
+
+        class ParallelGCCallbackTests(test_gc_module.GCCallbackTests):
+            # Tests implementation details of serial collector
+            def test_refcount_errors(self) -> None:
+                # necessary for tearDown to succeed
+                # pyre-ignore[16]: ParallelGCCallbackTests` has no attribute `visit`
+                self.visit = None
+
+    @passUnless(cinderx.has_parallel_gc(), "Testing the Parallel GC")
+    class ParallelGCFinalizationTests(test_gc_module.PythonFinalizationTests):
         pass
-
-    @passIf(cinderx.jit.is_enabled(), "Implementation detail of the interpreter")
-    def test_get_objects_arguments(self) -> None:
-        pass
-
-
-if cinderx.has_parallel_gc():
-    # pyre-ignore[11]: Pyre doesn't know about cpython/Lib/test.
-    class ParallelGCCallbackTests(test.test_gc.GCCallbackTests):
-        # Tests implementation details of serial collector
-        def test_refcount_errors(self) -> None:
-            # necessary for tearDown to succeed
-            # pyre-ignore[16]: ParallelGCCallbackTests` has no attribute `visit`
-            self.visit = None
-
-
-@passUnless(cinderx.has_parallel_gc(), "Testing the Parallel GC")
-# pyre-ignore[11]: Pyre doesn't know about cpython/Lib/test.
-class ParallelGCFinalizationTests(test.test_gc.PythonFinalizationTests):
-    pass
 
 
 OLD_PAR_GC_SETTINGS: dict[str, int] | None = None
 
 
 def setUpModule() -> None:
-    test.test_gc.setUpModule()
+    if test_gc_module is not None:
+        test_gc_module.setUpModule()
 
     global OLD_PAR_GC_SETTINGS
     OLD_PAR_GC_SETTINGS = cinderx.get_parallel_gc_settings()
@@ -98,7 +100,8 @@ def setUpModule() -> None:
 
 
 def tearDownModule() -> None:
-    test.test_gc.tearDownModule()
+    if test_gc_module is not None:
+        test_gc_module.tearDownModule()
 
     _restore_parallel_gc(OLD_PAR_GC_SETTINGS)
 

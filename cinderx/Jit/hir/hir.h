@@ -6,7 +6,7 @@
 #include "cinderx/Jit/bytecode_offsets.h"
 #include "cinderx/Jit/code_patcher.h"
 #include "cinderx/Jit/hir/frame_state.h"
-#include "cinderx/Jit/hir/hir_ops.h"
+#include "cinderx/Jit/hir/ops.h"
 #include "cinderx/Jit/hir/register.h"
 #include "cinderx/Jit/hir/type.h"
 #include "cinderx/Jit/intrusive_list.h"
@@ -18,11 +18,14 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <tuple>
+#include <type_traits>
+#include <typeinfo>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
-namespace jit::hir {
+namespace cinderx::jit::hir {
 
 /*
  * This file defines the high-level intermediate representation (HIR) used by
@@ -66,8 +69,8 @@ class Edge {
   BasicBlock* from() const;
   BasicBlock* to() const;
 
-  void set_from(BasicBlock* from);
-  void set_to(BasicBlock* to);
+  void setFrom(BasicBlock* from);
+  void setTo(BasicBlock* to);
 
  private:
   BasicBlock* from_{nullptr};
@@ -80,6 +83,7 @@ class Edge {
 enum class Constraint {
   kType,
   kMatchAllAsCInt,
+  kMatchAllAsCIntOrCBool,
   kMatchAllAsPrimitive,
   kTupleExactOrCPtr,
   kListOrChkList,
@@ -98,12 +102,26 @@ struct OperandType {
 
 std::ostream& operator<<(std::ostream& os, OperandType kind);
 
-template <typename... Args>
-inline std::vector<OperandType> makeTypeVec(Args&&... args) {
-  return {args...};
+// Sentinel used in place of an operand-type list for instructions whose
+// operand types depend on instruction-specific state (e.g. Return's `type_`
+// member) and so must define their own `getOperandTypeImpl()`.
+struct DynamicOperandTypes {};
+constexpr DynamicOperandTypes kDynamicOperandTypes{};
+
+constexpr DynamicOperandTypes makeTypeArray(DynamicOperandTypes) {
+  return {};
 }
 
+template <typename... Args>
+inline auto makeTypeArray(Args&&... args) {
+  return std::array<OperandType, sizeof...(Args)>{
+      OperandType{std::forward<Args>(args)}...,
+  };
+}
+
+class LiveValuesBase;
 class DeoptBase;
+class CallSiteLiveValuesBase;
 
 // Base class that all concrete HIR instructions must derive from.
 //
@@ -125,13 +143,10 @@ class DeoptBase;
 // subclasses. Attempting to heap allocate instructions should result
 // in a compiler error, however, automatic allocation will still compile.
 // Don't do that.
-class Instr {
-  // Instructions are part of a doubly linked list in the basic block they
-  // belong to.
-  IntrusiveListNode block_node_;
-
+class Instr : public IntrusiveListNode<Instr> {
  public:
-  using List = IntrusiveList<Instr, &Instr::block_node_>;
+  using BaseNode = IntrusiveListNode<Instr>;
+  using List = IntrusiveList<Instr>;
 
   static constexpr bool has_output = false;
 
@@ -141,9 +156,9 @@ class Instr {
 
   // This defines a predicate per opcode that can be used to determine
   // if an instance of an instruction is a particular subclass
-  // (e.g. `instr->IsBranch()`)
+  // (e.g. `instr->isBranch()`)
 #define DEFINE_OP_PREDICATE(opname)       \
-  bool Is##opname() const {               \
+  bool is##opname() const {               \
     return opcode() == Opcode::k##opname; \
   }
   FOREACH_OPCODE(DEFINE_OP_PREDICATE)
@@ -157,19 +172,19 @@ class Instr {
   std::string_view opname() const;
 
   // Return the number of operands that the instruction takes
-  std::size_t NumOperands() const;
+  std::size_t numOperands() const;
 
   // Return the i-th operand
-  Register* GetOperand(std::size_t i) const;
+  Register* getOperand(std::size_t i) const;
 
   // Update the i-th operand
-  void SetOperand(std::size_t i, Register* reg);
+  void setOperand(std::size_t i, Register* reg);
 
   // Get all operands for this instruction.
-  std::span<Register* const> GetOperands() const;
+  std::span<Register* const> getOperands() const;
 
   // Return the i-th operand type
-  virtual OperandType GetOperandType(std::size_t /* i */) const = 0;
+  virtual OperandType getOperandType(std::size_t /* i */) const = 0;
 
   // Visit all Registers used by the instruction, whether they're normal
   // operands or other data. Iteration can be stopped early by returning false
@@ -182,10 +197,10 @@ class Instr {
 
   // Return whether or not the instruction uses the supplied register as an
   // input
-  bool Uses(Register* needle) const;
+  bool uses(Register* needle) const;
 
   // Replace uses of orig with replacement.
-  void ReplaceUsesOf(Register* orig, Register* replacement);
+  void replaceUsesOf(Register* orig, Register* replacement);
 
   // If this instruction produces a value, return where it will be stored
   Register* output() const;
@@ -194,7 +209,7 @@ class Instr {
   void setOutput(Register* dst);
 
   // Basic blocks must be terminated with control flow ops
-  bool IsTerminator() const;
+  bool isTerminator() const;
 
   // If this is a control instruction, return the number of outgoing edges
   std::size_t numEdges() const;
@@ -210,10 +225,10 @@ class Instr {
 
   // Get or set the i-th successor.
   BasicBlock* successor(std::size_t i) const;
-  void set_successor(std::size_t i, BasicBlock* to);
+  void setSuccessor(std::size_t i, BasicBlock* to);
 
-  void InsertBefore(Instr& instr);
-  void InsertAfter(Instr& instr);
+  void insertBefore(Instr& instr);
+  void insertAfter(Instr& instr);
 
   // Unlink this Instr from its block.
   void unlink();
@@ -221,8 +236,8 @@ class Instr {
   // Get the basic block that this instruction is part of.
   BasicBlock* block() const;
 
-  void ReplaceWith(Instr& instr);
-  void ExpandInto(const std::vector<Instr*>& expansion);
+  void replaceWith(Instr& instr);
+  void expandInto(const std::vector<Instr*>& expansion);
 
   // Returns the `FrameState` that dominates this instruction, if one exists
   // and there are no non-replayable instructions between it and the
@@ -239,9 +254,33 @@ class Instr {
   // Inherit the same bytecode offset as another instruction.
   void copyBytecodeOffset(const Instr& instr);
 
+  // Downcast this instruction to one of its subclasses, e.g.
+  // `instr.as<Branch>()`.  T can be a concrete instruction class or one of the
+  // abstract bases like `DeoptBase`.  Debug builds check that the cast is
+  // valid.
+  template <typename T>
+  T& as() {
+    JIT_DCHECK(
+        dynamic_cast<T*>(this) != nullptr,
+        "Cannot cast {} instruction to a {}",
+        opname(),
+        typeid(T).name());
+    return static_cast<T&>(*this);
+  }
+
+  template <typename T>
+  const T& as() const {
+    return const_cast<Instr&>(*this).as<T>();
+  }
+
   // Downcast the Instr to a DeoptBase, returning nullptr if it isn't one.
   virtual DeoptBase* asDeoptBase();
   virtual const DeoptBase* asDeoptBase() const;
+
+  // Downcast the Instr to a CallSiteLiveValuesBase, returning nullptr if it
+  // isn't one.
+  virtual CallSiteLiveValuesBase* asCallSiteLiveValuesBase();
+  virtual const CallSiteLiveValuesBase* asCallSiteLiveValuesBase() const;
 
  protected:
   // Allocate a block of memory suitable to house an `Instr`. This function is
@@ -253,6 +292,8 @@ class Instr {
   Instr(const Instr& other);
 
   Instr& operator=(const Instr&) = delete;
+  Instr(Instr&&) = delete;
+  Instr& operator=(Instr&&) = delete;
 
   void* operator new(std::size_t count, void* ptr);
 
@@ -273,7 +314,7 @@ class Instr {
   void link(BasicBlock* block);
 
   // Set this Instr's block, updating any edges as appropriate.
-  void set_block(BasicBlock* block);
+  void setBlock(BasicBlock* block);
 
  protected:
   Opcode opcode_;
@@ -284,22 +325,34 @@ class Instr {
 
 using InstrPredicate = std::function<bool(const Instr&)>;
 
-// Subclass of Instr that is able to deopt back to the interpreter.
-class DeoptBase : public Instr {
+// Subclass of Instr for instructions that carry logical live-value metadata.
+class LiveValuesBase : public Instr {
  public:
-  explicit DeoptBase(Opcode op);
-  DeoptBase(Opcode op, const FrameState& frame);
-  DeoptBase(const DeoptBase& other);
+  explicit LiveValuesBase(Opcode op);
+  LiveValuesBase(const LiveValuesBase& other);
 
   template <typename... Args>
   void emplaceLiveReg(Args&&... args) {
     live_regs_.emplace_back(std::forward<Args>(args)...);
   }
 
-  const std::vector<RegState>& live_regs() const;
-  std::vector<RegState>& live_regs();
+  const std::vector<RegState>& liveRegs() const;
+  std::vector<RegState>& liveRegs();
 
   void sortLiveRegs();
+
+  bool visitUses(const std::function<bool(Register*&)>& func) override;
+
+ private:
+  std::vector<RegState> live_regs_;
+};
+
+// Subclass of Instr that is able to deopt back to the interpreter.
+class DeoptBase : public LiveValuesBase {
+ public:
+  explicit DeoptBase(Opcode op);
+  DeoptBase(Opcode op, const FrameState& frame);
+  DeoptBase(const DeoptBase& other);
 
   // Set/get the metadata needed to reconstruct the state of the interpreter
   // after this instruction executes.
@@ -314,7 +367,7 @@ class DeoptBase : public Instr {
   const DeoptBase* asDeoptBase() const override;
 
   int nonce() const;
-  void set_nonce(int nonce);
+  void setNonce(int nonce);
 
   // Get or set the human-readable description of why this instruction might
   // deopt.
@@ -327,7 +380,6 @@ class DeoptBase : public Instr {
   void setGuiltyReg(Register* reg);
 
  private:
-  std::vector<RegState> live_regs_;
   std::unique_ptr<FrameState> frame_state_{nullptr};
   // If set and this instruction deopts at runtime, this value is made
   // conveniently available in the deopt machinery.
@@ -335,6 +387,18 @@ class DeoptBase : public Instr {
   int nonce_{-1};
   // A human-readable description of why this instruction might deopt.
   std::string descr_;
+};
+
+// Subclass of Instr for instructions that may lower to helper calls capable of
+// arbitrary Python execution. Carries logical live-value metadata so codegen
+// can record physical locations for GC-visible values at the callsite.
+class CallSiteLiveValuesBase : public LiveValuesBase {
+ public:
+  explicit CallSiteLiveValuesBase(Opcode op);
+  CallSiteLiveValuesBase(const CallSiteLiveValuesBase& other);
+
+  CallSiteLiveValuesBase* asCallSiteLiveValuesBase() override;
+  const CallSiteLiveValuesBase* asCallSiteLiveValuesBase() const override;
 };
 
 // This pile of template metaprogramming provides a convenient way to define
@@ -354,13 +418,13 @@ class InstrT;
 template <class T, Opcode opc, class Base, typename... Tys>
 class InstrT<T, opc, Base, Tys...> : public Base {
  public:
-  OperandType GetOperandType(std::size_t i) const override {
+  OperandType getOperandType(std::size_t i) const override {
     JIT_DCHECK(
-        i < this->NumOperands(),
+        i < this->numOperands(),
         "operand {} out of range (max is {})",
         i,
-        this->NumOperands() - 1);
-    return static_cast<const T*>(this)->GetOperandTypeImpl(i);
+        this->numOperands() - 1);
+    return static_cast<const T*>(this)->getOperandTypeImpl(i);
   }
 
   static_assert(
@@ -371,13 +435,13 @@ class InstrT<T, opc, Base, Tys...> : public Base {
       "base type must appear as last template parameter");
 
   InstrT(const InstrT& other) : Base(other) {
-    for (size_t i = 0; i < other.NumOperands(); i++) {
-      this->SetOperand(i, other.GetOperand(i));
+    for (size_t i = 0; i < other.numOperands(); i++) {
+      this->setOperand(i, other.getOperand(i));
     }
   }
 
   Instr* clone() const override {
-    auto ptr = Instr::allocate(sizeof(T), this->NumOperands());
+    auto ptr = Instr::allocate(sizeof(T), this->numOperands());
     return new (ptr) T(*static_cast<const T*>(this));
   }
 
@@ -447,7 +511,7 @@ class InstrT<T, opcode, Operands<arity>, Tys...>
   template <int a = arity>
     requires(a == 1)
   Register* reg() const {
-    return this->GetOperand(0);
+    return this->getOperand(0);
   }
 
   // Constructor for binary `T`.
@@ -496,25 +560,51 @@ class InstrT<T, opcode, HasOutput, Tys...> : public InstrT<T, opcode, Tys...> {
   }
 };
 
-// TASK(T105350013): Add a compile-time op_types size check
-#define INSTR_CLASS(name, types, ...)                                          \
-  name##                                                                       \
-  _OperandTypes{public : OperandType GetOperandTypeImpl(std::size_t i) const { \
-      static const std::vector<OperandType> op_types = makeTypeVec types;      \
-  std::size_t num_ops = op_types.size();                                       \
-  if (i >= num_ops) {                                                          \
-    return op_types[num_ops - 1];                                              \
-  } else {                                                                     \
-    return op_types[i];                                                        \
-  }                                                                            \
-  }                                                                            \
-  }                                                                            \
-  ;                                                                            \
-  class name final : public InstrT<name, Opcode::k##name, __VA_ARGS__>,        \
-                     public name##_OperandTypes
+template <typename... Ts>
+struct OperandArity : std::integral_constant<int, 0> {};
 
-#define DEFINE_SIMPLE_INSTR(name, types, ...)   \
-  class INSTR_CLASS(name, types, __VA_ARGS__) { \
+template <int N, typename... Ts>
+struct OperandArity<Operands<N>, Ts...> : std::integral_constant<int, N> {};
+
+template <typename T, typename... Ts>
+struct OperandArity<T, Ts...> : OperandArity<Ts...> {};
+
+template <auto GetOperandTypes, typename... Args>
+struct OperandTypes {
+  using Types = decltype(GetOperandTypes());
+  static constexpr int kArity = OperandArity<Args...>::value;
+  static constexpr bool kDynamic = std::is_same_v<Types, DynamicOperandTypes>;
+  static constexpr std::size_t kNumTypes = [] {
+    if constexpr (kDynamic) {
+      return std::size_t{0};
+    } else {
+      return std::tuple_size_v<Types>;
+    }
+  }();
+
+  static_assert(
+      kDynamic || (kArity == kVariadic ? kNumTypes >= 1 : kArity == kNumTypes),
+      "INSTR_CLASS operand type count does not match Operands<N>. TYPES "
+      "describes input operands, not outputs. Use kDynamicOperandTypes for "
+      "instruction-specific getOperandTypeImpl() logic.");
+
+  // If operand types are dynamic, the instruction class must define its own
+  // getOperandTypeImpl().
+  OperandType getOperandTypeImpl(std::size_t i) const
+    requires(!kDynamic)
+  {
+    static const auto op_types = GetOperandTypes();
+    return i < op_types.size() ? op_types[i] : op_types.back();
+  }
+};
+
+#define INSTR_CLASS(NAME, TYPES, ...)                      \
+  NAME final                                               \
+      : public InstrT<NAME, Opcode::k##NAME, __VA_ARGS__>, \
+        public OperandTypes<[] { return makeTypeArray TYPES; }, __VA_ARGS__>
+
+#define DEFINE_SIMPLE_INSTR(NAME, TYPES, ...)   \
+  class INSTR_CLASS(NAME, TYPES, __VA_ARGS__) { \
    private:                                     \
     friend InstrT;                              \
     using InstrT::InstrT;                       \
@@ -546,6 +636,10 @@ enum class BinaryOpKind {
 #undef DEFINE_OP
 };
 
+inline auto format_as(BinaryOpKind kind) {
+  return fmt::underlying(kind);
+}
+
 #define COUNT_OP(NAME) +1
 constexpr size_t kNumBinaryOpKinds = FOREACH_BINARY_OP_KIND(COUNT_OP);
 #undef COUNT_OP
@@ -574,11 +668,11 @@ class INSTR_CLASS(
   }
 
   Register* left() const {
-    return GetOperand(0);
+    return getOperand(0);
   }
 
   Register* right() const {
-    return GetOperand(1);
+    return getOperand(1);
   }
 
  private:
@@ -619,12 +713,17 @@ class INSTR_CLASS(UnaryOp, (TObject), HasOutput, Operands<1>, DeoptBase) {
   }
 
   Register* operand() const {
-    return GetOperand(0);
+    return getOperand(0);
   }
 
  private:
   UnaryOpKind op_;
 };
+
+// Logical negation of a boolean, producing Py_True or Py_False. This is the
+// deopt-free, typed counterpart to UnaryOp<Not>, analogous to how
+// PrimitiveBoxBool relates to PrimitiveBox.
+DEFINE_SIMPLE_INSTR(UnaryNot, (TBool), HasOutput, Operands<1>);
 
 #define FOREACH_INPLACE_OP_KIND(V) \
   V(Add)                           \
@@ -675,11 +774,11 @@ class INSTR_CLASS(
   }
 
   Register* left() const {
-    return GetOperand(0);
+    return getOperand(0);
   }
 
   Register* right() const {
-    return GetOperand(1);
+    return getOperand(1);
   }
 
  private:
@@ -692,15 +791,15 @@ class INSTR_CLASS(BuildSlice, (TObject), HasOutput, Operands<>, DeoptBase) {
   using InstrT::InstrT;
 
   Register* start() const {
-    return GetOperand(0);
+    return getOperand(0);
   }
 
   Register* stop() const {
-    return GetOperand(1);
+    return getOperand(1);
   }
 
   Register* step() const {
-    return NumOperands() == 2 ? nullptr : GetOperand(2);
+    return numOperands() == 2 ? nullptr : getOperand(2);
   }
 };
 
@@ -739,15 +838,15 @@ DEFINE_SIMPLE_INSTR(GetTuple, (TObject), HasOutput, Operands<1>, DeoptBase);
 class INSTR_CLASS(Branch, (), Operands<0>) {
  public:
   explicit Branch(BasicBlock* target) : InstrT() {
-    set_target(target);
+    setTarget(target);
   }
 
   BasicBlock* target() const {
     return edge_.to();
   }
 
-  void set_target(BasicBlock* target) {
-    edge_.set_to(target);
+  void setTarget(BasicBlock* target) {
+    edge_.setTo(target);
   }
 
   std::span<const Edge> edges() const override;
@@ -772,11 +871,11 @@ class INSTR_CLASS(SetFunctionAttr, (TObject, TFunc), Operands<2>) {
       : InstrT(value, base), field_(field) {}
 
   Register* value() const {
-    return GetOperand(0);
+    return getOperand(0);
   }
 
   Register* base() const {
-    return GetOperand(1);
+    return getOperand(1);
   }
 
   FunctionAttr field() const {
@@ -811,8 +910,7 @@ enum class CallFlags : uint32_t {
   None = 0,
 
   KwArgs = 1 << 0,
-  Awaited = 1 << 1,
-  Static = 1 << 2,
+  Static = 1 << 1,
 };
 
 constexpr uint32_t raw(CallFlags flags) {
@@ -844,15 +942,15 @@ class INSTR_CLASS(VectorCall, (TOptObject), HasOutput, Operands<>, DeoptBase) {
 
   // The function to call
   Register* func() const {
-    return GetOperand(0);
+    return getOperand(0);
   }
 
   std::size_t numArgs() const {
-    return NumOperands() - 1;
+    return numOperands() - 1;
   }
 
   Register* arg(std::size_t i) const {
-    return GetOperand(i + 1);
+    return getOperand(i + 1);
   }
 
   CallFlags flags() const {
@@ -894,15 +992,15 @@ class INSTR_CLASS(
 
   // The function to call
   Register* func() const {
-    return GetOperand(0);
+    return getOperand(0);
   }
 
   Register* pargs() const {
-    return GetOperand(1);
+    return getOperand(1);
   }
 
   Register* kwargs() const {
-    return GetOperand(2);
+    return getOperand(2);
   }
 
   CallFlags flags() const {
@@ -917,18 +1015,10 @@ class INSTR_CLASS(
 // set of functions so we can (one day) safely (de)serialize HIR fully.
 class INSTR_CLASS(CallCFunc, (TOptObject | TCUInt64), HasOutput, Operands<>) {
  public:
-#if PY_VERSION_HEX >= 0x030C0000
 #define CallCFunc_FUNCS(X)         \
   X(Cix_PyAsyncGenValueWrapperNew) \
   X(JitCoro_GetAwaitableIter)      \
   X(JitGen_yf)
-#else
-// List of allowed functions
-#define CallCFunc_FUNCS(X)         \
-  X(Cix_PyAsyncGenValueWrapperNew) \
-  X(Cix_PyCoro_GetAwaitableIter)   \
-  X(Cix_PyGen_yf)
-#endif
 
   enum class Func {
 #define ENUM_FUNC(name, ...) k##name,
@@ -940,7 +1030,7 @@ class INSTR_CLASS(CallCFunc, (TOptObject | TCUInt64), HasOutput, Operands<>) {
       : InstrT(dst), func_(func) {
     size_t i = 0;
     for (Register* arg : args) {
-      SetOperand(i++, arg);
+      setOperand(i++, arg);
     }
   }
 
@@ -980,13 +1070,13 @@ class INSTR_CLASS(CallInd, (TTop), HasOutput, Operands<>, DeoptBase) {
       : InstrT(dst), name_(name), ret_type_(ret_type) {
     std::array<Register*, sizeof...(Args)> operands{args...};
     JIT_CHECK(
-        operands.size() == NumOperands(),
+        operands.size() == numOperands(),
         "Expected {} arguments, got {}",
-        NumOperands(),
+        numOperands(),
         operands.size());
     size_t i = 0;
     for (Register* operand : operands) {
-      SetOperand(i++, operand);
+      setOperand(i++, operand);
     }
   }
 
@@ -995,19 +1085,19 @@ class INSTR_CLASS(CallInd, (TTop), HasOutput, Operands<>, DeoptBase) {
   }
 
   Register* func() const {
-    return GetOperand(0);
+    return getOperand(0);
   }
 
-  Type ret_type() const {
+  Type retType() const {
     return ret_type_;
   }
 
-  int arg_count() const {
-    return NumOperands() - 1;
+  int argCount() const {
+    return numOperands() - 1;
   }
 
   Register* arg(int arg) const {
-    return GetOperand(arg + 1);
+    return getOperand(arg + 1);
   }
 
  private:
@@ -1025,7 +1115,7 @@ class INSTR_CLASS(
       : InstrT(dst), index_(index) {
     size_t i = 0;
     for (Register* arg : args) {
-      SetOperand(i++, arg);
+      setOperand(i++, arg);
     }
   }
 
@@ -1042,12 +1132,11 @@ class INSTR_CLASS(Phi, (TTop), HasOutput, Operands<>) {
  public:
   explicit Phi(Register* dst) : InstrT(dst) {}
 
-  static Phi* create(
-      Register* dst,
-      const std::unordered_map<BasicBlock*, Register*>& args) {
+  template <typename PhiArgs>
+  static Phi* create(Register* dst, PhiArgs&& args) {
     void* ptr = Instr::allocate(sizeof(Phi), args.size());
     auto phi = new (ptr) Phi(dst);
-    phi->setArgs(args);
+    phi->setArgs(std::forward<PhiArgs>(args));
     return phi;
   }
 
@@ -1055,8 +1144,8 @@ class INSTR_CLASS(Phi, (TTop), HasOutput, Operands<>) {
   Register* isTrivial() const {
     Register* out = output();
     Register* val = nullptr;
-    for (std::size_t i = 0; i < NumOperands(); i++) {
-      Register* reg = GetOperand(i);
+    for (std::size_t i = 0; i < numOperands(); i++) {
+      Register* reg = getOperand(i);
       if (reg != out && reg != val) {
         if (val != nullptr) {
           return nullptr;
@@ -1070,13 +1159,22 @@ class INSTR_CLASS(Phi, (TTop), HasOutput, Operands<>) {
   // Return the index of the given predecessor in basic_blocks.
   std::size_t blockIndex(const BasicBlock* block) const;
 
-  const std::vector<BasicBlock*> basic_blocks() const {
+  // Replace a predecessor block with a new block in the phi, keeping the same
+  // associated value.
+  void replacePredecessor(BasicBlock* old_pred, BasicBlock* new_pred);
+
+  const std::vector<BasicBlock*> basicBlocks() const {
     return basic_blocks_;
   }
 
+ private:
+  // Set a phi's arguments through a block -> value map.
   void setArgs(const std::unordered_map<BasicBlock*, Register*>& args);
 
- private:
+  // Set a phi's arguments through a (block, value) list.  The list must already
+  // be sorted by the block's ID.
+  void setArgs(std::span<std::tuple<BasicBlock*, Register*>> args);
+
   // List of incoming blocks, sorted by ascending block ID.
   std::vector<BasicBlock*> basic_blocks_;
 };
@@ -1099,20 +1197,20 @@ class INSTR_CLASS(CallMethod, (TOptObject), HasOutput, Operands<>, DeoptBase) {
 
   // The function to call
   Register* func() const {
-    return GetOperand(0);
+    return getOperand(0);
   }
 
   // The register containing the receiver used to perform the method lookup
   Register* self() const {
-    return GetOperand(1);
+    return getOperand(1);
   }
 
-  std::size_t NumArgs() const {
-    return NumOperands() - 2;
+  std::size_t numArgs() const {
+    return numOperands() - 2;
   }
 
   Register* arg(std::size_t i) const {
-    return GetOperand(i + 2);
+    return getOperand(i + 2);
   }
 
   CallFlags flags() const {
@@ -1134,29 +1232,29 @@ class INSTR_CLASS(CallStatic, (TTop), HasOutput, Operands<>) {
       : InstrT(out), addr_(addr), ret_type_(ret_type) {
     std::array<Register*, sizeof...(Args)> operands{args...};
     JIT_CHECK(
-        operands.size() == NumOperands(),
+        operands.size() == numOperands(),
         "Expected {} arguments, got {}",
-        NumOperands(),
+        numOperands(),
         operands.size());
     size_t i = 0;
     for (Register* operand : operands) {
-      SetOperand(i++, operand);
+      setOperand(i++, operand);
     }
   }
 
-  std::size_t NumArgs() const {
-    return NumOperands();
+  std::size_t numArgs() const {
+    return numOperands();
   }
 
   Register* arg(std::size_t i) const {
-    return GetOperand(i);
+    return getOperand(i);
   }
 
   void* addr() const {
     return addr_;
   }
 
-  Type ret_type() const {
+  Type retType() const {
     return ret_type_;
   }
 
@@ -1170,12 +1268,12 @@ class INSTR_CLASS(CallStaticRetVoid, (TTop), Operands<>) {
  public:
   explicit CallStaticRetVoid(void* addr) : InstrT(), addr_(addr) {}
 
-  std::size_t NumArgs() const {
-    return NumOperands();
+  std::size_t numArgs() const {
+    return numOperands();
   }
 
   Register* arg(std::size_t i) const {
-    return GetOperand(i);
+    return getOperand(i);
   }
 
   void* addr() const {
@@ -1207,19 +1305,19 @@ class INSTR_CLASS(
   InvokeStaticFunction(Register* dst, PyFunctionObject* func, Type ret_type)
       : InstrT(dst), func_(func), ret_type_(ret_type) {}
 
-  std::size_t NumArgs() const {
-    return NumOperands();
+  std::size_t numArgs() const {
+    return numOperands();
   }
 
   Register* arg(std::size_t i) const {
-    return GetOperand(i);
+    return getOperand(i);
   }
 
   PyFunctionObject* func() const {
     return func_;
   }
 
-  Type ret_type() const {
+  Type retType() const {
     return ret_type_;
   }
 
@@ -1240,7 +1338,7 @@ class CheckBase : public DeoptBase {
 
  public:
   Register* reg() const {
-    return GetOperand(0);
+    return getOperand(0);
   }
 };
 
@@ -1388,20 +1486,20 @@ class INSTR_CLASS(StoreField, (TObject, TTop, TOptObject), Operands<3>) {
 
   // The object we're loading the attribute from
   Register* receiver() const {
-    return GetOperand(0);
+    return getOperand(0);
   }
 
-  void set_receiver(Register* receiver) {
-    SetOperand(0, receiver);
+  void setReceiver(Register* receiver) {
+    setOperand(0, receiver);
   }
 
   // The value being stored
   Register* value() const {
-    return GetOperand(1);
+    return getOperand(1);
   }
 
-  void set_value(Register* value) {
-    SetOperand(1, value);
+  void setValue(Register* value) {
+    setOperand(1, value);
   }
 
   std::string name() const {
@@ -1475,7 +1573,7 @@ class INSTR_CLASS(TpAlloc, (), HasOutput, Operands<0>, DeoptBase) {
 // Perform a binary operation (e.g. '+', '-') on primitive int operands
 class INSTR_CLASS(
     IntBinaryOp,
-    (Constraint::kMatchAllAsCInt, Constraint::kMatchAllAsCInt),
+    (Constraint::kMatchAllAsCIntOrCBool, Constraint::kMatchAllAsCIntOrCBool),
     HasOutput,
     Operands<2>) {
  public:
@@ -1487,11 +1585,11 @@ class INSTR_CLASS(
   }
 
   Register* left() const {
-    return GetOperand(0);
+    return getOperand(0);
   }
 
   Register* right() const {
-    return GetOperand(1);
+    return getOperand(1);
   }
 
  private:
@@ -1517,11 +1615,11 @@ class INSTR_CLASS(
   }
 
   Register* left() const {
-    return GetOperand(0);
+    return getOperand(0);
   }
 
   Register* right() const {
-    return GetOperand(1);
+    return getOperand(1);
   }
 
  private:
@@ -1645,7 +1743,7 @@ class INSTR_CLASS(PrimitiveUnaryOp, (TPrimitive), HasOutput, Operands<1>) {
   }
 
   Register* value() const {
-    return GetOperand(0);
+    return getOperand(0);
   }
 
  private:
@@ -1704,37 +1802,11 @@ class INSTR_CLASS(
   }
 
   Register* left() const {
-    return GetOperand(0);
+    return getOperand(0);
   }
 
   Register* right() const {
-    return GetOperand(1);
-  }
-
- private:
-  CompareOp op_;
-};
-
-// Perform the comparison indicated by op between two floats
-class INSTR_CLASS(
-    FloatCompare,
-    (TFloatExact, TFloatExact),
-    HasOutput,
-    Operands<2>) {
- public:
-  FloatCompare(Register* dst, CompareOp op, Register* left, Register* right)
-      : InstrT(dst, left, right), op_(op) {}
-
-  CompareOp op() const {
-    return op_;
-  }
-
-  Register* left() const {
-    return GetOperand(0);
-  }
-
-  Register* right() const {
-    return GetOperand(1);
+    return getOperand(1);
   }
 
  private:
@@ -1756,15 +1828,34 @@ class INSTR_CLASS(
   }
 
   Register* left() const {
-    return GetOperand(0);
+    return getOperand(0);
   }
 
   Register* right() const {
-    return GetOperand(1);
+    return getOperand(1);
   }
 
  private:
   CompareOp op_;
+};
+
+// Check two strings for equality.
+class INSTR_CLASS(
+    UnicodeEqual,
+    (TUnicodeExact, TUnicodeExact),
+    HasOutput,
+    Operands<2>) {
+ public:
+  UnicodeEqual(Register* dst, Register* left, Register* right)
+      : InstrT{dst, left, right} {}
+
+  Register* left() const {
+    return getOperand(0);
+  }
+
+  Register* right() const {
+    return getOperand(1);
+  }
 };
 
 // Perform the comparison indicated by op between two strings
@@ -1782,11 +1873,11 @@ class INSTR_CLASS(
   }
 
   Register* left() const {
-    return GetOperand(0);
+    return getOperand(0);
   }
 
   Register* right() const {
-    return GetOperand(1);
+    return getOperand(1);
   }
 
  private:
@@ -1874,11 +1965,11 @@ class INSTR_CLASS(
   }
 
   Register* left() const {
-    return GetOperand(0);
+    return getOperand(0);
   }
 
   Register* right() const {
-    return GetOperand(1);
+    return getOperand(1);
   }
 
  private:
@@ -1931,11 +2022,11 @@ class INSTR_CLASS(
   }
 
   Register* left() const {
-    return GetOperand(0);
+    return getOperand(0);
   }
 
   Register* right() const {
-    return GetOperand(1);
+    return getOperand(1);
   }
 
  private:
@@ -1990,11 +2081,11 @@ class INSTR_CLASS(
   }
 
   Register* left() const {
-    return GetOperand(0);
+    return getOperand(0);
   }
 
   Register* right() const {
-    return GetOperand(1);
+    return getOperand(1);
   }
 
   static std::optional<binaryfunc> slotMethod(BinaryOpKind op) {
@@ -2031,24 +2122,24 @@ class INSTR_CLASS(
   }
 
   Register* left() const {
-    return GetOperand(0);
+    return getOperand(0);
   }
 
   Register* right() const {
-    return GetOperand(1);
+    return getOperand(1);
   }
 
  private:
   CompareOp op_;
 };
 
-class INSTR_CLASS(IntConvert, (TPrimitive), HasOutput, Operands<1>) {
+class INSTR_CLASS(PrimitiveConvert, (TPrimitive), HasOutput, Operands<1>) {
  public:
-  IntConvert(Register* dst, Register* src, Type type)
+  PrimitiveConvert(Register* dst, Register* src, Type type)
       : InstrT(dst, src), type_(type) {}
 
   Register* src() const {
-    return GetOperand(0);
+    return getOperand(0);
   }
 
   Type type() const {
@@ -2088,7 +2179,11 @@ PrimitiveCompareOp ParsePrimitiveCompareOpName(std::string_view name);
 // Convert a CompareOp into an equivalent PrimitiveCompareOp, if it exists.
 std::optional<PrimitiveCompareOp> toPrimitiveCompareOp(CompareOp op);
 
-class INSTR_CLASS(PrimitiveCompare, (), HasOutput, Operands<2>) {
+class INSTR_CLASS(
+    PrimitiveCompare,
+    (kDynamicOperandTypes),
+    HasOutput,
+    Operands<2>) {
  public:
   PrimitiveCompare(
       Register* dst,
@@ -2102,14 +2197,14 @@ class INSTR_CLASS(PrimitiveCompare, (), HasOutput, Operands<2>) {
   }
 
   Register* left() const {
-    return GetOperand(0);
+    return getOperand(0);
   }
 
   Register* right() const {
-    return GetOperand(1);
+    return getOperand(1);
   }
 
-  OperandType GetOperandTypeImpl(std::size_t /* i */) const {
+  OperandType getOperandTypeImpl(std::size_t /* i */) const {
     // `is` gets treated as a PrimtiveCompare and can hold anything
     if (op_ == PrimitiveCompareOp::kEqual ||
         op_ == PrimitiveCompareOp::kNotEqual) {
@@ -2127,7 +2222,7 @@ DEFINE_SIMPLE_INSTR(PrimitiveBoxBool, (TCBool), HasOutput, Operands<1>);
 
 class INSTR_CLASS(
     PrimitiveBox,
-    (TPrimitive),
+    (kDynamicOperandTypes),
     HasOutput,
     Operands<1>,
     DeoptBase) {
@@ -2144,14 +2239,14 @@ class INSTR_CLASS(
   }
 
   Register* value() const {
-    return GetOperand(0);
+    return getOperand(0);
   }
 
   Type type() const {
     return type_;
   }
 
-  OperandType GetOperandTypeImpl(std::size_t /* i */) const {
+  OperandType getOperandTypeImpl(std::size_t /* i */) const {
     return type_;
   }
 
@@ -2159,20 +2254,24 @@ class INSTR_CLASS(
   Type type_;
 };
 
-class INSTR_CLASS(PrimitiveUnbox, (), HasOutput, Operands<1>) {
+class INSTR_CLASS(
+    PrimitiveUnbox,
+    (kDynamicOperandTypes),
+    HasOutput,
+    Operands<1>) {
  public:
   PrimitiveUnbox(Register* dst, Register* value, Type type)
       : InstrT(dst, value), type_(type) {}
 
   Register* value() const {
-    return GetOperand(0);
+    return getOperand(0);
   }
 
   Type type() const {
     return type_;
   }
 
-  OperandType GetOperandTypeImpl(std::size_t /* i */) const {
+  OperandType getOperandTypeImpl(std::size_t /* i */) const {
     return type_.asBoxed();
   }
 
@@ -2199,24 +2298,24 @@ class CondBranchBase : public Instr {
  public:
   CondBranchBase(Opcode opcode, BasicBlock* true_bb, BasicBlock* false_bb)
       : Instr(opcode) {
-    set_true_bb(true_bb);
-    set_false_bb(false_bb);
+    setTrueBb(true_bb);
+    setFalseBb(false_bb);
   }
 
   BasicBlock* true_bb() const {
     return true_edge_.to();
   }
 
-  void set_true_bb(BasicBlock* block) {
-    true_edge_.set_to(block);
+  void setTrueBb(BasicBlock* block) {
+    true_edge_.setTo(block);
   }
 
   BasicBlock* false_bb() const {
     return false_edge_.to();
   }
 
-  void set_false_bb(BasicBlock* block) {
-    false_edge_.set_to(block);
+  void setFalseBb(BasicBlock* block) {
+    false_edge_.setTo(block);
   }
 
   std::span<const Edge> edges() const override;
@@ -2261,10 +2360,10 @@ class INSTR_CLASS(CondBranchCheckType, (TObject), Operands<1>, CondBranchBase) {
 };
 
 // Decrement the reference count of `reg`
-DEFINE_SIMPLE_INSTR(Decref, (TObject), Operands<1>);
+DEFINE_SIMPLE_INSTR(Decref, (TObject), Operands<1>, CallSiteLiveValuesBase);
 
 // Decrement the reference count of `reg`, if `reg` is not NULL
-DEFINE_SIMPLE_INSTR(XDecref, (TOptObject), Operands<1>);
+DEFINE_SIMPLE_INSTR(XDecref, (TOptObject), Operands<1>, CallSiteLiveValuesBase);
 
 // Increment the reference count of `reg`
 DEFINE_SIMPLE_INSTR(Incref, (TObject), Operands<1>);
@@ -2272,8 +2371,15 @@ DEFINE_SIMPLE_INSTR(Incref, (TObject), Operands<1>);
 // Increment the refrence count of `reg`, if `reg` is not NULL
 DEFINE_SIMPLE_INSTR(XIncref, (TOptObject), Operands<1>);
 
+// Convert a potentially-tagged deferred-RC reference into a materialized one.
+DEFINE_SIMPLE_INSTR(MaterializeRef, (TOptObject), HasOutput, Operands<1>);
+
 // batch decrement references
-DEFINE_SIMPLE_INSTR(BatchDecref, (TObject), Operands<>);
+DEFINE_SIMPLE_INSTR(
+    BatchDecref,
+    (TOptObject),
+    Operands<>,
+    CallSiteLiveValuesBase);
 
 class DeoptBaseWithNameIdx : public DeoptBase {
  public:
@@ -2284,13 +2390,13 @@ class DeoptBaseWithNameIdx : public DeoptBase {
       : DeoptBase(op, frame), name_idx_(name_idx) {}
 
   // Index of the attribute name in the code object's co_names tuple.
-  int name_idx() const {
+  int nameIdx() const {
     return name_idx_;
   }
 
   // The name object, retrieved from the code object's co_names tuple.
   BorrowedRef<PyUnicodeObject> name() const {
-    return PyTuple_GET_ITEM(frameState()->code->co_names, name_idx());
+    return PyTuple_GET_ITEM(frameState()->code->co_names, nameIdx());
   }
 
  private:
@@ -2324,24 +2430,9 @@ class INSTR_CLASS(
   bool already_optimized_;
 };
 
-// Variant of LoadAttr that uses an inline cache.
-DEFINE_SIMPLE_INSTR(
-    LoadAttrCached,
-    (TObject),
-    HasOutput,
-    Operands<1>,
-    DeoptBaseWithNameIdx);
-
 // Set the attribute of an object.
 DEFINE_SIMPLE_INSTR(
     StoreAttr,
-    (TObject, TObject),
-    Operands<2>,
-    DeoptBaseWithNameIdx);
-
-// Variant of StoreAttr that uses an inline cache.
-DEFINE_SIMPLE_INSTR(
-    StoreAttrCached,
     (TObject, TObject),
     Operands<2>,
     DeoptBaseWithNameIdx);
@@ -2358,11 +2449,8 @@ class INSTR_CLASS(
     HasOutput,
     Operands<1>,
     DeoptBase) {
-#if PY_VERSION_HEX >= 0x030C0000
   using IDType = PyObject;
-#else
-  using IDType = _Py_Identifier;
-#endif
+
  public:
   LoadAttrSpecial(
       Register* dst,
@@ -2408,7 +2496,7 @@ class INSTR_CLASS(LoadTypeAttrCacheEntryType, (), HasOutput, Operands<0>) {
   LoadTypeAttrCacheEntryType(Register* dst, int cache_id)
       : InstrT{dst}, cache_id_{cache_id} {}
 
-  int cache_id() const {
+  int cacheId() const {
     return cache_id_;
   }
 
@@ -2423,7 +2511,7 @@ class INSTR_CLASS(LoadTypeAttrCacheEntryValue, (), HasOutput, Operands<0>) {
   LoadTypeAttrCacheEntryValue(Register* dst, int cache_id)
       : InstrT{dst}, cache_id_{cache_id} {}
 
-  int cache_id() const {
+  int cacheId() const {
     return cache_id_;
   }
 
@@ -2462,7 +2550,7 @@ class INSTR_CLASS(
     return reg();
   }
 
-  int cache_id() const {
+  int cacheId() const {
     return cache_id_;
   }
 
@@ -2478,7 +2566,7 @@ class LoadMethodBase : public DeoptBaseWithNameIdx {
  public:
   // The object we're loading the attribute from
   Register* receiver() const {
-    return GetOperand(0);
+    return getOperand(0);
   }
 };
 
@@ -2486,14 +2574,6 @@ class LoadMethodBase : public DeoptBaseWithNameIdx {
 // used for a method call.
 DEFINE_SIMPLE_INSTR(
     LoadMethod,
-    (TObject),
-    HasOutput,
-    Operands<1>,
-    LoadMethodBase);
-
-// Variant of LoadMethod that uses an inline cache.
-DEFINE_SIMPLE_INSTR(
-    LoadMethodCached,
     (TObject),
     HasOutput,
     Operands<1>,
@@ -2538,22 +2618,22 @@ class LoadSuperBase : public DeoptBaseWithNameIdx {
 
  public:
   // Global 'super' value
-  Register* global_super() const {
-    return GetOperand(0);
+  Register* globalSuper() const {
+    return getOperand(0);
   }
 
   // See comment for 'receiver'
   Register* type() const {
-    return GetOperand(1);
+    return getOperand(1);
   }
 
   // The object that determines mro to be searched.
   // Search will be started from the class right after the 'type'
   Register* receiver() const {
-    return GetOperand(2);
+    return getOperand(2);
   }
 
-  bool no_args_in_super_call() const {
+  bool noArgsInSuperCall() const {
     return no_args_in_super_call_;
   }
 
@@ -2605,7 +2685,7 @@ class INSTR_CLASS(
     return reg();
   }
 
-  int cache_id() const {
+  int cacheId() const {
     return cache_id_;
   }
 
@@ -2620,7 +2700,7 @@ class INSTR_CLASS(LoadTypeMethodCacheEntryType, (), HasOutput, Operands<0>) {
   LoadTypeMethodCacheEntryType(Register* dst, int cache_id)
       : InstrT(dst), cache_id_(cache_id) {}
 
-  int cache_id() const {
+  int cacheId() const {
     return cache_id_;
   }
 
@@ -2639,7 +2719,7 @@ class INSTR_CLASS(
   LoadTypeMethodCacheEntryValue(Register* dst, int cache_id, Register* receiver)
       : InstrT(dst, receiver), cache_id_(cache_id) {}
 
-  int cache_id() const {
+  int cacheId() const {
     return cache_id_;
   }
 
@@ -2658,6 +2738,18 @@ DEFINE_SIMPLE_INSTR(LoadCurrentFunc, (), HasOutput, Operands<0>);
 // Load the current interpreter frame pointer from thread state. Must appear
 // in the prologue section alongside LoadArg/LoadCurrentFunc.
 DEFINE_SIMPLE_INSTR(LoadFrame, (), Operands<0>);
+
+// Mark a generator's frame as finished.  Emitted for generators only,
+// immediately before each Return.
+//
+// CPython releases a generator's locals from gen_clear_frame(), after
+// gi_frame_state has been set, so a __del__ running during teardown always
+// observes a closed generator.  The JIT drops each local at its last use,
+// which for an unused local is the top of the body, so without this the
+// destructor would see the generator as still executing.  UseObj markers
+// emitted after this hold the locals live until here, putting their Decrefs
+// after the store.
+DEFINE_SIMPLE_INSTR(EndGeneratorFrame, (), Operands<0>);
 
 // Load the value from the cell in operand
 DEFINE_SIMPLE_INSTR(LoadCellItem, (TOptObject), HasOutput, Operands<1>);
@@ -2693,10 +2785,10 @@ class INSTR_CLASS(InitFrameCellVars, (TObject), Operands<1>) {
   InitFrameCellVars(Register* func, int cells) : InstrT(func), cells_(cells) {}
 
   Register* func() const {
-    return GetOperand(0);
+    return getOperand(0);
   }
 
-  int num_cell_vars() const {
+  int numCellVars() const {
     return cells_;
   }
 
@@ -2752,12 +2844,14 @@ class INSTR_CLASS(LoadGlobalCached, (), HasOutput, Operands<0>) {
       BorrowedRef<PyCodeObject> code,
       BorrowedRef<PyDictObject> builtins,
       BorrowedRef<PyDictObject> globals,
-      int name_idx)
+      int name_idx,
+      PyObject** cache)
       : InstrT(dst),
         code_(code),
         builtins_(builtins),
         globals_(globals),
-        name_idx_(name_idx) {}
+        name_idx_(name_idx),
+        cache_(cache) {}
 
   BorrowedRef<PyCodeObject> code() const {
     return code_;
@@ -2771,7 +2865,11 @@ class INSTR_CLASS(LoadGlobalCached, (), HasOutput, Operands<0>) {
     return globals_;
   }
 
-  int name_idx() const {
+  PyObject** cache() const {
+    return cache_;
+  }
+
+  int nameIdx() const {
     return name_idx_;
   }
 
@@ -2780,6 +2878,7 @@ class INSTR_CLASS(LoadGlobalCached, (), HasOutput, Operands<0>) {
   BorrowedRef<PyDictObject> builtins_;
   BorrowedRef<PyDictObject> globals_;
   int name_idx_;
+  PyObject** cache_;
 };
 
 DEFINE_SIMPLE_INSTR(
@@ -2805,7 +2904,7 @@ class INSTR_CLASS(RefineType, (TTop), HasOutput, Operands<1>) {
 };
 
 //  Return from the function
-class INSTR_CLASS(Return, (), Operands<1>) {
+class INSTR_CLASS(Return, (kDynamicOperandTypes), Operands<1>) {
  public:
   explicit Return(Register* val) : InstrT(val), type_(TObject) {}
   Return(Register* val, Type type) : InstrT(val), type_(type) {}
@@ -2814,7 +2913,7 @@ class INSTR_CLASS(Return, (), Operands<1>) {
     return type_;
   }
 
-  OperandType GetOperandTypeImpl(std::size_t /* i */) const {
+  OperandType getOperandTypeImpl(std::size_t /* i */) const {
     return type_;
   }
 
@@ -2828,7 +2927,7 @@ class INSTR_CLASS(Return, (), Operands<1>) {
 //
 // Ensures that we don't accidentally remove a type check (such as in GuardType)
 // despite a register not having any explicit users
-class INSTR_CLASS(UseType, (), Operands<1>) {
+class INSTR_CLASS(UseType, (kDynamicOperandTypes), Operands<1>) {
  public:
   UseType(Register* val, Type type) : InstrT(val), type_(type) {}
 
@@ -2836,7 +2935,7 @@ class INSTR_CLASS(UseType, (), Operands<1>) {
     return type_;
   }
 
-  OperandType GetOperandTypeImpl(std::size_t /* i */) const {
+  OperandType getOperandTypeImpl(std::size_t /* i */) const {
     return type_;
   }
 
@@ -2844,8 +2943,15 @@ class INSTR_CLASS(UseType, (), Operands<1>) {
   Type type_;
 };
 
+// Keep an object alive; use this to prevent the refcount insertion pass from
+// inserting a decref prematurely (e.g in between a load/store from an array).
+DEFINE_SIMPLE_INSTR(UseObj, (TTop), Operands<1>);
+
 // Assign one register to another
 DEFINE_SIMPLE_INSTR(Assign, (TTop), HasOutput, Operands<1>);
+
+// Return the same object with the deferred-RC tag applied when needed.
+DEFINE_SIMPLE_INSTR(TagIfDeferred, (TObject), HasOutput, Operands<1>);
 
 // Assign one register to another with a new type (unchecked!)
 class INSTR_CLASS(BitCast, (TTop), HasOutput, Operands<1>) {
@@ -2872,7 +2978,7 @@ class INSTR_CLASS(LoadArg, (), HasOutput, Operands<0>) {
   LoadArg(Register* dst, uint32_t arg_idx, Type type)
       : InstrT(dst), arg_idx_(arg_idx), type_(type) {}
 
-  uint32_t arg_idx() const {
+  uint32_t argIdx() const {
     return arg_idx_;
   }
 
@@ -2885,55 +2991,61 @@ class INSTR_CLASS(LoadArg, (), HasOutput, Operands<0>) {
   Type type_;
 };
 
-// Allocate and fill a list object with the given operands
-class INSTR_CLASS(MakeList, (TObject), HasOutput, Operands<>, DeoptBase) {
+// Allocate an empty list object
+class INSTR_CLASS(MakeList, (), HasOutput, Operands<0>, DeoptBase) {
  public:
-  MakeList(Register* dst, const FrameState& frame) : InstrT(dst, frame) {}
+  MakeList(Register* dst, size_t nvalues, const FrameState& frame)
+      : InstrT(dst, frame), nvalues_(nvalues) {}
 
-  MakeList(
-      Register* dst,
-      const std::vector<Register*>& args,
-      const FrameState& frame)
-      : InstrT(dst, frame) {
-    JIT_CHECK(
-        NumOperands() == args.size(),
-        "Cannot add {} args to instr with {} operands",
-        args.size(),
-        NumOperands());
-    size_t i = 0;
-    for (Register* arg : args) {
-      SetOperand(i++, arg);
-    }
+  size_t nvalues() const {
+    return nvalues_;
+  }
+
+ private:
+  size_t nvalues_;
+};
+
+// Allocate an empty tuple object
+class INSTR_CLASS(MakeTuple, (), HasOutput, Operands<0>, DeoptBase) {
+ public:
+  MakeTuple(Register* dst, size_t nvalues, const FrameState& frame)
+      : InstrT(dst, frame), nvalues_(nvalues) {}
+
+  size_t nvalues() const {
+    return nvalues_;
+  }
+
+ private:
+  size_t nvalues_;
+};
+
+// Fill an already-allocated list's ob_item array.
+// Operand 0 is the list; operands 1..N are the values to store.
+class INSTR_CLASS(InitListElements, (TObject), Operands<>) {
+ public:
+  InitListElements() : InstrT() {}
+
+  Register* list() const {
+    return getOperand(0);
   }
 
   size_t nvalues() const {
-    return NumOperands();
+    return numOperands() - 1;
   }
 };
 
-// Allocate and fill a tuple object with the given operands
-class INSTR_CLASS(MakeTuple, (TObject), HasOutput, Operands<>, DeoptBase) {
+// Fill an already-allocated tuple's ob_item array.
+// Operand 0 is the tuple; operands 1..N are the values to store.
+class INSTR_CLASS(InitTupleElements, (TObject), Operands<>) {
  public:
-  MakeTuple(Register* dst, const FrameState& frame) : InstrT(dst, frame) {}
+  InitTupleElements() : InstrT() {}
 
-  MakeTuple(
-      Register* dst,
-      const std::vector<Register*>& args,
-      const FrameState& frame)
-      : InstrT(dst, frame) {
-    JIT_CHECK(
-        NumOperands() == args.size(),
-        "Cannot add {} args to instr with {} operands",
-        args.size(),
-        NumOperands());
-    size_t i = 0;
-    for (Register* arg : args) {
-      SetOperand(i++, arg);
-    }
+  Register* tuple() const {
+    return getOperand(0);
   }
 
   size_t nvalues() const {
-    return NumOperands();
+    return numOperands() - 1;
   }
 };
 
@@ -2952,7 +3064,7 @@ class INSTR_CLASS(LoadTupleItem, (TTuple), HasOutput, Operands<1>) {
       : InstrT(dst, tuple), idx_(idx) {}
 
   Register* tuple() const {
-    return GetOperand(0);
+    return getOperand(0);
   }
 
   size_t idx() const {
@@ -2980,23 +3092,27 @@ class INSTR_CLASS(
       // insertion pass handles this for us if the container is an input for
       // this instruction.
       Register* array_unused,
-      ssize_t offset,
-      Type type)
-      : InstrT(dst, ob_item, idx, array_unused), offset_(offset), type_(type) {}
+      intptr_t offset,
+      Type type,
+      bool borrowed = true)
+      : InstrT(dst, ob_item, idx, array_unused),
+        offset_(offset),
+        type_(type),
+        borrowed_(borrowed) {}
 
   Register* ob_item() const {
-    return GetOperand(0);
+    return getOperand(0);
   }
 
   Register* idx() const {
-    return GetOperand(1);
+    return getOperand(1);
   }
 
   Register* seq() const {
-    return GetOperand(2);
+    return getOperand(2);
   }
 
-  ssize_t offset() const {
+  intptr_t offset() const {
     return offset_;
   }
 
@@ -3004,9 +3120,14 @@ class INSTR_CLASS(
     return type_;
   }
 
+  bool borrowed() const {
+    return borrowed_;
+  }
+
  private:
-  ssize_t offset_;
+  intptr_t offset_;
   Type type_;
+  bool borrowed_;
 };
 
 // Load an item from dict->ma_values[item_idx]. Users must ensure that the
@@ -3035,11 +3156,11 @@ class INSTR_CLASS(
       : InstrT(dst, object, offset) {}
 
   Register* object() const {
-    return GetOperand(0);
+    return getOperand(0);
   }
 
   Register* offset() const {
-    return GetOperand(1);
+    return getOperand(1);
   }
 };
 
@@ -3059,15 +3180,15 @@ class INSTR_CLASS(StoreArrayItem, (TCPtr, TCInt, TTop, TObject), Operands<4>) {
       : InstrT(ob_item, idx, value, container_unused), type_(type) {}
 
   Register* ob_item() const {
-    return GetOperand(0);
+    return getOperand(0);
   }
 
   Register* idx() const {
-    return GetOperand(1);
+    return getOperand(1);
   }
 
   Register* value() const {
-    return GetOperand(2);
+    return getOperand(2);
   }
 
   Type type() const {
@@ -3101,7 +3222,7 @@ class INSTR_CLASS(MakeDict, (), HasOutput, Operands<0>, DeoptBase) {
   MakeDict(Register* dst, size_t capacity, const FrameState& frame)
       : InstrT(dst, frame), capacity_(capacity) {}
 
-  size_t GetCapacity() const {
+  size_t getCapacity() const {
     return capacity_;
   }
 
@@ -3120,7 +3241,7 @@ class INSTR_CLASS(MakeCheckedDict, (), HasOutput, Operands<0>, DeoptBase) {
       const FrameState& frame)
       : InstrT(dst, frame), capacity_(capacity), type_(dict_type) {}
 
-  size_t GetCapacity() const {
+  size_t getCapacity() const {
     return capacity_;
   }
 
@@ -3134,18 +3255,17 @@ class INSTR_CLASS(MakeCheckedDict, (), HasOutput, Operands<0>, DeoptBase) {
 };
 
 // Allocate and fill a CheckedList object with the given operands
-class INSTR_CLASS(
-    MakeCheckedList,
-    (TObject),
-    HasOutput,
-    Operands<>,
-    DeoptBase) {
+class INSTR_CLASS(MakeCheckedList, (), HasOutput, Operands<0>, DeoptBase) {
  public:
-  MakeCheckedList(Register* dst, Type list_type, const FrameState& frame)
-      : InstrT(dst, frame), type_(list_type) {}
+  MakeCheckedList(
+      Register* dst,
+      size_t nvalues,
+      Type list_type,
+      const FrameState& frame)
+      : InstrT(dst, frame), nvalues_(nvalues), type_(list_type) {}
 
   size_t nvalues() const {
-    return NumOperands();
+    return nvalues_;
   }
 
   Type type() const {
@@ -3153,6 +3273,7 @@ class INSTR_CLASS(
   }
 
  private:
+  size_t nvalues_;
   Type type_;
 };
 
@@ -3249,6 +3370,23 @@ class INSTR_CLASS(
       : InstrT(dst, left, right, frame) {}
 };
 
+// FT-only specialized list subscript. This is the free-threaded counterpart
+// to the GIL-build `LoadArrayItem` fast path, but returns an owned reference.
+class INSTR_CLASS(
+    ListSubscr,
+    (TListExact, TLongExact),
+    HasOutput,
+    Operands<2>,
+    DeoptBase) {
+ public:
+  ListSubscr(
+      Register* dst,
+      Register* left,
+      Register* right,
+      const FrameState& frame)
+      : InstrT(dst, left, right, frame) {}
+};
+
 // Return a new iterator for the object, or return it if it's an iterator
 class INSTR_CLASS(GetIter, (TObject), HasOutput, Operands<1>, DeoptBase) {
  public:
@@ -3256,7 +3394,7 @@ class INSTR_CLASS(GetIter, (TObject), HasOutput, Operands<1>, DeoptBase) {
       : InstrT(dst, iterable, frame) {}
 
   Register* iterable() const {
-    return GetOperand(0);
+    return getOperand(0);
   }
 };
 
@@ -3284,7 +3422,7 @@ class INSTR_CLASS(
       : InstrT(dst, iter, frame) {}
 
   Register* iterator() const {
-    return GetOperand(0);
+    return getOperand(0);
   }
 };
 
@@ -3424,7 +3562,7 @@ class INSTR_CLASS(HintType, (TObject), Operands<>) {
       : InstrT(), types_(op_types) {
     size_t i = 0;
     for (Register* arg : args) {
-      SetOperand(i++, arg);
+      setOperand(i++, arg);
     }
   }
 
@@ -3435,6 +3573,17 @@ class INSTR_CLASS(HintType, (TObject), Operands<>) {
  private:
   ProfiledTypes types_;
 };
+
+// Check if a LongExact is compact (has at most one 30-bit digit).
+DEFINE_SIMPLE_INSTR(
+    IsCompactLong,
+    (TLongExact | TCInt64),
+    HasOutput,
+    Operands<1>);
+
+// Unbox a compact LongExact to CInt64. The caller must have already verified
+// compactness (e.g. via IsCompactLong).
+DEFINE_SIMPLE_INSTR(CompactLongUnbox, (TLongExact), HasOutput, Operands<1>);
 
 // Output 1, 0, if `value` is truthy or not truthy.
 DEFINE_SIMPLE_INSTR(IsTruthy, (TObject), HasOutput, Operands<1>, DeoptBase);
@@ -3461,7 +3610,7 @@ class INSTR_CLASS(
       : InstrT(dst, module, name_idx, frame) {}
 
   Register* module() const {
-    return GetOperand(0);
+    return getOperand(0);
   }
 };
 
@@ -3480,12 +3629,12 @@ class INSTR_CLASS(
       const FrameState& frame)
       : InstrT(dst, fromlist, level, name_idx, frame) {}
 
-  Register* GetFromList() const {
-    return GetOperand(0);
+  Register* getFromList() const {
+    return getOperand(0);
   }
 
-  Register* GetLevel() const {
-    return GetOperand(1);
+  Register* getLevel() const {
+    return getOperand(1);
   }
 };
 
@@ -3504,12 +3653,12 @@ class INSTR_CLASS(
       const FrameState& frame)
       : InstrT(dst, fromlist, level, name_idx, frame) {}
 
-  Register* GetFromList() const {
-    return GetOperand(0);
+  Register* getFromList() const {
+    return getOperand(0);
   }
 
-  Register* GetLevel() const {
-    return GetOperand(1);
+  Register* getLevel() const {
+    return getOperand(1);
   }
 };
 
@@ -3539,42 +3688,44 @@ class INSTR_CLASS(RaiseStatic, (TObject), Operands<>, DeoptBase) {
 
 DEFINE_SIMPLE_INSTR(SetCurrentAwaiter, (TOptObject), Operands<1>);
 
-DEFINE_SIMPLE_INSTR(YieldValue, (TObject), HasOutput, Operands<1>, DeoptBase);
+class INSTR_CLASS(YieldValue, (TObject), HasOutput, Operands<1>, DeoptBase) {
+ public:
+  YieldValue(Register* dst, Register* value, const FrameState& frame)
+      : InstrT(dst, value, frame) {}
+  Register* reg() const {
+    return getOperand(0);
+  }
+  Register* yieldFromIter() const {
+    return yieldFromIter_;
+  }
+  void setYieldFromIter(Register* iter) {
+    yieldFromIter_ = iter;
+  }
+  bool isYieldFrom() const {
+    return yieldFromIter_ != nullptr;
+  }
+
+  bool visitUses(const std::function<bool(Register*&)>& func) override {
+    if (!DeoptBase::visitUses(func)) {
+      return false;
+    }
+    if (yieldFromIter_ != nullptr) {
+      if (!func(yieldFromIter_)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+ private:
+  Register* yieldFromIter_{nullptr};
+};
 
 // InitialYield causes a generator function to suspend and return a new
 // 'PyGenObject' object holding its state. This should only appear in generator
-// functions and in them should be exactly one instance, which in 3.10 is
-// before execution begins, and in 3.12 is generated by RETURN_GENERATOR.
+// functions and in them should be exactly one instance, which is generated by
+// RETURN_GENERATOR.
 DEFINE_SIMPLE_INSTR(InitialYield, (), HasOutput, Operands<0>, DeoptBase);
-
-// Send the value in operand 0 to the subiterator in operand 1, forwarding
-// yielded values from the subiterator back to our caller until it is
-// exhausted.
-DEFINE_SIMPLE_INSTR(
-    YieldFrom,
-    (TObject, TOptObject),
-    HasOutput,
-    Operands<2>,
-    DeoptBase);
-
-// A more compact (in terms of emitted code) equivalent to YieldValue followed
-// by YieldFrom.
-DEFINE_SIMPLE_INSTR(
-    YieldAndYieldFrom,
-    (TOptObject, TObject),
-    HasOutput,
-    Operands<2>,
-    DeoptBase);
-
-// Like YieldFrom but instead of propagating StopAsyncIteration it instead
-// yields the sentinel value indicating that iteration has completed. Used to
-// implement `async for` loops.
-DEFINE_SIMPLE_INSTR(
-    YieldFromHandleStopAsyncIteration,
-    (TObject),
-    HasOutput,
-    Operands<2>,
-    DeoptBase);
 
 // Implements BUILD_STRING opcode.
 DEFINE_SIMPLE_INSTR(BuildString, (TUnicode), HasOutput, Operands<>, DeoptBase);
@@ -3634,7 +3785,7 @@ class INSTR_CLASS(
       : InstrT(dst, seq, frame), before_(before), after_(after) {}
 
   Register* seq() const {
-    return GetOperand(0);
+    return getOperand(0);
   }
 
   int before() const {
@@ -3647,6 +3798,49 @@ class INSTR_CLASS(
  private:
   int before_;
   int after_;
+};
+
+// Reserve stack space for a temporary array of pointer-sized elements.
+// The output is a pointer (CPtr) to the start of the reserved space.
+// The reserved space is placed at SP+0, below the call argument buffer area,
+// so that function calls cannot clobber the reserved data. Call arguments
+// are placed at SP+reserve_stack_size and above.
+class INSTR_CLASS(ReserveStack, (), HasOutput, Operands<0>) {
+ public:
+  ReserveStack(Register* dst, int num_words)
+      : InstrT(dst), num_words_(num_words) {}
+
+  int numWords() const {
+    return num_words_;
+  }
+
+ private:
+  int num_words_;
+};
+
+// Unpack a sequence of exactly 'count' items via the iterator protocol
+// (UNPACK_SEQUENCE slow path for non-list/non-tuple types).
+// Fills the items array (pointed to by items_ptr) with the unpacked values.
+// Returns 0 on success, -1 on error (with Python exception set).
+class INSTR_CLASS(UnpackSequence, (TObject, TCPtr), HasOutput, Operands<2>) {
+ public:
+  UnpackSequence(Register* dst, Register* seq, Register* items_ptr, int count)
+      : InstrT(dst, seq, items_ptr), count_(count) {}
+
+  Register* seq() const {
+    return getOperand(0);
+  }
+
+  Register* itemsPtr() const {
+    return getOperand(1);
+  }
+
+  int count() const {
+    return count_;
+  }
+
+ private:
+  int count_;
 };
 
 DEFINE_SIMPLE_INSTR(
@@ -3676,6 +3870,10 @@ class INSTR_CLASS(UpdatePrevInstr, (), Operands<0>) {
     return line_no_;
   }
 
+  void setLineNo(int line_no) {
+    line_no_ = line_no;
+  }
+
   // The inlined function which this update belongs to or nullptr if not in an
   // inlined function.
   BeginInlinedFunction* parent() const {
@@ -3687,12 +3885,29 @@ class INSTR_CLASS(UpdatePrevInstr, (), Operands<0>) {
   BeginInlinedFunction* parent_;
 };
 
-DEFINE_SIMPLE_INSTR(
-    Send,
-    (TObject, TObject),
-    Operands<2>,
-    HasOutput,
-    DeoptBase);
+class INSTR_CLASS(Send, (TObject, TObject), Operands<2>, HasOutput, DeoptBase) {
+ public:
+  Send(
+      Register* dst,
+      Register* iter,
+      Register* send_value,
+      const FrameState& frame,
+      bool handle_sai = false)
+      : InstrT(dst, iter, send_value, frame),
+        handleStopAsyncIteration_(handle_sai) {}
+  Register* iter() const {
+    return getOperand(0);
+  }
+  Register* sendValue() const {
+    return getOperand(1);
+  }
+  bool handleStopAsyncIteration() const {
+    return handleStopAsyncIteration_;
+  }
+
+ private:
+  bool handleStopAsyncIteration_{false};
+};
 
 class INSTR_CLASS(
     BuildInterpolation,
@@ -3775,42 +3990,37 @@ bool isPassthrough(const Instr& instr);
 // given value, returning the original source of the value.
 Register* modelReg(Register* reg);
 
-class BasicBlock {
+class BasicBlock : public IntrusiveListNode<BasicBlock> {
  public:
-  BasicBlock() : BasicBlock(0) {}
-  explicit BasicBlock(int id_) : id(id_) {}
+  BasicBlock() = default;
+  explicit BasicBlock(int id);
   ~BasicBlock();
-
-  // Replace any references to old_pred in this block's Phis with new_pred.
-  void fixupPhis(BasicBlock* old_pred, BasicBlock* new_pred);
-  // Adds a new predecessor to the phi that follows from the old predecessor
-  void addPhiPredecessor(BasicBlock* old_pred, BasicBlock* new_pred);
-  // Removes any references to old_pred in this block's Phis
-  void removePhiPredecessor(BasicBlock* old_pred);
-
-  // Read-only access to the incoming and outgoing edges.
-  const std::unordered_set<const Edge*>& in_edges() const {
-    return in_edges_;
-  }
-  const std::unordered_set<const Edge*>& out_edges() const {
-    return out_edges_;
-  }
 
   // Append or prepend an instruction to the instructions in the basic block.
   //
   // NB: The block takes ownership of the insruction and frees it when the block
   //     is deleted.
-  Instr* Append(Instr* instr);
+  Instr* append(Instr* instr);
   void push_front(Instr* instr);
   Instr* pop_front();
+
+  void insertBefore(Instr& existing, Instr& new_instr);
+  void insertAfter(Instr& existing, Instr& new_instr);
+
+  void replace(Instr& existing, Instr& new_instr);
+
+  void expand(Instr& existing, std::span<Instr* const> expansion);
 
   // Insert the given Instr before `it'.
   void insert(Instr* instr, Instr::List::iterator it);
 
+  // Remove an instruction from this block, but don't free it.
+  void remove(Instr& instr);
+
   template <typename T, typename... Args>
   T* append(Args&&... args) {
     T* instr = T::create(std::forward<Args>(args)...);
-    Append(instr);
+    append(instr);
     return instr;
   }
 
@@ -3830,116 +4040,97 @@ class BasicBlock {
 
   void retargetPreds(BasicBlock* target);
 
-  BasicBlock* successor(std::size_t i) const {
-    return GetTerminator()->successor(i);
-  }
+  // Tell all predecessors that this block is no longer reachable, and update
+  // their terminator instructions.
+  void becomeUnreachable();
 
-  void set_successor(std::size_t i, BasicBlock* succ) {
-    GetTerminator()->set_successor(i, succ);
-  }
+  BasicBlock* successor(std::size_t i) const;
+  void setSuccessor(std::size_t i, BasicBlock* succ);
 
   // Remove and delete all contained instructions, leaving the block empty.
   void clear();
 
   // BasicBlock holds a list of instructions, delegating most operations
   // directly to its IntrusiveList.
-  auto empty() const {
-    return instrs_.IsEmpty();
-  }
-  auto& front() {
-    return instrs_.Front();
-  }
-  auto& front() const {
-    return instrs_.Front();
-  }
-  auto& back() {
-    return instrs_.Back();
-  }
-  auto& back() const {
-    return instrs_.Back();
-  }
-  auto iterator_to(Instr& instr) {
-    return instrs_.iterator_to(instr);
-  }
-  auto const_iterator_to(const Instr& instr) const {
-    return instrs_.const_iterator_to(instr);
-  }
-  auto begin() {
-    return instrs_.begin();
-  }
-  auto begin() const {
-    return instrs_.begin();
-  }
-  auto end() {
-    return instrs_.end();
-  }
-  auto end() const {
-    return instrs_.end();
-  }
-  auto reverse_iterator_to(Instr& instr) {
-    return instrs_.reverse_iterator_to(instr);
-  }
-  auto const_reverse_iterator_to(const Instr& instr) const {
-    return instrs_.const_reverse_iterator_to(instr);
-  }
-  auto rbegin() {
-    return instrs_.rbegin();
-  }
-  auto rbegin() const {
-    return instrs_.rbegin();
-  }
-  auto rend() {
-    return instrs_.rend();
-  }
-  auto rend() const {
-    return instrs_.rend();
-  }
-  auto crend() const {
-    return instrs_.crend();
-  }
+  bool empty() const;
+
+  // Number of instructions in the block.
+  size_t size() const;
+
+  // Accessors for the first and last instructions in the block.
+
+  Instr& front();
+  const Instr& front() const;
+
+  Instr& back();
+  const Instr& back() const;
+
+  // Instruction iterators.
+
+  Instr::List::iterator iterator_to(Instr& instr);
+  Instr::List::const_iterator const_iterator_to(const Instr& instr) const;
+
+  Instr::List::iterator begin();
+  Instr::List::const_iterator begin() const;
+
+  Instr::List::iterator end();
+  Instr::List::const_iterator end() const;
+
+  Instr::List::reverse_iterator reverse_iterator_to(Instr& instr);
+  Instr::List::const_reverse_iterator const_reverse_iterator_to(
+      const Instr& instr) const;
+
+  Instr::List::reverse_iterator rbegin();
+  Instr::List::const_reverse_iterator rbegin() const;
+
+  Instr::List::reverse_iterator rend();
+  Instr::List::const_reverse_iterator rend() const;
+  Instr::List::const_reverse_iterator crend() const;
+
+  // Read-only access to the incoming and outgoing edges.
+  const std::unordered_set<const Edge*>& inEdges() const;
+  const std::unordered_set<const Edge*>& outEdges() const;
 
   // Return the snapshot on entry to this block
   Snapshot* entrySnapshot();
 
   // Return the last instruction in the block
-  Instr* GetTerminator();
-  const Instr* GetTerminator() const {
-    return const_cast<BasicBlock*>(this)->GetTerminator();
-  }
+  Instr* getTerminator();
+  const Instr* getTerminator() const;
 
   // A trampoline block consists of a single direct jump to another block
-  bool IsTrampoline();
+  bool isTrampoline();
+
+  // Replace any references to old_pred in this block's Phis with new_pred.
+  void fixupPhis(BasicBlock* old_pred, BasicBlock* new_pred);
+
+  // Removes any references to old_pred in this block's Phis.
+  void removePhiPredecessor(BasicBlock* old_pred);
 
   // Call f with each Phi instruction at the beginning of this block.
   template <typename F>
   void forEachPhi(F f) {
     for (auto& instr : *this) {
-      if (!instr.IsPhi()) {
+      if (!instr.isPhi()) {
         break;
       }
       f(static_cast<Phi&>(instr));
     }
   }
 
-  int id;
+  int id{0};
 
-  // Basic blocks belong to a list of all blocks in their CFG
-  IntrusiveListNode cfg_node;
+  BasicBlock(const BasicBlock&) = delete;
+  BasicBlock& operator=(const BasicBlock&) = delete;
+  BasicBlock(BasicBlock&&) = delete;
+  BasicBlock& operator=(BasicBlock&&) = delete;
 
  private:
-  DISALLOW_COPY_AND_ASSIGN(BasicBlock);
-
   friend class Edge;
 
   // Instructions for this basic block.
   //
-  // The last instruction is guaranteed to be a terminator, which must be one
-  // of:
-  //
-  // - Branch
-  // - CondBranch
-  // - Return
-  //
+  // The last instruction is guaranteed to be a terminator.
   Instr::List instrs_;
 
   // Outgoing edges.
@@ -3952,14 +4143,15 @@ class BasicBlock {
 class Environment {
  public:
   using RegisterMap = std::unordered_map<int, std::unique_ptr<Register>>;
-  using ReferenceSet = std::unordered_set<ThreadedRef<>>;
+  using ReferenceSet = std::unordered_set<BorrowedRef<>>;
+  using StrongReferenceSet = std::unordered_set<Ref<>>;
 
   Environment() = default;
   ~Environment();
 
-  Register* AllocateRegister();
+  Register* allocateRegister();
 
-  const RegisterMap& GetRegisters() const;
+  const RegisterMap& getRegisters() const;
 
   // Only intended to be used in tests and parsing code.
   Register* addRegister(std::unique_ptr<Register> reg);
@@ -3969,9 +4161,31 @@ class Environment {
   // alive for use by the compiled code. Make Environment a new owner of the
   // object.
   BorrowedRef<> addReference(BorrowedRef<> obj);
-  BorrowedRef<> addReference(Ref<> obj);
+  BorrowedRef<> addReference(Ref<>&& obj);
 
   const ReferenceSet& references() const;
+  StrongReferenceSet&& stealStrongReferences();
+
+  // Attach a validator for a type watch deferred during threaded/background
+  // compilation, re-checking the assumptions the patchpoint was created with.
+  // Keyed by the patchpoint's patcher; consumed by linkDeoptPatchers() during
+  // codegen. Dies with the compilation, so no validator outlives the compile.
+  void setWatchValidator(
+      JumpPatcher* patcher,
+      std::function<bool()> validator) {
+    if (watch_validators_ == nullptr) {
+      watch_validators_ = std::make_unique<WatchValidatorMap>();
+    }
+    (*watch_validators_)[patcher] = std::move(validator);
+  }
+  // Returns the attached validator, or null if there isn't one.
+  std::function<bool()> watchValidator(JumpPatcher* patcher) const {
+    if (watch_validators_ == nullptr) {
+      return nullptr;
+    }
+    auto it = watch_validators_->find(patcher);
+    return it == watch_validators_->end() ? nullptr : it->second;
+  }
 
   // Returns nullptr if a register with the given `id` isn't found
   Register* getRegister(int id);
@@ -4000,11 +4214,22 @@ class Environment {
     return next_load_type_method_cache_;
   }
 
- private:
-  DISALLOW_COPY_AND_ASSIGN(Environment);
+  // The functions reifier when lightweight frames are used, kept alive by the
+  // preloader until transferred to the CodeRuntime at the end of compilation.
+  BorrowedRef<> reifier;
 
+  Environment(const Environment&) = delete;
+  Environment& operator=(const Environment&) = delete;
+
+ private:
+  using WatchValidatorMap =
+      std::unordered_map<JumpPatcher*, std::function<bool()>>;
   RegisterMap registers_;
   ReferenceSet references_;
+  StrongReferenceSet strong_references_;
+  // Lazily allocated so compiles without validated patchpoints pay only one
+  // pointer.
+  std::unique_ptr<WatchValidatorMap> watch_validators_;
   int next_register_id_{0};
   int next_load_type_attr_cache_{0};
   int next_load_type_method_cache_{0};
@@ -4019,26 +4244,26 @@ struct TypedArgument {
       int optional,
       int exact,
       Type jit_type);
-  ~TypedArgument();
 
-  TypedArgument(const TypedArgument& other);
-  TypedArgument& operator=(const TypedArgument& other);
+  ~TypedArgument() = default;
+
+  TypedArgument(const TypedArgument& other) = default;
+  TypedArgument& operator=(const TypedArgument& other) = default;
+  TypedArgument(TypedArgument&& other) = default;
+  TypedArgument& operator=(TypedArgument&& other) = default;
 
   // Returns type flags which should not change between concurrent compilation
   // threads.
   unsigned long threadSafeTpFlags() const;
 
   long locals_idx;
-  ThreadedRef<PyTypeObject> pytype;
+  // Kept alive by the Preloader
+  BorrowedRef<PyTypeObject> pytype;
   int optional;
   int exact;
   Type jit_type;
   unsigned long thread_safe_flags;
 };
-
-// Does the given code object need access to its containing PyFunctionObject at
-// runtime?
-bool usesRuntimeFunc(BorrowedRef<PyCodeObject> code);
 
 #define FOREACH_FAILURE_TYPE(V)                                            \
   V(HasDefaults, "it has defaults")                                        \
@@ -4056,7 +4281,9 @@ bool usesRuntimeFunc(BorrowedRef<PyCodeObject> code);
     "it is a vectorcalled static function with pimitive args")             \
   V(GlobalsNotDict, "globals is not a dict")                               \
   V(BuiltinsNotDict, "builtins is not a dict")                             \
-  V(HasEagerImportName, "has an eager import name instruction")
+  V(HasEagerImportName, "has an eager import name instruction")            \
+  V(IsRecursive, "it is directly or mutually recursive")                   \
+  V(ExceedsDepthLimit, "it exceeds the transitive inlining depth limit")
 
 enum class InlineFailureType {
 #define DECLARE_FAILURE_TYPE(failure, msg) k##failure,
@@ -4070,10 +4297,12 @@ const char* getInlineFailureName(InlineFailureType failure_type);
 FrameState* get_frame_state(Instr& instr);
 const FrameState* get_frame_state(const Instr& instr);
 
-} // namespace jit::hir
+} // namespace cinderx::jit::hir
 
 template <>
-struct fmt::formatter<jit::hir::OperandType> : fmt::ostream_formatter {};
+struct fmt::formatter<cinderx::jit::hir::OperandType> : fmt::ostream_formatter {
+};
 
 template <>
-struct fmt::formatter<jit::hir::CallCFunc::Func> : fmt::ostream_formatter {};
+struct fmt::formatter<cinderx::jit::hir::CallCFunc::Func>
+    : fmt::ostream_formatter {};

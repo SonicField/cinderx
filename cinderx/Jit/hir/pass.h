@@ -11,7 +11,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
-namespace jit::hir {
+namespace cinderx::jit::hir {
 
 // An abstract compiler pass over an HIR function.
 class Pass {
@@ -19,7 +19,7 @@ class Pass {
   explicit Pass(std::string_view name) : name_{name} {}
   virtual ~Pass() = default;
 
-  virtual void Run(Function& irfunc) = 0;
+  virtual void run(Function& irfunc) = 0;
 
   constexpr std::string_view name() const {
     return name_;
@@ -36,6 +36,15 @@ using RegUses = std::unordered_map<Register*, std::unordered_set<Instr*>>;
 // Recursively chase a list of assignments and get the original register value.
 // If there are no assignments then just get the register back.
 Register* chaseAssignOperand(Register* value);
+
+// Take a phi instruction and try to collapse it into a new assignment
+// instruction if it is trivial (merges in only one other value).  If it's not
+// trivial return nullptr.  If it would turn into a malformed assignment
+// (`A = Phi A`), then return a load of TBottom instead.
+//
+// The caller owns the returned instruction and is responsible for linking it
+// into a block.
+Instr* collapseTrivialPhi(Phi& phi);
 
 // Collect direct operand uses of all Registers in the given func, excluding
 // uses in FrameState or other metadata.
@@ -59,8 +68,13 @@ Type outputType(
 void reflowTypes(Function& func);
 void reflowTypes(Function& func, BasicBlock* start);
 
-// Remove any blocks that consist of a single jump to another block.
-bool removeTrampolineBlocks(CFG* cfg);
+// Combine all blocks A and B where A only has B as a successor, B only has A as
+// a predecessor, and A and B are distinct blocks (not cycles).  Chains of such
+// blocks collapse down into a single block.  Return true if the CFG changed.
+//
+// Any Phi at the top of B is necessarily trivial and gets collapsed into an
+// Assign, as Phis can only live at the start of a block.
+bool mergeLinearBlocks(Function& func);
 
 // Remove blocks that aren't reachable from the entry, whether or not they're
 // empty. Return true if it changed the graph and false otherwise.
@@ -70,8 +84,4 @@ bool removeUnreachableBlocks(Function& func);
 // changed the graph and false otherwise.
 bool removeUnreachableInstructions(Function& func);
 
-// Replace cond branches where both sides go to the same block with a direct
-// branch.
-void simplifyRedundantCondBranches(CFG* cfg);
-
-} // namespace jit::hir
+} // namespace cinderx::jit::hir

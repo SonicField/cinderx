@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "cinderx/Common/aligned_memory.h"
+#include "cinderx/Common/hugepages.h"
 #include "cinderx/Common/log.h"
 #include "cinderx/Common/util.h"
 #ifndef WIN32
@@ -9,10 +11,11 @@
 #endif
 
 #include <cstddef>
-#include <cstdlib>
+#include <memory>
+#include <optional>
 #include <utility>
 
-namespace jit {
+namespace cinderx {
 
 template <typename T>
 class SlabIterator {
@@ -44,10 +47,6 @@ class SlabIterator {
     return ptr_ == o.ptr_;
   }
 
-  bool operator!=(const SlabIterator& o) const {
-    return !operator==(o);
-  }
-
  private:
   char* ptr_{nullptr};
   size_t increment_{0};
@@ -61,27 +60,33 @@ class Slab {
  public:
   using iterator = SlabIterator<T>;
 
-  explicit Slab(size_t increment) : increment_{increment} {
+  explicit Slab(
+      size_t increment,
+      std::shared_ptr<HugePageArena> arena = nullptr)
+      : arena_(arena), increment_{increment} {
     JIT_CHECK(
         increment >= sizeof(T),
         "Trying to fit a slab object into too little memory");
-    void* ptr;
-#ifndef WIN32
-    int result = posix_memalign(&ptr, kPageSize, kSlabSize);
-    JIT_CHECK(result == 0, "Failed to allocate {} bytes", kSlabSize);
-#else
-    ptr = _aligned_malloc(kSlabSize, kPageSize);
-    JIT_CHECK(ptr != nullptr, "Failed to allocate {} bytes", kSlabSize);
-#endif
-    base_.reset(static_cast<char*>(ptr));
-    fill_ = base_.get();
+    void* ptr = nullptr;
+    if (arena_ != nullptr) {
+      ptr = arena_->allocate(kSlabSize, kPageSize);
+    }
+
+    if (ptr == nullptr) {
+      owned_base_.emplace(kSlabSize, kPageSize);
+      ptr = owned_base_->get();
+    }
+    base_ = fill_ = static_cast<char*>(ptr);
   }
 
-  Slab(Slab&& other)
-      : base_{std::move(other.base_)},
+  Slab(Slab&& other) noexcept
+      : base_{other.base_},
+        arena_(std::move(other.arena_)),
+        owned_base_{std::move(other.owned_base_)},
         fill_{other.fill_},
         increment_{other.increment_} {
     other.fill_ = nullptr;
+    other.base_ = nullptr;
   }
 
   ~Slab() {
@@ -90,23 +95,25 @@ class Slab {
     }
   }
 
-  // Allocate memory for a new T object. Returns void* because the object is not
-  // constructed yet.
-  void* allocate() {
-    char* new_fill = fill_ + increment_;
-    if (new_fill > base_.get() + kSlabSize) {
+  // Construct a T in the next slot. Returns nullptr when the slab is full and
+  // leaves the slab unchanged if construction throws.
+  template <typename... Args>
+  T* emplace(Args&&... args) {
+    const size_t used = static_cast<size_t>(fill_ - base_);
+    if (increment_ > kSlabSize - used) {
       return nullptr;
     }
 
-    char* ptr = fill_;
-    fill_ = new_fill;
-    return ptr;
+    T* object = std::construct_at(
+        reinterpret_cast<T*>(fill_), std::forward<Args>(args)...);
+    fill_ += increment_;
+    return object;
   }
 
 #ifndef WIN32
   void mlock() {
-    if (::mlock(base_.get(), kSlabSize) < 0) {
-      JIT_LOG("Failed to mlock slab at {}", base_.get());
+    if (::mlock(base_, kSlabSize) < 0) {
+      JIT_LOG("Failed to mlock slab at {}", base_);
       return;
     }
     mlocks_++;
@@ -119,8 +126,8 @@ class Slab {
       JIT_LOG("Trying to unlock slab more than it has been been locked");
     }
 
-    if (::munlock(base_.get(), kSlabSize) < 0) {
-      JIT_LOG("Failed to munlock slab at {}", base_.get());
+    if (::munlock(base_, kSlabSize) < 0) {
+      JIT_LOG("Failed to munlock slab at {}", base_);
       return;
     }
     mlocks_--;
@@ -128,7 +135,7 @@ class Slab {
 #endif
 
   iterator begin() const {
-    return iterator{base_.get(), increment_};
+    return iterator{base_, increment_};
   }
 
   iterator end() const {
@@ -136,10 +143,12 @@ class Slab {
   }
 
  private:
-  unique_c_ptr<char> base_;
+  char* base_;
+  std::shared_ptr<HugePageArena> arena_;
+  std::optional<AlignedMemory<char>> owned_base_;
   char* fill_{nullptr};
   size_t increment_{0};
   size_t mlocks_{0};
 };
 
-} // namespace jit
+} // namespace cinderx

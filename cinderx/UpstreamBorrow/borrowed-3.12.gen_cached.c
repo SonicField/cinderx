@@ -13,6 +13,8 @@
 #include "cinderx/UpstreamBorrow/borrowed.h"
 #include "cinderx/module_c_state.h"
 
+getattrofunc Ci_tp_getattr_hook;
+
 // In 3.12 _PyAsyncGenValueWrapperNew needs thread-state. As this is used from
 // the JIT we could get the value from the thread-state register. This would be
 // slightly more efficient, but quite a bit more work and async-generators are
@@ -34,28 +36,6 @@
 #include "pystats.h"
 #define _PyAsyncGenWrappedValue_CheckExact(o) \
                     Py_IS_TYPE(o, &_PyAsyncGenWrappedValue_Type)
-#if _PyAsyncGen_MAXFREELIST > 0
-#endif
-#if _PyAsyncGen_MAXFREELIST > 0
-#endif
-#if defined(Py_DEBUG) && _PyAsyncGen_MAXFREELIST > 0
-#endif
-#if _PyAsyncGen_MAXFREELIST > 0
-#ifdef Py_DEBUG
-#endif
-#endif
-#if _PyAsyncGen_MAXFREELIST > 0
-#ifdef Py_DEBUG
-#endif
-#endif
-#if _PyAsyncGen_MAXFREELIST > 0
-#ifdef Py_DEBUG
-#endif
-#endif
-#if _PyAsyncGen_MAXFREELIST > 0
-#ifdef Py_DEBUG
-#endif
-#endif
 PyObject* Cix_PyAsyncGenValueWrapperNew(PyObject* value) {
   return _PyAsyncGenValueWrapperNew(PyThreadState_GET(), value);
 }
@@ -504,12 +484,6 @@ void Cix_format_exc_check_arg(
 #endif
 #define ADD_INT(NAME) if (PyModule_AddIntConstant(module, #NAME, NAME) < 0) { return -1; }
 #undef ADD_INT
-#ifdef Py_DEBUG
-#endif
-#ifdef Py_DEBUG
-#endif
-#ifdef Py_DEBUG
-#endif
 typedef struct _gc_runtime_state GCState;
 static inline void
 gc_list_init(PyGC_Head *list)
@@ -551,20 +525,6 @@ gc_list_merge(PyGC_Head *from, PyGC_Head *to)
 }
 // End internal dependencies.
 
-static PyObject *
-gc_freeze_impl(PyObject *module)
-/*[clinic end generated code: output=502159d9cdc4c139 input=b602b16ac5febbe5]*/
-{
-    GCState *gcstate = get_gc_state();
-    for (int i = 0; i < NUM_GENERATIONS; ++i) {
-        gc_list_merge(GEN_HEAD(gcstate, i), &gcstate->permanent_generation.head);
-        gcstate->generations[i].count = 0;
-    }
-    Py_RETURN_NONE;
-}
-PyObject* Cix_gc_freeze_impl(PyObject* mod) {
-  return gc_freeze_impl(mod);
-}
 
 // Recreate builtin_next_impl (removed in https://github.com/python/cpython/pull/130371)
 
@@ -602,59 +562,49 @@ PyObject* Ci_Builtin_Next_Core(PyObject* it, PyObject* def) {
 }
 
 int init_upstream_borrow(void) {
-  // Nothing to do here; retained for consistency with 3.10
-  return 0;
-}
+  // Create a class with __getattr__ to discover the interpreter's
+  // _Py_slot_tp_getattr_hook function pointer, which CPython installs
+  // as tp_getattro when a class defines __getattr__.
+  const char *code_str =
+    "class GetAttr:\n"
+    "    def __getattr__(self, name): pass\n";
 
-// Internal dependencies for gen_dealloc.
-static inline PyCodeObject *
-_PyGen_GetCode(PyGenObject *gen) {
-    _PyInterpreterFrame *frame = (_PyInterpreterFrame *)(gen->gi_iframe);
-    return frame->f_code;
-}
-// End internal dependencies.
-// Use our own memory deallocation which handles generators that might be on
-// our custom free-list.
-#define PyObject_GC_Del(x) Ci_free_jit_list_gen(x)
-static void
-gen_dealloc(PyGenObject *gen)
-{
-    PyObject *self = (PyObject *) gen;
+  PyObject *code = NULL, *globals = NULL;
+  int result = -1;
+  code = Py_CompileString(code_str, "cinderx_getattr_init.py", Py_file_input);
+  if (code == NULL) {
+    goto error;
+  }
+  globals = PyDict_New();
+  if (globals == NULL) {
+    goto error;
+  }
 
-    _PyObject_GC_UNTRACK(gen);
+  PyObject *eval_result = PyEval_EvalCode(code, globals, globals);
+  if (eval_result == NULL) {
+    goto error;
+  }
+  Py_DECREF(eval_result);
 
-    if (gen->gi_weakreflist != NULL)
-        PyObject_ClearWeakRefs(self);
+  PyObject *getattr = PyDict_GetItemString(globals, "GetAttr");
+  if (getattr == NULL ||
+      Py_TYPE(getattr) != &PyType_Type) {
+    PyErr_SetString(PyExc_RuntimeError,
+                    "failed to initialize GetAttr: class not defined");
+    goto error;
+  }
 
-    _PyObject_GC_TRACK(self);
+  Ci_tp_getattr_hook = ((PyTypeObject*)getattr)->tp_getattro;
+  if (Ci_tp_getattr_hook == NULL) {
+    PyErr_SetString(PyExc_RuntimeError,
+                    "failed to initialize GetAttr: got NULL tp_getattro");
+    goto error;
+  }
 
-    if (PyObject_CallFinalizerFromDealloc(self))
-        return;                     /* resurrected.  :( */
+  result = 0;
 
-    _PyObject_GC_UNTRACK(self);
-    if (PyAsyncGen_CheckExact(gen)) {
-        /* We have to handle this case for asynchronous generators
-           right here, because this code has to be between UNTRACK
-           and GC_Del. */
-        Py_CLEAR(((PyAsyncGenObject*)gen)->ag_origin_or_finalizer);
-    }
-    if (gen->gi_frame_state < FRAME_CLEARED) {
-        _PyInterpreterFrame *frame = (_PyInterpreterFrame *)gen->gi_iframe;
-        gen->gi_frame_state = FRAME_CLEARED;
-        frame->previous = NULL;
-        _PyFrame_ClearExceptCode(frame);
-    }
-    if (_PyGen_GetCode(gen)->co_flags & CO_COROUTINE) {
-        Py_CLEAR(((PyCoroObject *)gen)->cr_origin_or_finalizer);
-    }
-    Py_DECREF(_PyGen_GetCode(gen));
-    Py_CLEAR(gen->gi_name);
-    Py_CLEAR(gen->gi_qualname);
-    _PyErr_ClearExcState(&gen->gi_exc_state);
-    Py_CLEAR(gen->gi_ci_awaiter);
-    PyObject_GC_Del(gen);
-}
-#undef PyObject_GC_Del
-void Cix_gen_dealloc_with_custom_free(PyObject* obj) {
-    gen_dealloc((PyGenObject*)obj);
+error:
+  Py_XDECREF(code);
+  Py_XDECREF(globals);
+  return result;
 }

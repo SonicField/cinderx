@@ -2,13 +2,18 @@
 
 #pragma once
 
-#include "cinderx/Jit/containers.h"
+#include "cinderx/Common/containers.h"
 #include "cinderx/Jit/hir/cfg.h"
 #include "cinderx/Jit/hir/hir.h"
 #include "cinderx/Jit/jit_time_log.h"
+#include "cinderx/Jit/type_deopt_patchers.h"
 #include "cinderx/StaticPython/typed-args-info.h"
 
-namespace jit::hir {
+#include <memory>
+
+namespace cinderx::jit::hir {
+
+class DominatorTree;
 
 class Function {
  public:
@@ -17,32 +22,23 @@ class Function {
   Function();
   ~Function();
 
-  ThreadedRef<PyCodeObject> code;
-  ThreadedRef<PyDictObject> builtins;
-  ThreadedRef<PyDictObject> globals;
+  Function(const Function&) = delete;
+  Function& operator=(const Function&) = delete;
+
+  // All references in Function are kept alive by the preloader during
+  // compilation
+  BorrowedRef<PyCodeObject> code;
+  BorrowedRef<PyDictObject> builtins;
+  BorrowedRef<PyDictObject> globals;
 
   // for primitive args only, null if there are none
-  ThreadedRef<_PyTypedArgsInfo> prim_args_info;
+  BorrowedRef<_PyTypedArgsInfo> prim_args_info;
 
   // Fully-qualified name of the function
   std::string fullname;
 
-  // Does this function need its PyFunctionObject* at runtime?
-  // (This is always the case in 3.12 as it is used to quickly access the
-  // _PyInterpreterFrame)
-  bool uses_runtime_func{
-#if PY_VERSION_HEX < 0x030C0000
-      false
-#else
-      true
-#endif
-  };
-
   // Does this function have primitive args?
   bool has_primitive_args{false};
-
-  // is the first argument a primitive?
-  bool has_primitive_first_arg{false};
 
   struct InlineFunctionStats {
     int num_inlined_functions{0};
@@ -56,8 +52,6 @@ class Function {
 
   // Return type
   Type return_type{TObject};
-
-  FrameMode frameMode{FrameMode::kNormal};
 
   CFG cfg;
 
@@ -83,8 +77,14 @@ class Function {
   // Set code and a number of other members that are derived from it.
   void setCode(BorrowedRef<PyCodeObject> code);
 
+  // Total number of HIR basic blocks in the function.
+  std::size_t numBlocks() const;
+
+  // Total number of HIR instructions in the function.
+  std::size_t numInstrs() const;
+
   // Count the number of instructions that match the predicate
-  std::size_t CountInstrs(InstrPredicate pred) const;
+  std::size_t countInstrs(InstrPredicate pred) const;
 
   // Does this function return a primitive type?
   bool returnsPrimitive() const;
@@ -111,13 +111,24 @@ class Function {
   // The instruction must be part of this function.
   BorrowedRef<PyCodeObject> codeFor(const Instr& instr) const;
 
-  ThreadedRef<> reifier;
+  // Dominator tree over the CFG's entry block, lazily built and cached so
+  // optimization passes can share a single tree instead of each recomputing
+  // dominance.  Any pass that mutates the CFG in a way that changes dominance
+  // (adds/removes blocks, or retargets edges) must call invalidateDomTree().
+  // The tree will be rebuilt on the next call to domTree().  Passes that only
+  // rewrite instructions within blocks preserve dominance and need not
+  // invalidate.
+  const DominatorTree& domTree();
+
+  // Discard any cached dominator tree.  Cheap and idempotent, safe to call even
+  // when nothing has been cached yet.
+  void invalidateDomTree();
 
  private:
-  DISALLOW_COPY_AND_ASSIGN(Function);
+  std::unique_ptr<DominatorTree> dom_tree_;
 };
 
 using OpcodeCounts = std::array<int, kNumOpcodes>;
 OpcodeCounts count_opcodes(const Function& func);
 
-} // namespace jit::hir
+} // namespace cinderx::jit::hir

@@ -3,9 +3,9 @@
 This file provides guidance to AI coding agents when working with code in this
 directory.
 
-If the file Internal/AGENTS.md exists, read this too. It contains details of
-things which are relevant to Meta's internal developer environment but do not
-apply for non Meta environments.
+**Important**: If the file `Internal/AGENTS.md` exists, you MUST read it before
+proceeding with any task. It contains additional context for internal
+development environments.
 
 ## Overview
 
@@ -25,6 +25,27 @@ code the `PY_VERSION_HEX` and `Py_GIL_DISABLED` macros are used to
 select code to target different Python versions. Utilities are provided
 in `Common/` to abstract commonly used features which changed between
 Python versions.
+
+## Different Target Architectures and Operating Systems
+
+CinderX supports multiple architectures in its code generation backend
+(e.g. x86-64, aarch64). The preference is to have all code compile under all
+possible architectures, even on architectures where it is not used. Small blocks
+of code can check the value of the `kBuildArch` constant with an `if constexpr`
+statement. For entire functions, it's preferred to keep them unconditionally
+defined, using the `[[maybe_unused]]` attribute to avoid unused code
+warnings. Both of these cases assume that the underlying code can be compiled
+across all architectures. If there is code that can only compile under a
+specific hardware architecture, then that can be conditionally compiled by
+checking preprocessor defines like `CINDER_X86_64` and `CINDER_AARCH64`.
+
+One specific case to highlight is struct/class fields that are only used on
+specific architectures. If they are part of singletons then it's fine to define
+them always even if they are unused, but otherwise they should be conditionally
+compiled via the preprocessor defines, to save on memory usage.
+
+CinderX also supports multiple operating systems, namely Linux, macOS, and
+Windows. The same suggestions for `kBuildArch` also apply to the `kOS` constant.
 
 ## Non-public Python APIs
 
@@ -92,7 +113,27 @@ If the instruction needs to call a custom runtime helper function:
 - Declare it in **Jit/jit_rt.h**
 - Implement it in **Jit/jit_rt.cpp**
 
+## Handling JIT compile-time errors
+
+If an error is hit when JIT-compiling a Python function, the preference is to
+raise a C++ exception. This will unwind the stack and silently fail the compile,
+causing the Python function to return back to the interpreter as usual.
+
+The `JIT_THROW` and `JIT_THROW_IF` macros make it easy to raise an exception
+that is tagged with the offending file and line number, to make debugging
+easier. These are the preferred tool for handling irrecoverable JIT-compilation
+errors.
+
+The `JIT_ABORT` and `JIT_CHECK` macros are similar but will crash the entire
+process, which is usually undesirable. They should be used sparingly, and in
+very restricted scenarios where throwing a C++ exception does not make sense.
+
+The `JIT_DCHECK` macro is intended for invariants that we'd like to enforce, but
+cannot do so in production builds because they lie in performance-sensitive code
+paths (e.g. the function vectorcall entry point that we install).
+
 ## Investigating JIT failures
+
 If you're investigating a JIT issue you may want to isolate the issue to a
 single function.  You can use `cinderx.jit.force_compile` to compile an
 individual function if you suspect that a specific function is problematic.
@@ -100,3 +141,7 @@ individual function if you suspect that a specific function is problematic.
 If you run the test with PYTHONJITDUMPASM=1 you can see the assembly dumped
 along with the HIR to understand what the compiled code looks like and what
 the underlying issue is.
+
+## Code style
+
+See `Internal/docs/style.md`.

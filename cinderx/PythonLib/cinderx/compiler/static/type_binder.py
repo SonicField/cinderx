@@ -683,7 +683,6 @@ class TypeBinder(GenericVisitor[Optional[NarrowingEffect]]):
             for t in node.type_params:
                 self.declare_local(t.name, self.type_env.DYNAMIC)
 
-    # pyre-ignore[11]: Annotation `ast.TypeAlias` is not defined as a type
     def visitTypeAlias(self, node: ast.TypeAlias) -> None:
         self._visitTypeParams(node)
         self.visit(node.value)
@@ -834,7 +833,12 @@ class TypeBinder(GenericVisitor[Optional[NarrowingEffect]]):
     def visitAugAssign(self, node: AugAssign) -> None:
         self.visit(node.target)
         target_type = self.get_type(node.target).inexact()
-        self.visit(node.value, target_type)
+        if isinstance(target_type, CInstance):
+            self.visitExpectedType(
+                node.value, target_type, target_type.binop_error("{1}", "{0}", node.op)
+            )
+        else:
+            self.visit(node.value, target_type)
         self.set_type(node, target_type)
 
     @contextmanager
@@ -904,7 +908,6 @@ class TypeBinder(GenericVisitor[Optional[NarrowingEffect]]):
                 and self.type_env.dynamic.can_assign_from(value_type.klass)
             ):
                 assert isinstance(target.value, ast.Name)
-                # pyre-fixme[16]: `expr` has no attribute `id`.
                 self.type_state.refined_fields.setdefault(target.value.id, {})[
                     target.attr
                 ] = (
@@ -1755,9 +1758,13 @@ class TypeBinder(GenericVisitor[Optional[NarrowingEffect]]):
                 self.declare_local(declaration_name, typ)
 
     def visitImportFrom(self, node: ImportFrom) -> None:
-        mod_name = node.module
-        if node.level or not mod_name:
-            raise NotImplementedError("relative imports aren't supported")
+        if node.level:
+            mod_name = self._resolve_relative_import(node)
+        else:
+            mod_name = node.module
+        if not mod_name:
+            self.syntax_error("empty module name in import", node)
+            return
 
         if mod_name == "__static__":
             for alias in node.names:

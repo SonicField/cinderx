@@ -276,6 +276,7 @@ class StrictModuleRewriter:
         )
 
     def transform_body(self) -> Iterable[stmt]:
+        # pyrefly: ignore [bad-argument-type]
         scopes = ScopeStack(
             SymbolScope(self.table, ScopeData()), symbol_map=self.symbol_map
         )
@@ -308,7 +309,9 @@ def rewrite(
 
 
 TTransformedStmt = Union[Optional[AST], List[AST]]
+# pyrefly: ignore [invalid-type-var]
 TVar = TypeVar("TScope")
+# pyrefly: ignore [invalid-type-var]
 TScopeData = TypeVar("TData")
 
 
@@ -457,6 +460,7 @@ class SymbolVisitor(Generic[TVar, TScopeData], NodeVisitor):
             elif new is not None:
                 new_stmts.extend(new)
         if update:
+            # pyrefly: ignore [unsupported-operation]
             stmts[:] = new_stmts
 
     def visit_Lambda(self, node: Lambda) -> TTransformedStmt:
@@ -888,6 +892,7 @@ class ImmutableTransformer(SymbolVisitor[None, ScopeData], AstRewriter):
                                                     )
                                                 )
                                             ),
+                                            # pyrefly: ignore [bad-argument-type]
                                             lineinfo(Constant(value)),
                                         ],
                                         ast.Load(),

@@ -9,19 +9,6 @@ import platform
 import sys
 from os import environ
 
-# ============================================================================
-# Note!
-#
-# At Meta, this module is currently loaded as part of Lib/site.py in an attempt
-# to get benefits from using it as soon as possible.  However
-# Lib/test/test_site.py will assert that site.py does not import too many
-# modules.  Be careful with adding import statements here.
-#
-# The plan is to move applications over to using an explicit initialization
-# step rather than Lib/site.py.  Once that is done we can add all the imports
-# we want here.
-# ============================================================================
-
 
 _import_error: ImportError | None = None
 
@@ -42,18 +29,14 @@ def is_supported_runtime() -> bool:
     native extension.
     """
 
-    if sys.platform not in ("darwin", "linux"):
+    if sys.platform not in ("darwin", "linux", "win32"):
         return False
 
     version = (sys.version_info.major, sys.version_info.minor)
-    if version == (3, 14) or version == (3, 15):
-        # Can't load the native extension if the GIL is forcibly being disabled.  The
-        # native extension doesn't support free-threading properly yet.
-        return environ.get("PYTHON_GIL") != "0"
+    if version in ((3, 14), (3, 15), (3, 16)):
+        return True
     if version == (3, 12):
         return "+meta" in sys.version
-    if version == (3, 10):
-        return "+cinder" in sys.version
     return False
 
 
@@ -80,16 +63,21 @@ try:
         cached_property_with_descr,
         clear_caches,
         clear_classloader_caches,
+        delay_adaptive,
         disable_parallel_gc,
         enable_parallel_gc,
         freeze_type,
+        get_adaptive_delay,
         get_parallel_gc_settings,
         has_parallel_gc,
         immortalize_heap,
         install_frame_evaluator,
         is_frame_evaluator_installed,
         is_immortal,
+        is_prefork_build,
+        is_sanitizer_build,
         remove_frame_evaluator,
+        set_adaptive_delay,
         strict_module_patch,
         strict_module_patch_delete,
         strict_module_patch_enabled,
@@ -97,28 +85,12 @@ try:
         watch_sys_modules,
     )
 
-    if sys.version_info < (3, 11):
-        # In 3.12+ use the versions in the polyfill cinder library instead.
-        from _cinderx import (
-            _get_entire_call_stack_as_qualnames_with_lineno,
-            _get_entire_call_stack_as_qualnames_with_lineno_and_frame,
-            clear_all_shadow_caches,
-        )
-
-    if sys.version_info >= (3, 12):
-        from _cinderx import delay_adaptive, get_adaptive_delay, set_adaptive_delay
-
 except ImportError as e:
     if "undefined symbol:" in str(e):
-        # If we're on a dev build report this as an error, otherwise muddle along with alternative definitions
-        # on unsupported Python's.
-        from os.path import dirname, exists, join
-
-        if exists(join(dirname(__file__), ".dev_build")):
-            raise ImportError(
-                "The _cinderx native extension is not available due to a missing symbol. This is likely a bug you introduced.  "
-                "Please ensure that the cinderx kernel is being used."
-            ) from e
+        raise ImportError(
+            "The _cinderx native extension is not available due to a missing symbol. This is likely a bug you introduced.  "
+            "Please ensure that the cinderx kernel is being used."
+        ) from e
     _import_error = e
 
     def _compile_perf_trampoline_pre_fork() -> None:
@@ -259,7 +231,6 @@ except ImportError as e:
             # pyre-fixme[11]: Annotation `kwargs` is not defined as a type.
             **kwargs: _TParams.kwargs,
         ) -> None:
-            global asyncio
             # pyre-fixme[31]: Expression `typing.Optional[typing.Callable[(_TParams,
             #  typing.Awaitable[_T])]]` is not a valid type.
             self.coro_func: Optional[Callable[_TParams, Awaitable[_T]]] = coro_func
@@ -280,7 +251,6 @@ except ImportError as e:
 
                 self.state = _AsyncLazyValueState.Done
 
-                # pyre-fixme[1001]: Awaitable assigned to `value` is never awaited.
                 for value in futures:
                     if not value.done():
                         value.set_result(self.res)
@@ -293,7 +263,6 @@ except ImportError as e:
                 return res
 
             except (Exception, asyncio.CancelledError) as e:
-                # pyre-fixme[1001]: Awaitable assigned to `value` is never awaited.
                 for value in futures:
                     if not value.done():
                         value.set_exception(e)
@@ -303,7 +272,7 @@ except ImportError as e:
 
         def _get_future(self, loop: Optional[AbstractEventLoop]) -> Future:
             if loop is None:
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
             f = asyncio.Future(loop=loop)
             self._futures.append(f)
             self._awaiting_tasks += 1
@@ -337,14 +306,14 @@ except ImportError as e:
                 return self._get_future(loop)
             else:
                 if loop is None:
-                    loop = asyncio.get_event_loop()
+                    loop = asyncio.get_running_loop()
                 t = loop.create_task(self._async_compute())
                 self.state = _AsyncLazyValueState.Running
                 # pyre-ignore[16]: Undefined attribute `asyncio.tasks.Task`
                 # has no attribute `_source_traceback`.
                 if t._source_traceback:
+                    # pyrefly: ignore [unsupported-operation]
                     del t._source_traceback[-1]
-                # pyre-fixme[7]: Expected `Future[Any]` but got `Task[_T]`.
                 return t
 
     _TAwaitableReturnType = TypeVar("_TAwaitableReturnType")
@@ -358,8 +327,10 @@ except ImportError as e:
             f: Callable[[_TClass], _TReturnType],
             slot: Optional[Descriptor[_TReturnType]] = None,
         ) -> None:
+            # pyrefly: ignore [bad-argument-type]
             super().__init__(f, slot)
 
+        # pyrefly: ignore [bad-override]
         def __get__(
             self, obj: Optional[_TClass], cls: Type[_TClass]
         ) -> (
@@ -391,9 +362,11 @@ except ImportError as e:
             f: Callable[[_TClass], Awaitable[_TAwaitableReturnType]],
             slot: Optional[Descriptor[Awaitable[_TAwaitableReturnType]]] = None,
         ) -> None:
+            # pyrefly: ignore [bad-argument-type]
             super().__init__(f, slot)
             self._value: NoValueSet | Awaitable[_TAwaitableReturnType] = NO_VALUE_SET
 
+        # pyrefly: ignore [bad-override]
         def __get__(
             self, obj: Optional[_TClass], cls: Type[_TClass]
         ) -> Awaitable[_TAwaitableReturnType]:
@@ -409,9 +382,11 @@ except ImportError as e:
             f: Callable[[_TClass], _TReturnType],
             slot: Optional[Descriptor[_TReturnType]] = None,
         ) -> None:
+            # pyrefly: ignore [bad-argument-type]
             super().__init__(f, slot)
             self._value: NoValueSet | _TReturnType = NO_VALUE_SET
 
+        # pyrefly: ignore [bad-override]
         def __get__(self, obj: Optional[_TClass], cls: Type[_TClass]) -> _TReturnType:
             result = self._value
             if not isinstance(result, NoValueSet):
@@ -473,11 +448,6 @@ except ImportError as e:
             else:
                 delattr(inst, self.__name__)
 
-    if sys.version_info < (3, 11):
-
-        def clear_all_shadow_caches() -> None:
-            pass
-
     def clear_caches() -> None:
         pass
 
@@ -514,6 +484,12 @@ except ImportError as e:
         raise RuntimeError(
             "Can't answer whether an object is mortal or immortal from Python code"
         )
+
+    def is_prefork_build() -> bool:
+        return False
+
+    def is_sanitizer_build() -> bool:
+        return False
 
     def remove_frame_evaluator() -> None:
         pass
@@ -581,6 +557,11 @@ def init() -> None:
         return
 
     maybe_enable_parallel_gc()
+
+    # Install CinderX-optimized replacements for hot stdlib paths.
+    from cinderx import _context
+
+    _context.install()
 
     _is_init = True
 

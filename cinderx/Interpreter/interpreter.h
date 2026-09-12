@@ -4,7 +4,7 @@
 
 #include "cinderx/python.h"
 
-// Exporting Ci_PyFunction_Vectorcall.
+// Exporting Ci_PyFunction_Vectorcall and getInterpretedVectorcall.
 #include "cinderx/module_c_state.h"
 
 #include <stdbool.h>
@@ -17,15 +17,10 @@ extern "C" {
 /*
  * The CinderX frame evaluator function (interpreter loop).
  */
-#if PY_VERSION_HEX < 0x030C0000
-PyObject* _Py_HOT_FUNCTION
-Ci_EvalFrame(PyThreadState* tstate, PyFrameObject* f, int throwflag);
-#else
 PyObject* _Py_HOT_FUNCTION Ci_EvalFrame(
     PyThreadState* tstate,
     struct _PyInterpreterFrame* f,
     int throwflag);
-#endif
 
 /*
  * General vectorcall entry point to a function compiled by the Static Python
@@ -48,15 +43,6 @@ PyObject* Ci_PyFunction_CallStatic(
     PyObject* kwnames);
 
 /*
- * Get the appropriate entry point that will execute a function object in the
- * interpreter.
- *
- * This is a different function for Static Python functions versus "normal"
- * Python functions.
- */
-vectorcallfunc getInterpretedVectorcall(const PyFunctionObject* func);
-
-/*
  * Install the CinderX frame evaluator function into the runtime.
  */
 int Ci_InitFrameEvalFunc();
@@ -67,9 +53,6 @@ int Ci_InitFrameEvalFunc();
 void Ci_FiniFrameEvalFunc();
 
 void Ci_InitOpcodes();
-
-extern bool Ci_DelayAdaptiveCode;
-extern uint64_t Ci_AdaptiveThreshold;
 
 #ifdef __cplusplus
 }

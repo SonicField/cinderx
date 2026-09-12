@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+from __future__ import annotations
 
 """
 Generic bisection tool to find minimal subset of items that cause a command to fail.
@@ -226,7 +227,7 @@ def read_items_file(file_path: str) -> list[str]:
     return items
 
 
-def main():
+def main() -> int | None:
     parser = argparse.ArgumentParser(
         description="Find minimal subset of items that cause a command to fail",
         formatter_class=argparse.RawDescriptionHelpFormatter,

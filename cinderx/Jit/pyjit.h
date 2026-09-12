@@ -9,7 +9,7 @@
 #include "cinderx/Jit/hir/preload.h"
 #include "cinderx/Jit/pyjit_result.h"
 
-namespace jit {
+namespace cinderx::jit {
 
 /*
  * This defines the global public API for the JIT that is consumed by the
@@ -36,6 +36,18 @@ int initialize();
 void finalize();
 
 /*
+ * Stop the background-compilation worker (if any) and cancel all in-flight
+ * background compiles to finish.
+ *
+ * Background compilation stays disabled afterwards; this is only meant to be
+ * called on the way out of the interpreter, and a worker started after the
+ * drain can no longer be joined once the runtime is finalizing.  Background
+ * compilation comes back when the JIT is re-initialized, which builds a fresh
+ * registry.
+ */
+void cancelBackgroundCompiles();
+
+/*
  * Overwrite the entry point of a function so that it tries to JIT-compile
  * itself in the future.
  *
@@ -53,10 +65,8 @@ bool scheduleJitCompile(BorrowedRef<PyFunctionObject> func);
  * JIT compile func and patch its entry point.
  *
  * On success, positional only calls to func will use the JIT compiled version.
- *
- * Returns PYJIT_RESULT_OK on success.
  */
-_PyJIT_Result compileFunction(BorrowedRef<PyFunctionObject> func);
+Result compileFunction(BorrowedRef<PyFunctionObject> func);
 
 /*
  * Preload a function, along with any functions that it calls that we might want
@@ -85,70 +95,17 @@ void typeModified(BorrowedRef<PyTypeObject> type);
 void typeNameModified(BorrowedRef<PyTypeObject> type);
 
 // Exposed for unit tests
-_PyJIT_Result compilePreloaderImpl(
+//
+// Takes ownership of `func`, which the caller must have referenced while it
+// held the GIL, and hands it to whichever structure ends up keeping the
+// function alive past this call.  The returned reference is whatever was left
+// over -- null once something took the function over.  Threaded compiles run
+// with the GIL released and so cannot reference or release the function
+// themselves; they must pass one in and give the leftover back to someone who
+// releases it under the GIL.
+std::pair<Result, Ref<PyFunctionObject>> compilePreloaderImpl(
     jit::CompilerContext<Compiler>* jit_ctx,
     const hir::Preloader& preloader,
-    BorrowedRef<PyFunctionObject> func);
+    Ref<PyFunctionObject>&& func);
 
-} // namespace jit
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-#if PY_VERSION_HEX < 0x030C0000
-/*
- * Send into/resume a suspended JIT generator and return the result.
- */
-PyObject* _PyJIT_GenSend(
-    PyGenObject* gen,
-    PyObject* arg,
-    int exc,
-    PyFrameObject* f,
-    PyThreadState* tstate,
-    int finish_yield_from);
-
-/*
- * Materialize the frame for gen. Returns a borrowed reference.
- */
-PyFrameObject* _PyJIT_GenMaterializeFrame(PyGenObject* gen);
-
-/*
- * Visit owned references in a JIT-backed generator object.
- */
-int _PyJIT_GenVisitRefs(PyGenObject* gen, visitproc visit, void* arg);
-
-/*
- * Release any JIT-related data in a PyGenObject.
- */
-void _PyJIT_GenDealloc(PyGenObject* gen);
-
-/*
- * Return current sub-iterator from JIT generator or NULL if there is none.
- */
-PyObject* _PyJIT_GenYieldFromValue(PyGenObject* gen);
-
-/*
- * Returns a borrowed reference to the globals for the top-most Python function
- * associated with tstate.
- */
-PyObject* _PyJIT_GetGlobals(PyThreadState* tstate);
-
-/*
- * Returns a borrowed reference to the builtins for the top-most Python function
- * associated with tstate.
- */
-PyObject* _PyJIT_GetBuiltins(PyThreadState* tstate);
-
-/*
- * Returns a borrowed reference to the top-most frame of tstate.
- *
- * When shadow frame mode is active, calling this function will materialize
- * PyFrameObjects for any jitted functions on the call stack.
- */
-PyFrameObject* _PyJIT_GetFrame(PyThreadState* tstate);
-#endif
-
-#ifdef __cplusplus
-} // extern "C"
-#endif
+} // namespace cinderx::jit

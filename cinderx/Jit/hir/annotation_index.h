@@ -3,53 +3,54 @@
 #pragma once
 
 #include "cinderx/Common/ref.h"
+#include "cinderx/Common/sorted_vec_map.h"
+#include "cinderx/Jit/hir/type.h"
 
 #include <memory>
 
-namespace jit::hir {
+namespace cinderx::jit::hir {
 
-// When building type annotation guards, we have to find the annotations by
-// specific names. For short lists, we can iterate directly through the tuple.
-// However, once it gets big enough, it becomes more efficient to build a
-// dictionary and loop through that instead.
+// Maps argument names to their type annotations so the HIR builder can emit
+// argument type guards.
+//
+// The annotation snapshot is built once, in the constructor, while the GIL is
+// held (during preload).  find() then reads only C++ state, so it is safe to
+// call from a background compile that builds HIR with the GIL released -- it
+// must never touch the Python C-API.
+//
+// Lookups compare names by pointer identity.  Argument names (from
+// co_varnames) and annotation keys are interned, so identity matches what
+// value-equality would find; a name that is somehow not interned simply
+// produces no guard, which is safe (guards are an optimization, not required
+// for correctness).
 class AnnotationIndex {
  public:
-  // Retrieve the annotation for the given name, or return nullptr.
-  PyObject* find(PyObject* name) {
-    if (dict_) {
-      return PyDict_GetItem(dict_, name);
-    }
-    for (Py_ssize_t index = 0; index < size_; index += 2) {
-      if (name == PyTuple_GET_ITEM(annotations_, index)) {
-        return PyTuple_GET_ITEM(annotations_, index + 1);
-      }
-    }
-    return nullptr;
-  }
-
-  static std::unique_ptr<AnnotationIndex> from_function(
+  static std::unique_ptr<AnnotationIndex> fromFunction(
       BorrowedRef<PyFunctionObject> func);
 
+  // Retrieve the annotation for the given name, or return nullptr.  Pure C++;
+  // safe to call with the GIL released.
+  const OwnedType* find(BorrowedRef<> name) const;
+
  private:
-  explicit AnnotationIndex(BorrowedRef<PyTupleObject> annotations)
-      : annotations_(annotations) {
-    size_ = PyTuple_GET_SIZE(annotations_);
-    if (size_ >= 16) {
-      dict_ = Ref<>::steal(PyDict_New());
-      for (Py_ssize_t index = 0; index < size_; index += 2) {
-        PyObject* key = PyTuple_GET_ITEM(annotations_, index);
-        PyObject* value = PyTuple_GET_ITEM(annotations_, index + 1);
-        PyDict_SetItem(dict_, key, value);
-      }
-    }
-  }
+  // Built from the flattened (name, annotation, ...) tuple used before 3.14.
+  explicit AnnotationIndex(BorrowedRef<PyTupleObject> annotations);
 
-  explicit AnnotationIndex(BorrowedRef<PyDictObject> dict)
-      : dict_(Ref<>::create((PyObject*)dict)) {}
+  // Built from the __annotations__ dict used on 3.14+.
+  explicit AnnotationIndex(BorrowedRef<PyDictObject> dict);
 
-  BorrowedRef<PyTupleObject> annotations_;
-  Ref<> dict_ = nullptr;
-  Py_ssize_t size_;
+  // Add a new annotation to the index.
+  void addAnnotation(BorrowedRef<> key, BorrowedRef<> value);
+
+  // Handle annotations that are parameterized generic aliases by reducing them
+  // down to their origin type (e.g. `list[int]` -> `list`).  This gives us a
+  // type that can be guarded against.
+  Ref<> handleGeneric(BorrowedRef<> annotation);
+
+  Ref<> owner_;
+  SortedVecMap<Ref<PyUnicodeObject>, OwnedType, RefLess<PyUnicodeObject>>
+      annotations_;
+  Ref<PyUnicodeObject> origin_;
 };
 
-} // namespace jit::hir
+} // namespace cinderx::jit::hir

@@ -46,6 +46,7 @@ cached_classproperty_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
     PyObject* name;
     if (PyFunction_Check(func)) {
       name = ((PyFunctionObject*)func)->func_name;
+      Py_INCREF(name);
     } else {
       name = PyObject_GetAttrString(func, "__name__");
       if (name == NULL) {
@@ -56,7 +57,6 @@ cached_classproperty_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
     descr->func = func;
     descr->name = name;
     Py_INCREF(func);
-    Py_INCREF(name);
   }
   return (PyObject*)descr;
 }
@@ -542,7 +542,6 @@ PyTypeObject PyCachedProperty_Type = {
 
 PyTypeObject PyCachedPropertyWithDescr_Type = {
     PyVarObject_HEAD_INIT(NULL, 0).tp_name = "cached_property_with_descr",
-    .tp_base = &PyCachedProperty_Type,
     .tp_basicsize = sizeof(PyCachedPropertyDescrObject),
     .tp_dealloc = (destructor)cached_property_dealloc,
     .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC | Py_TPFLAGS_BASETYPE,
@@ -627,7 +626,6 @@ static inline int import_async_lazy_value() {
     }
     DEFINE_STATIC_STRING(AsyncLazyValue);
     _AsyncLazyValue_Type = PyObject_GetAttr(module, s_AsyncLazyValue);
-#if PY_VERSION_HEX >= 0x030C0000
     // _asyncio can be overridden with a version that has AsyncLazyValue,
     // if it's not there fallback to CinderX's builtin version.
     if (_AsyncLazyValue_Type == NULL) {
@@ -639,7 +637,6 @@ static inline int import_async_lazy_value() {
       }
       _AsyncLazyValue_Type = PyObject_GetAttr(module, s_AsyncLazyValue);
     }
-#endif
     Py_DECREF(module);
     if (_AsyncLazyValue_Type == NULL) {
       return -1;

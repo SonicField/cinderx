@@ -9,17 +9,26 @@
 #include <array>
 #include <utility>
 
-namespace jit::lir {
+namespace cinderx::jit::lir {
 
-#define COUNT_INSTR(...) +1
-constexpr size_t kNumOpcodes = FOREACH_INSTR_TYPE(COUNT_INSTR);
-#undef COUNT_INSTR
+std::unique_ptr<Instruction> Instruction::makePhi(
+    BasicBlock* basic_block,
+    const hir::Instr* origin) {
+  auto instruction =
+      std::make_unique<Instruction>(basic_block, Opcode::kPhi, origin);
+  instruction->setNumInputs(basic_block->numPredecessors());
+  return instruction;
+}
 
-constexpr std::array<std::string_view, kNumOpcodes> kOpcodeNames = {
-#define INSTR_DECL_TYPE(v, ...) #v,
-    FOREACH_INSTR_TYPE(INSTR_DECL_TYPE)
-#undef INSTR_DECL_TYPE
-};
+std::unique_ptr<Instruction> Instruction::makePhi(
+    BasicBlock* basic_block,
+    Instruction* instruction,
+    const hir::Instr* origin) {
+  JIT_CHECK(instruction->isPhi(), "Instruction is not a phi");
+  auto copy = std::make_unique<Instruction>(basic_block, instruction, origin);
+  copy->setNumInputs(basic_block->numPredecessors());
+  return copy;
+}
 
 Instruction::Instruction(
     BasicBlock* basic_block,
@@ -37,6 +46,7 @@ Instruction::Instruction(
     const hir::Instr* origin)
     : id_(bb->function()->allocateId()),
       opcode_(instr->opcode_),
+      cond_(instr->cond_),
       output_(this, &instr->output_),
       basic_block_(bb),
       origin_(origin) {}
@@ -65,25 +75,105 @@ size_t Instruction::getNumInputs() const {
   return inputs_.size();
 }
 
+size_t Instruction::numPhiInputs() const {
+  JIT_CHECK(isPhi(), "Instruction is not a phi");
+  return inputs_.size();
+}
+
+BasicBlock* Instruction::phiPredecessor(size_t index) const {
+  JIT_CHECK(index < numPhiInputs(), "Phi input index out of range");
+  return basic_block_->predecessor(index);
+}
+
+Operand* Instruction::phiInput(size_t index) {
+  JIT_CHECK(index < numPhiInputs(), "Phi input index out of range");
+  return getInput(index);
+}
+
+const Operand* Instruction::phiInput(size_t index) const {
+  JIT_CHECK(index < numPhiInputs(), "Phi input index out of range");
+  return getInput(index);
+}
+
+void Instruction::addPhiInput(IncomingEdge edge, Instruction* value) {
+  JIT_CHECK(value != nullptr, "Phi input value is null");
+  addPhiInput(edge, std::make_unique<Operand>(value, Operand::kLinked));
+}
+
+void Instruction::addPhiInput(
+    IncomingEdge edge,
+    std::unique_ptr<Operand> value) {
+  JIT_CHECK(isPhi(), "Instruction is not a phi");
+  JIT_CHECK(value != nullptr, "Phi input value is null");
+  JIT_CHECK(edge.successor() == basic_block_, "Edge belongs to another block");
+
+  const size_t incoming_slot = edge.incomingSlot();
+  const size_t num_predecessors = basic_block_->numPredecessors();
+  JIT_CHECK(incoming_slot < num_predecessors, "Incoming slot out of range");
+
+  JIT_CHECK(
+      numPhiInputs() == num_predecessors,
+      "Phi input slots do not match predecessors");
+
+  JIT_CHECK(inputs_[incoming_slot] == nullptr, "Phi input already set");
+  setInput(incoming_slot, std::move(value));
+}
+
+void Instruction::setPhiInput(size_t index, std::unique_ptr<Operand> value) {
+  JIT_CHECK(isPhi(), "Instruction is not a phi");
+  JIT_CHECK(index < numPhiInputs(), "Phi input index out of range");
+  JIT_CHECK(value != nullptr, "Phi input value is null");
+  setInput(index, std::move(value));
+}
+
+void Instruction::erasePhiInput(size_t index) {
+  JIT_CHECK(isPhi(), "Instruction is not a phi");
+  if (inputs_.empty()) {
+    return;
+  }
+  JIT_CHECK(index < numPhiInputs(), "Phi input index out of range");
+  if (inputs_[index] != nullptr) {
+    inputs_[index]->releaseFromInstr();
+  }
+  inputs_.erase(inputs_.begin() + index);
+}
+
+void Instruction::compactPhiInputs(const std::vector<bool>& keep) {
+  JIT_CHECK(isPhi(), "Instruction is not a phi");
+  JIT_CHECK(keep.size() == inputs_.size(), "Phi keep mask size mismatch");
+
+  size_t output = 0;
+  for (size_t input = 0; input < inputs_.size(); ++input) {
+    if (keep[input]) {
+      if (output != input) {
+        inputs_[output] = std::move(inputs_[input]);
+      }
+      ++output;
+    } else if (inputs_[input] != nullptr) {
+      inputs_[input]->releaseFromInstr();
+    }
+  }
+  inputs_.resize(output);
+}
+
 void Instruction::setNumInputs(size_t n) {
   inputs_.resize(n);
 }
 
 size_t Instruction::getNumOutputs() const {
-  return output_.type() == OperandBase::kNone ? 0 : 1;
+  return output_.type() == Operand::kNone ? 0 : 1;
 }
 
-OperandBase* Instruction::getInput(size_t i) {
+Operand* Instruction::getInput(size_t i) {
   return inputs_.at(i).get();
 }
 
-const OperandBase* Instruction::getInput(size_t i) const {
+const Operand* Instruction::getInput(size_t i) const {
   return inputs_.at(i).get();
 }
 
 Operand* Instruction::allocateImmediateInput(uint64_t n, DataType data_type) {
-  auto operand =
-      std::make_unique<Operand>(this, data_type, OperandBase::kImm, n);
+  auto operand = std::make_unique<Operand>(this, data_type, Operand::kImm, n);
   auto opnd = operand.get();
   inputs_.push_back(std::move(operand));
 
@@ -91,16 +181,16 @@ Operand* Instruction::allocateImmediateInput(uint64_t n, DataType data_type) {
 }
 
 Operand* Instruction::allocateFPImmediateInput(double n) {
-  auto operand = std::make_unique<Operand>(this, OperandBase::kImm, n);
+  auto operand = std::make_unique<Operand>(this, Operand::kImm, n);
   auto opnd = operand.get();
   inputs_.push_back(std::move(operand));
 
   return opnd;
 }
 
-LinkedOperand* Instruction::allocateLinkedInput(Instruction* def_instr) {
-  auto operand = std::make_unique<LinkedOperand>(this, def_instr);
-  auto opnd = operand.get();
+Operand* Instruction::allocateLinkedInput(Instruction* def_instr) {
+  auto operand = std::make_unique<Operand>(this, def_instr, Operand::kLinked);
+  Operand* opnd = operand.get();
   inputs_.push_back(std::move(operand));
   return opnd;
 }
@@ -125,19 +215,23 @@ Operand* Instruction::allocateLabelInput(BasicBlock* block) {
   return allocateOperand(&Operand::setBasicBlock, block);
 }
 
-void Instruction::setbasicblock(BasicBlock* bb) {
+Operand* Instruction::allocateAsmLabelInput(const asmjit::Label& label) {
+  return allocateOperand(&Operand::setAsmLabel, label);
+}
+
+void Instruction::setBasicBlock(BasicBlock* bb) {
   basic_block_ = bb;
 }
 
-BasicBlock* Instruction::basicblock() {
+BasicBlock* Instruction::basicBlock() {
   return basic_block_;
 }
 
-const BasicBlock* Instruction::basicblock() const {
+const BasicBlock* Instruction::basicBlock() const {
   return basic_block_;
 }
 
-Instruction::Opcode Instruction::opcode() const {
+Opcode Instruction::opcode() const {
   return opcode_;
 }
 
@@ -145,257 +239,88 @@ void Instruction::setOpcode(Opcode opcode) {
   opcode_ = opcode;
 }
 
-std::string_view Instruction::opname() const {
-  return kOpcodeNames[opcode_];
+Condition Instruction::condition() const {
+  JIT_DCHECK(
+      carriesCondition(opcode_),
+      "{} carries no condition",
+      lir::opname(opcode_));
+  return cond_;
 }
 
-void Instruction::setInput(size_t i, std::unique_ptr<OperandBase> input) {
+void Instruction::setCondition(Condition cond) {
+  JIT_DCHECK(
+      carriesCondition(opcode_),
+      "{} carries no condition",
+      lir::opname(opcode_));
+  cond_ = cond;
+}
+
+std::string_view Instruction::opname() const {
+  // BranchCC and Compare print under the per-condition names the opcodes used
+  // to have, so LIR dumps read the same as before the condition became a field.
+  switch (opcode_) {
+    case Opcode::kBranchCC:
+      return branchCCName(cond_);
+    case Opcode::kCompare:
+      return compareName(cond_);
+    default:
+      break;
+  }
+  return lir::opname(opcode());
+}
+
+void Instruction::setInput(size_t i, std::unique_ptr<Operand> input) {
+  JIT_CHECK(input != nullptr, "Input operand is null");
+  JIT_CHECK(!isPhi() || !input->isLabel(), "Phi inputs must be values");
   inputs_.at(i) = std::move(input);
   inputs_[i]->assignToInstr(this);
 }
 
-std::unique_ptr<OperandBase> Instruction::removeInput(size_t index) {
+std::unique_ptr<Operand> Instruction::removeInput(size_t index) {
   auto operand = releaseInput(index);
   inputs_.erase(inputs_.begin() + index);
   return operand;
 }
 
-std::unique_ptr<OperandBase> Instruction::releaseInput(size_t index) {
+std::unique_ptr<Operand> Instruction::releaseInput(size_t index) {
   auto& operand = inputs_.at(index);
   operand->releaseFromInstr();
   return std::move(inputs_.at(index));
 }
 
-OperandBase* Instruction::appendInput(std::unique_ptr<OperandBase> operand) {
-  auto operand_ptr = operand.get();
+Operand* Instruction::appendInput(std::unique_ptr<Operand> operand) {
+  Operand* operand_ptr = operand.get();
   // Use setInput() to call assignToInstr().
   inputs_.emplace_back();
   setInput(getNumInputs() - 1, std::move(operand));
   return operand_ptr;
 }
 
-OperandBase* Instruction::prependInput(std::unique_ptr<OperandBase> operand) {
-  auto operand_ptr = operand.get();
+Operand* Instruction::prependInput(std::unique_ptr<Operand> operand) {
+  Operand* operand_ptr = operand.get();
   inputs_.insert(inputs_.begin(), nullptr);
   setInput(0, std::move(operand));
   return operand_ptr;
 }
 
-OperandBase* Instruction::getOperandByPredecessor(const BasicBlock* pred) {
-  auto index = getOperandIndexByPredecessor(pred);
-  return index == -1 ? nullptr : inputs_.at(index).get();
-}
-
-int Instruction::getOperandIndexByPredecessor(const BasicBlock* pred) const {
-  JIT_DCHECK(opcode_ == kPhi, "The current instruction must be Phi.");
-  size_t num_inputs = getNumInputs();
-  for (size_t i = 0; i < num_inputs; i += 2) {
-    if (getInput(i)->getBasicBlock() == pred) {
-      return i + 1;
-    }
-  }
-  return -1;
-}
-
-const OperandBase* Instruction::getOperandByPredecessor(
-    const BasicBlock* pred) const {
-  return const_cast<Instruction*>(this)->getOperandByPredecessor(pred);
-}
-
 bool Instruction::getOutputPhyRegUse() const {
-  return InstrProperty::getProperties(opcode_).output_phy_use;
+  return outputMustBeRegister(opcode_);
 }
 
 bool Instruction::getInputPhyRegUse(size_t i) const {
-  // If the output of a move instruction is a memory location, then its input
-  // needs to be a physical register. Otherwise we might generate a mem->mem
-  // move, which we can't safely handle for all bit widths in codegen (since
-  // push/pop aren't available for all bit widths).
-  if ((isMove() || isMoveRelaxed()) && output_.isInd()) {
+  // If the output of a move/store instruction is a memory location, then its
+  // input needs to be a physical register. Otherwise we might generate a
+  // mem->mem move, which we can't safely handle for all bit widths in codegen
+  // (since push/pop aren't available for all bit widths).
+  if ((isMove() || isMoveRelaxed() || isStore()) && output_.isInd()) {
     return true;
   }
 
-  auto& uses = InstrProperty::getProperties(opcode_).input_phy_uses;
-  if (i >= uses.size()) {
-    return false;
-  }
-
-  return uses.at(i);
+  return inputMustBeRegister(opcode_, i);
 }
 
 bool Instruction::inputsLiveAcross() const {
-  return InstrProperty::getProperties(opcode_).inputs_live_across;
+  return lir::inputsLiveAcross(opcode_);
 }
 
-bool Instruction::isCompare() const {
-  switch (opcode_) {
-    case kEqual:
-    case kNotEqual:
-    case kGreaterThanSigned:
-    case kLessThanSigned:
-    case kGreaterThanEqualSigned:
-    case kLessThanEqualSigned:
-    case kGreaterThanUnsigned:
-    case kLessThanUnsigned:
-    case kGreaterThanEqualUnsigned:
-    case kLessThanEqualUnsigned:
-      return true;
-    default:
-      return false;
-  }
-}
-
-bool Instruction::isBranchCC() const {
-  switch (opcode_) {
-    case kBranchC:
-    case kBranchNC:
-    case kBranchO:
-    case kBranchNO:
-    case kBranchS:
-    case kBranchNS:
-    case kBranchZ:
-    case kBranchNZ:
-    case kBranchA:
-    case kBranchB:
-    case kBranchBE:
-    case kBranchAE:
-    case kBranchL:
-    case kBranchG:
-    case kBranchLE:
-    case kBranchGE:
-    case kBranchE:
-    case kBranchNE:
-      return true;
-    default:
-      return false;
-  }
-}
-
-bool Instruction::isAnyBranch() const {
-  return (opcode_ == kCondBranch) || isBranchCC();
-}
-
-bool Instruction::isTerminator() const {
-  switch (opcode_) {
-    case kReturn:
-      return true;
-    default:
-      return false;
-  }
-}
-
-bool Instruction::isAnyYield() const {
-  switch (opcode_) {
-    case kYieldFrom:
-    case kYieldFromHandleStopAsyncIteration:
-    case kYieldFromSkipInitialSend:
-    case kYieldInitial:
-    case kYieldValue:
-      return true;
-    default:
-      return false;
-  }
-}
-
-#define CASE_FLIP(op1, op2) \
-  case op1:                 \
-    return op2;             \
-  case op2:                 \
-    return op1;
-
-Instruction::Opcode Instruction::negateBranchCC(Opcode opcode) {
-  switch (opcode) {
-    CASE_FLIP(kBranchC, kBranchNC)
-    CASE_FLIP(kBranchO, kBranchNO)
-    CASE_FLIP(kBranchS, kBranchNS)
-    CASE_FLIP(kBranchZ, kBranchNZ)
-    CASE_FLIP(kBranchA, kBranchBE)
-    CASE_FLIP(kBranchB, kBranchAE)
-    CASE_FLIP(kBranchL, kBranchGE)
-    CASE_FLIP(kBranchG, kBranchLE)
-    CASE_FLIP(kBranchE, kBranchNE)
-    default:
-      JIT_ABORT("Not a conditional branch opcode: {}", kOpcodeNames[opcode]);
-  }
-}
-
-Instruction::Opcode Instruction::flipBranchCCDirection(Opcode opcode) {
-  switch (opcode) {
-    CASE_FLIP(kBranchA, kBranchB)
-    CASE_FLIP(kBranchAE, kBranchBE)
-    CASE_FLIP(kBranchL, kBranchG)
-    CASE_FLIP(kBranchLE, kBranchGE)
-    default:
-      JIT_ABORT(
-          "Unable to flip branch condition for opcode: {}",
-          kOpcodeNames[opcode]);
-  }
-}
-
-Instruction::Opcode Instruction::flipComparisonDirection(Opcode opcode) {
-  switch (opcode) {
-    CASE_FLIP(kGreaterThanEqualSigned, kLessThanEqualSigned)
-    CASE_FLIP(kGreaterThanEqualUnsigned, kLessThanEqualUnsigned)
-    CASE_FLIP(kGreaterThanSigned, kLessThanSigned)
-    CASE_FLIP(kGreaterThanUnsigned, kLessThanUnsigned)
-    case kEqual:
-      return kEqual;
-    case kNotEqual:
-      return kNotEqual;
-    default:
-      JIT_ABORT(
-          "Unable to flip comparison direction for opcode: {}",
-          kOpcodeNames[opcode]);
-  }
-}
-
-#undef CASE_FLIP
-
-Instruction::Opcode Instruction::compareToBranchCC(Opcode opcode) {
-  switch (opcode) {
-    case kEqual:
-      return kBranchE;
-    case kNotEqual:
-      return kBranchNE;
-    case kGreaterThanUnsigned:
-      return kBranchA;
-    case kLessThanUnsigned:
-      return kBranchB;
-    case kGreaterThanEqualUnsigned:
-      return kBranchAE;
-    case kLessThanEqualUnsigned:
-      return kBranchBE;
-    case kGreaterThanSigned:
-      return kBranchG;
-    case kLessThanSigned:
-      return kBranchL;
-    case kGreaterThanEqualSigned:
-      return kBranchGE;
-    case kLessThanEqualSigned:
-      return kBranchLE;
-    default:
-      JIT_ABORT("Not a compare opcode.");
-  }
-}
-
-InstrProperty::InstrInfo& InstrProperty::getProperties(
-    Instruction::Opcode opcode) {
-  return prop_map_.at(opcode);
-}
-
-#define BEGIN_INSTR_PROPERTY \
-  std::vector<InstrProperty::InstrInfo> InstrProperty::prop_map_ = {
-#define END_INSTR_PROPERTY \
-  }                        \
-  ;
-
-#define PROPERTY(__t, __p...) {#__t, __p},
-
-// clang-format off
-// This table contains definitions of all the properties for each instruction type.
-BEGIN_INSTR_PROPERTY
-  FOREACH_INSTR_TYPE(PROPERTY)
-END_INSTR_PROPERTY
-// clang-format on
-
-} // namespace jit::lir
+} // namespace cinderx::jit::lir

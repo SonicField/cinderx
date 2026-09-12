@@ -2,9 +2,13 @@
 
 #include "cinderx/Jit/code_allocator.h"
 
+#include "cinderx/Common/fork_support.h"
 #include "cinderx/Common/log.h"
+#include "cinderx/Jit/codegen/code_section.h"
 #include "cinderx/Jit/config.h"
-#include "cinderx/Jit/threaded_compile.h"
+#include "cinderx/Jit/jit_rt.h"
+#include "cinderx/Jit/write_protect.h"
+#include "cinderx/module_state.h"
 
 #ifdef WIN32
 #include <Windows.h>
@@ -15,7 +19,7 @@
 
 #include <cstring>
 
-namespace jit {
+namespace cinderx::jit {
 
 using codegen::CodeSection;
 using codegen::codeSectionFromName;
@@ -29,29 +33,6 @@ namespace {
 
 // 2MiB to match Linux's huge-page size.
 constexpr size_t kAllocSize = 1024 * 1024 * 2;
-
-// Allocate memory for JIT'd code.
-uint8_t* allocPages(size_t size) {
-#ifndef WIN32
-  void* res = mmap(
-      nullptr,
-      size,
-      PROT_EXEC | PROT_READ | PROT_WRITE,
-      MAP_PRIVATE | MAP_ANONYMOUS,
-      -1,
-      0);
-  JIT_CHECK(
-      res != MAP_FAILED,
-      "Failed to allocate {} bytes of memory for code",
-      size);
-#else
-  void* res = VirtualAlloc(
-      nullptr, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-  JIT_CHECK(
-      res != nullptr, "Failed to allocate {} bytes of memory for code", size);
-#endif
-  return static_cast<uint8_t*>(res);
-}
 
 bool setHugePages([[maybe_unused]] void* ptr, [[maybe_unused]] size_t size) {
 #ifdef MADV_HUGEPAGE
@@ -70,18 +51,142 @@ bool setHugePages([[maybe_unused]] void* ptr, [[maybe_unused]] size_t size) {
   return false;
 }
 
+#if defined(__linux__)
+// The linker script (instagram/server/native_python/linker_script.ld) reserves
+// a region of address space immediately after .text for JIT code, delimited by
+// these symbols. They are declared weak so that binaries built without the
+// linker script (where the region doesn't exist) still link, with both symbols
+// resolving to nullptr.
+extern "C" {
+extern char __cinder_jit_start[] __attribute__((weak));
+extern char __cinder_jit_end[] __attribute__((weak));
+}
+
+// Bump-allocator state for the linker-reserved __cinder_jit region. It's global
+// process data so it's protected by cinder_jit_region_mutex_.
+bool s_cinder_jit_region_checked = false;
+std::atomic<uint8_t*> s_cinder_jit_cur = nullptr;
+size_t s_cinder_jit_free = 0;
+std::mutex cinder_jit_region_mutex_;
+
+// Prepare the linker-reserved __cinder_jit region for use. Called once on the
+// first allocation. On success s_cinder_jit_cur points at the region with
+// s_cinder_jit_free bytes remaining; on failure s_cinder_jit_cur stays nullptr
+// and callers fall back to hinted allocation.
+//
+// The region comes from a `.cinder_jit (NOLOAD)` section in the linker script.
+// Because that section is allocatable (SHF_ALLOC), the linker places it in a
+// PT_LOAD segment, so the dynamic loader has *already mapped* this address
+// range (as demand-zero anonymous pages) by the time we get here -- typically
+// read-only, since the section carries no write/execute flags. We need to
+// we upgrade the existing mapping's protection to RWX with mprotect.
+void initCinderJitRegion() {
+  // Read the weak symbols into locals so the nullptr checks are on a pointer
+  // value (a weak undefined symbol resolves to nullptr) rather than the address
+  // of an array, which compilers would otherwise fold to always-true.
+  char* start = __cinder_jit_start;
+  char* end = __cinder_jit_end;
+  if (start == nullptr || end == nullptr || end <= start) {
+    // Binary wasn't linked with the linker script that reserves the region.
+    return;
+  }
+
+  size_t region_size = static_cast<size_t>(end - start);
+
+  // The loader maps the region's PT_LOAD segment; make it writable and
+  // executable so we can emit and run JIT code from it.
+  if (mprotect(start, region_size, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+    JIT_LOG(
+        "Failed to mprotect cinder_jit region [{}, {}) as RWX, errno={}; "
+        "falling back to hinted allocation",
+        static_cast<void*>(start),
+        static_cast<void*>(end),
+        errno);
+    return;
+  }
+
+  setHugePages(start, region_size);
+
+  s_cinder_jit_cur.store(
+      reinterpret_cast<uint8_t*>(start), std::memory_order_relaxed);
+  s_cinder_jit_free = region_size;
+}
+
+// Bump-allocate `size` bytes from the linker-reserved __cinder_jit region.
+// Returns nullptr if the region is unavailable or exhausted, in which case the
+// caller falls back to hinted allocation. The returned memory is already mapped
+// PROT_READ | PROT_WRITE | PROT_EXEC.
+uint8_t* allocFromCinderJitRegion(size_t size) {
+  if (s_cinder_jit_cur.load(std::memory_order_relaxed) == nullptr) {
+    return nullptr;
+  }
+
+  std::lock_guard lock{cinder_jit_region_mutex_};
+  if (size > s_cinder_jit_free) {
+    return nullptr;
+  }
+  uint8_t* res = s_cinder_jit_cur;
+  s_cinder_jit_cur.fetch_add(size, std::memory_order_relaxed);
+  s_cinder_jit_free -= size;
+  return res;
+}
+#endif // __linux__
+
+// Allocate memory for JIT'd code.
+uint8_t* allocPages(size_t size) {
+#if defined(__linux__)
+  if (getConfig().mem.hinted_code_allocation) {
+    // Prefer the linker-reserved region near .text when it is
+    // present. This region was reserved by the linker and it's up to the
+    // build system to reserve this near hot code.
+    if (uint8_t* region = allocFromCinderJitRegion(size); region != nullptr) {
+      return region;
+    }
+  }
+#endif
+
+#ifndef WIN32
+  int flags = MAP_PRIVATE | MAP_ANONYMOUS;
+#ifdef __APPLE__
+  flags |= MAP_JIT;
+#endif
+  void* res =
+      mmap(nullptr, size, PROT_EXEC | PROT_READ | PROT_WRITE, flags, -1, 0);
+  JIT_CHECK(
+      res != MAP_FAILED,
+      "Failed to allocate {} bytes of memory for code",
+      size);
+#else
+  void* res = VirtualAlloc(
+      nullptr, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+  JIT_CHECK(
+      res != nullptr, "Failed to allocate {} bytes of memory for code", size);
+#endif
+  return static_cast<uint8_t*>(res);
+}
+
 } // namespace
 
+CodeAllocator::CodeAllocator() {
+#if defined(__linux__)
+  std::lock_guard lock{cinder_jit_region_mutex_};
+  if (!s_cinder_jit_region_checked) {
+    s_cinder_jit_region_checked = true;
+    initCinderJitRegion();
+  }
+#endif
+}
+
 ICodeAllocator* CodeAllocator::make() {
-  if (getConfig().multiple_code_sections) {
-    return new MultipleSectionCodeAllocator{};
-  } else if (getConfig().use_huge_pages) {
+  if (getConfig().mem.huge_pages) {
     return new CodeAllocatorCinder{};
   }
   return new CodeAllocator{};
 }
 
 AllocateResult CodeAllocator::addCode(asmjit::CodeHolder* code) {
+  std::lock_guard lock{runtime_mutex_};
+
   void* addr = nullptr;
   asmjit::Error error = runtime_.add(&addr, code);
 
@@ -93,11 +198,22 @@ AllocateResult CodeAllocator::addCode(asmjit::CodeHolder* code) {
 }
 
 asmjit::Error CodeAllocator::releaseCode(void* code) {
+  std::lock_guard lock{runtime_mutex_};
+
   // Find the size of the allocated region.
   asmjit::JitAllocator* inner = runtime_.allocator();
   asmjit::JitAllocator::Span span;
   if (auto error = inner->query(span, code); error != asmjit::kErrorOk) {
     return error;
+  }
+
+  // The allocator may not actually free the code.  Zero it out in debug builds
+  // so we know the memory is freed.
+  if constexpr (kDebug) {
+    auto rw = span.rw();
+    if (rw != nullptr) {
+      memset(rw, 0, span.size());
+    }
   }
 
   if (auto error = runtime_.release(code); error != asmjit::kErrorOk) {
@@ -109,9 +225,12 @@ asmjit::Error CodeAllocator::releaseCode(void* code) {
 }
 
 bool CodeAllocator::contains(const void* ptr) const {
+  // query() is internally thread-safe, but it takes asmjit's own lock, which
+  // can't be recovered in a forked child.  Going through runtime_mutex_ keeps
+  // that lock free whenever a fork can happen.
+  std::lock_guard lock{runtime_mutex_};
+
   asmjit::JitAllocator::Span unused;
-  // asmjit docs don't say that query() is thread-safe, but peeking at the
-  // implementation shows that it is.
   return runtime_.allocator()->query(unused, const_cast<void*>(ptr)) ==
       asmjit::kErrorOk;
 }
@@ -122,6 +241,18 @@ size_t CodeAllocator::usedBytes() const {
 
 const asmjit::Environment& CodeAllocator::asmJitEnvironment() const {
   return runtime_.environment();
+}
+
+void CodeAllocator::atForkPrepare() {
+  runtime_mutex_.lock();
+}
+
+void CodeAllocator::atForkParent() {
+  runtime_mutex_.unlock();
+}
+
+void CodeAllocator::atForkChild() {
+  resetMutexAfterFork(runtime_mutex_);
 }
 
 CodeAllocatorCinder::~CodeAllocatorCinder() {
@@ -135,33 +266,178 @@ CodeAllocatorCinder::~CodeAllocatorCinder() {
   }
 }
 
+void CodeAllocatorCinder::ensureSpace(
+    uint8_t*& alloc,
+    size_t& alloc_free,
+    size_t size,
+    bool use_huge_pages) {
+  if (alloc_free >= size) {
+    return;
+  }
+
+  lost_bytes_.fetch_add(alloc_free, std::memory_order_relaxed);
+
+  size_t chunk_size = ((size / kAllocSize) + 1) * kAllocSize;
+  uint8_t* res = allocPages(chunk_size);
+  if (use_huge_pages && setHugePages(res, chunk_size)) {
+    huge_allocs_.fetch_add(1, std::memory_order_relaxed);
+  } else {
+    fragmented_allocs_.fetch_add(1, std::memory_order_relaxed);
+  }
+  alloc = res;
+  allocations_.emplace_back(res, chunk_size);
+  alloc_free = chunk_size;
+}
+
+void CodeAllocatorCinder::ensureSplitSpace(
+    size_t hot_needed,
+    size_t cold_needed) {
+  if (hot_alloc_free_ >= hot_needed && cold_alloc_free_ >= cold_needed) {
+    return;
+  }
+
+  // When either side needs a new allocation, allocate a single contiguous
+  // region and split it. This guarantees hot and cold code are always within
+  // the same mmap region, so cross-section jumps stay within ARM64's relative
+  // branch range (±128MB for B/BL, ±1MB for B.cond). Without this,
+  // independent mmap() calls could place hot and cold regions too far apart,
+  // causing asmjit's relocateToBase()/resolveUnresolvedLinks() to fail with
+  // kErrorInvalidDisplacement.
+  lost_bytes_.fetch_add(
+      hot_alloc_free_ + cold_alloc_free_, std::memory_order_relaxed);
+
+  size_t total_needed = hot_needed + cold_needed;
+  size_t chunk_size = ((total_needed / kAllocSize) + 1) * kAllocSize;
+  uint8_t* res = allocPages(chunk_size);
+  if (setHugePages(res, chunk_size)) {
+    huge_allocs_.fetch_add(1, std::memory_order_relaxed);
+  } else {
+    fragmented_allocs_.fetch_add(1, std::memory_order_relaxed);
+  }
+  allocations_.emplace_back(res, chunk_size);
+
+  // Hot code grows forward from the start, cold code grows forward from a
+  // split point. Split proportionally so each side gets at least what it
+  // requested, distributing any surplus evenly.
+  size_t surplus = chunk_size - total_needed;
+  size_t hot_share = hot_needed + surplus / 2;
+  hot_alloc_ = res;
+  hot_alloc_free_ = hot_share;
+  cold_alloc_ = res + hot_share;
+  cold_alloc_free_ = chunk_size - hot_share;
+}
+
+AllocateResult CodeAllocatorCinder::addSplitCode(asmjit::CodeHolder* code) {
+  size_t hot_size = 0;
+  size_t cold_size = 0;
+
+  for (;;) {
+    // Compute how much space each section type needs.
+    hot_size = 0;
+    cold_size = 0;
+    for (asmjit::Section* section : code->sections()) {
+      CodeSection cs = codeSectionFromName(section->name());
+      if (cs == CodeSection::kCold) {
+        cold_size += section->realSize();
+      } else {
+        hot_size += section->realSize();
+      }
+    }
+
+    // Ensure we have enough space for both hot and cold code.
+#if defined(__aarch64__)
+    // On ARM64, branch displacements are limited (±128MB for B/BL, ±1MB for
+    // B.cond). Allocate hot and cold from a single contiguous region so
+    // cross-section jumps are always in range.
+    ensureSplitSpace(hot_size, cold_size);
+#else
+    // On x86-64, RIP-relative addressing has a ±2GB range which is large enough
+    // that independent allocations are unlikely to exceed it in practice.
+    ensureSpace(hot_alloc_, hot_alloc_free_, hot_size, true);
+    ensureSpace(
+        cold_alloc_,
+        cold_alloc_free_,
+        cold_size,
+        getConfig().mem.cold_code_huge_pages);
+#endif
+
+    // Fix up offsets for each code section before resolving links.
+    // All offsets are relative to the hot allocation base so that asmjit can
+    // resolve cross-section jumps correctly.
+    size_t hot_offset = 0;
+    size_t cold_offset = static_cast<size_t>(cold_alloc_ - hot_alloc_);
+    for (asmjit::Section* section : code->sections()) {
+      CodeSection cs = codeSectionFromName(section->name());
+      if (cs == CodeSection::kCold) {
+        section->setOffset(cold_offset);
+        cold_offset += section->realSize();
+      } else {
+        section->setOffset(hot_offset);
+        hot_offset += section->realSize();
+      }
+    }
+
+    bool changed = false;
+    PROPAGATE_ERROR(code->ensureBranchStubIslands(&changed));
+    if (!changed) {
+      break;
+    }
+  }
+
+  PROPAGATE_ERROR(code->resolveUnresolvedLinks());
+  PROPAGATE_ERROR(code->relocateToBase(uintptr_t(hot_alloc_)));
+
+  void* addr = hot_alloc_;
+  void* cold_addr = cold_alloc_;
+
+  // Copy each section's data to the appropriate allocation.
+  size_t total_size = 0;
+  jitEnableWriting();
+  for (asmjit::Section* section : code->_sections) {
+    size_t buffer_size = section->bufferSize();
+    if (buffer_size == 0) {
+      continue;
+    }
+    CodeSection cs = codeSectionFromName(section->name());
+    if (cs == CodeSection::kCold) {
+      std::memcpy(cold_alloc_, section->data(), buffer_size);
+      cold_alloc_ += buffer_size;
+      cold_alloc_free_ -= buffer_size;
+    } else {
+      std::memcpy(hot_alloc_, section->data(), buffer_size);
+      hot_alloc_ += buffer_size;
+      hot_alloc_free_ -= buffer_size;
+    }
+    total_size += buffer_size;
+  }
+  jitEnableExecuting(addr, hot_size);
+  if (cold_size > 0) {
+    jitEnableExecuting(cold_addr, cold_size);
+  }
+
+  used_bytes_.fetch_add(total_size, std::memory_order_relaxed);
+  return AllocateResult{addr, asmjit::kErrorOk};
+}
+
 AllocateResult CodeAllocatorCinder::addCode(asmjit::CodeHolder* code) {
-  ThreadedCompileSerialize guard;
+  std::lock_guard lock{allocator_mutex_};
+
+  if (getConfig().mem.multiple_code_sections) {
+    return addSplitCode(code);
+  }
 
   PROPAGATE_ERROR(code->flatten());
   PROPAGATE_ERROR(code->resolveUnresolvedLinks());
 
   size_t max_code_size = code->codeSize();
-  size_t alloc_size = ((max_code_size / kAllocSize) + 1) * kAllocSize;
-  if (current_alloc_free_ < max_code_size) {
-    lost_bytes_ += current_alloc_free_;
+  ensureSpace(hot_alloc_, hot_alloc_free_, max_code_size, true);
 
-    uint8_t* res = allocPages(alloc_size);
-    if (!setHugePages(res, alloc_size)) {
-      fragmented_allocs_++;
-    } else {
-      huge_allocs_++;
-    }
-    current_alloc_ = static_cast<uint8_t*>(res);
-    allocations_.emplace_back(res, alloc_size);
-    current_alloc_free_ = alloc_size;
-  }
-
-  PROPAGATE_ERROR(code->relocateToBase(uintptr_t(current_alloc_)));
+  PROPAGATE_ERROR(code->relocateToBase(uintptr_t(hot_alloc_)));
 
   size_t actual_code_size = code->codeSize();
   JIT_CHECK(actual_code_size <= max_code_size, "Code grew during relocation");
 
+  jitEnableWriting();
   for (asmjit::Section* section : code->_sections) {
     size_t offset = section->offset();
     size_t buffer_size = section->bufferSize();
@@ -169,21 +445,22 @@ AllocateResult CodeAllocatorCinder::addCode(asmjit::CodeHolder* code) {
 
     JIT_CHECK(
         offset + buffer_size <= actual_code_size, "Inconsistent code size");
-    std::memcpy(current_alloc_ + offset, section->data(), buffer_size);
+    std::memcpy(hot_alloc_ + offset, section->data(), buffer_size);
 
     if (virtual_size > buffer_size) {
       JIT_CHECK(
           offset + virtual_size <= actual_code_size, "Inconsistent code size");
       std::memset(
-          current_alloc_ + offset + buffer_size, 0, virtual_size - buffer_size);
+          hot_alloc_ + offset + buffer_size, 0, virtual_size - buffer_size);
     }
   }
 
-  void* addr = current_alloc_;
+  void* addr = hot_alloc_;
+  jitEnableExecuting(addr, actual_code_size);
 
-  current_alloc_ += actual_code_size;
-  current_alloc_free_ -= actual_code_size;
-  used_bytes_ += actual_code_size;
+  hot_alloc_ += actual_code_size;
+  hot_alloc_free_ -= actual_code_size;
+  used_bytes_.fetch_add(actual_code_size, std::memory_order_relaxed);
 
   return AllocateResult{addr, asmjit::kErrorOk};
 }
@@ -194,7 +471,7 @@ asmjit::Error CodeAllocatorCinder::releaseCode([[maybe_unused]] void* code) {
 }
 
 bool CodeAllocatorCinder::contains(const void* ptr) const {
-  ThreadedCompileSerialize guard;
+  std::lock_guard lock{allocator_mutex_};
   for (std::span<uint8_t> alloc : allocations_) {
     if (alloc.data() <= ptr && ptr < alloc.data() + alloc.size()) {
       return true;
@@ -203,139 +480,50 @@ bool CodeAllocatorCinder::contains(const void* ptr) const {
   return false;
 }
 
-MultipleSectionCodeAllocator::~MultipleSectionCodeAllocator() {
-  if (code_alloc_ == nullptr) {
-    return;
+void CodeAllocatorCinder::atForkPrepare() {
+  CodeAllocator::atForkPrepare();
+  allocator_mutex_.lock();
+}
+
+void CodeAllocatorCinder::atForkParent() {
+  allocator_mutex_.unlock();
+  CodeAllocator::atForkParent();
+}
+
+void CodeAllocatorCinder::atForkChild() {
+  resetMutexAfterFork(allocator_mutex_);
+  CodeAllocator::atForkChild();
+}
+
+void codeAllocatorAtForkPrepare() {
+  ModuleState* state = cinderx::getModuleState();
+  if (state != nullptr && state->code_allocator != nullptr) {
+    state->code_allocator->atForkPrepare();
   }
-#ifndef WIN32
-  JIT_CHECK(
-      munmap(code_alloc_, total_allocation_size_) == 0,
-      "Freeing code sections failed");
-#else
-  VirtualFree(code_alloc_, 0, MEM_RELEASE);
+#if defined(__linux__)
+  // Innermost: ensureSpace() reaches this while holding allocator_mutex_.
+  cinder_jit_region_mutex_.lock();
 #endif
 }
 
-/*
- * At startup, we allocate a contiguous chunk of memory for all code sections
- * equal to the sum of individual section sizes and subdivide internally. The
- * code is contiguously allocated internally, but logically has pointers into
- * each CodeSection.
- */
-void MultipleSectionCodeAllocator::createSlabs() noexcept {
-  size_t hot_section_size =
-      asmjit::Support::alignUp(getConfig().hot_code_section_size, kAllocSize);
-  JIT_CHECK(
-      hot_section_size > 0,
-      "Hot code section must have non-zero size when using multiple sections.");
-  code_section_free_sizes_[CodeSection::kHot] = hot_section_size;
-
-  size_t cold_section_size = getConfig().cold_code_section_size;
-  JIT_CHECK(
-      cold_section_size > 0,
-      "Cold code section must have non-zero size when using multiple "
-      "sections.");
-  code_section_free_sizes_[CodeSection::kCold] = cold_section_size;
-
-  total_allocation_size_ = hot_section_size + cold_section_size;
-
-  uint8_t* region = allocPages(total_allocation_size_);
-  setHugePages(region, hot_section_size);
-
-  code_alloc_ = region;
-  code_sections_[CodeSection::kHot] = region;
-  region += hot_section_size;
-  code_sections_[CodeSection::kCold] = region;
+void codeAllocatorAtForkParent() {
+#if defined(__linux__)
+  cinder_jit_region_mutex_.unlock();
+#endif
+  ModuleState* state = cinderx::getModuleState();
+  if (state != nullptr && state->code_allocator != nullptr) {
+    state->code_allocator->atForkParent();
+  }
 }
 
-AllocateResult MultipleSectionCodeAllocator::addCode(asmjit::CodeHolder* code) {
-  ThreadedCompileSerialize guard;
-
-  if (code_sections_.empty()) {
-    createSlabs();
+void codeAllocatorAtForkChild() {
+#if defined(__linux__)
+  resetMutexAfterFork(cinder_jit_region_mutex_);
+#endif
+  ModuleState* state = cinderx::getModuleState();
+  if (state != nullptr && state->code_allocator != nullptr) {
+    state->code_allocator->atForkChild();
   }
-
-  size_t potential_code_size = code->codeSize();
-  used_bytes_ += potential_code_size;
-  // We fall back to the default size of code allocation if the
-  // code doesn't fit into either section, and we can make this check more
-  // granular by comparing sizes section-by-section.
-  if (code_section_free_sizes_[CodeSection::kHot] < potential_code_size ||
-      code_section_free_sizes_[CodeSection::kCold] < potential_code_size) {
-    JIT_LOG(
-        "Not enough memory to split code across sections, falling back to "
-        "normal allocation.");
-    void* addr = nullptr;
-    asmjit::Error err = runtime_.add(&addr, code);
-    return AllocateResult{addr, err};
-  }
-
-  // Fix up the offsets for each code section before resolving links.
-  // Both the `.text` and `.addrtab` sections are written to the hot section,
-  // and we need to resolve offsets between them properly.
-  // In order to properly keep track of multiple text sections corresponding to
-  // the same physical section to allocate to, we keep a map from
-  // section->offset from start of hot section.
-  std::unordered_map<CodeSection, uint64_t> offsets;
-  offsets[CodeSection::kHot] = 0;
-  offsets[CodeSection::kCold] =
-      code_sections_[CodeSection::kCold] - code_sections_[CodeSection::kHot];
-
-  for (asmjit::Section* section : code->sections()) {
-    CodeSection code_section = codeSectionFromName(section->name());
-    uint64_t offset = offsets[code_section];
-    uint64_t realSize = section->realSize();
-    section->setOffset(offset);
-    // Since all sections lie on a contiguous slab, we rely on setting the
-    // offsets of sections to allow AsmJit to properly resolve links across
-    // different sections (offset 0 being the start of the hot code section).
-    offsets[code_section] = offset + realSize;
-  }
-
-  // Assuming that the offsets are set properly, relocating all code to be
-  // relative to the start of the hot code will ensure jumps are correct.
-  PROPAGATE_ERROR(code->resolveUnresolvedLinks());
-  PROPAGATE_ERROR(
-      code->relocateToBase(uintptr_t(code_sections_[CodeSection::kHot])));
-
-  // We assume that the hot section of the code is non-empty. This would be
-  // incorrect for a completely cold function.
-  JIT_CHECK(
-      code->textSection()->realSize() > 0,
-      "Every function must have a non-empty hot section.");
-  void* addr = code_sections_[CodeSection::kHot];
-
-  for (asmjit::Section* section : code->_sections) {
-    size_t buffer_size = section->bufferSize();
-    // Might not have generated any cold code.
-    if (buffer_size == 0) {
-      continue;
-    }
-    CodeSection code_section = codeSectionFromName(section->name());
-    code_section_free_sizes_[code_section] -= buffer_size;
-    std::memcpy(code_sections_[code_section], section->data(), buffer_size);
-    code_sections_[code_section] += buffer_size;
-  }
-
-  return AllocateResult{addr, asmjit::kErrorOk};
 }
 
-asmjit::Error MultipleSectionCodeAllocator::releaseCode(
-    [[maybe_unused]] void* code) {
-  // TODO(T233607793): Actually implement deallocating memory.
-  return asmjit::kErrorOk;
-}
-
-bool MultipleSectionCodeAllocator::contains(const void* ptr) const {
-  // Have to check both the hot/cold slab and the asmjit allocator.  The latter
-  // is already thread-safe.
-  {
-    ThreadedCompileSerialize guard;
-    if (code_alloc_ <= ptr && ptr < code_alloc_ + total_allocation_size_) {
-      return true;
-    }
-  }
-  return CodeAllocator::contains(ptr);
-}
-
-} // namespace jit
+} // namespace cinderx::jit

@@ -8,7 +8,7 @@ When called as a script with arguments, this compiles the directories
 given as arguments recursively; the -l option prevents it from
 recursing into directories.
 
-Without arguments, if compiles all modules on sys.path, without
+Without arguments, it compiles all modules on sys.path, without
 recursing into subdirectories.  (Even though it should do so for
 packages -- for now, you'll have to deal with packages separately.)
 
@@ -19,11 +19,12 @@ import filecmp
 import importlib.util
 import os
 import py_compile
+import re
 import struct
 import sys
+from collections.abc import Generator
 from functools import partial
 from pathlib import Path
-from typing import Generator, Pattern, Type
 
 from cinderx.compiler.pysourceloader import PySourceFileLoader
 from cinderx.compiler.strict.loader import strict_compile as strict_compile_fn
@@ -64,7 +65,7 @@ def compile_dir(
     maxlevels: int | None = None,
     ddir: str | None = None,
     force: bool = False,
-    rx: Pattern | None = None,
+    rx: re.Pattern[str] | None = None,
     quiet: int = 0,
     legacy: bool = False,
     optimize: int | list[int] = -1,
@@ -75,7 +76,7 @@ def compile_dir(
     prependdir: str | None = None,
     limit_sl_dest: str | None = None,
     hardlink_dupes: bool = False,
-    loader_override: Type[PySourceFileLoader] | None = None,
+    loader_override: type[PySourceFileLoader] | None = None,
     strict_compile: bool = False,
 ) -> bool:
     """Byte-compile all modules in the given directory tree.
@@ -136,6 +137,7 @@ def compile_dir(
     success = True
     if workers != 1 and poolexecutor is not None:
         # If workers == 0, let ProcessPoolExecutor choose
+        # pyrefly: ignore [bad-assignment]
         workers = workers or None
         with poolexecutor(max_workers=workers) as executor:
             results = executor.map(
@@ -184,7 +186,7 @@ def compile_file(
     fullname: str,
     ddir: str | None = None,
     force: bool = False,
-    rx: Pattern | None = None,
+    rx: re.Pattern[str] | None = None,
     quiet: int = 0,
     legacy: bool = False,
     optimize: int | list[int] = -1,
@@ -194,7 +196,7 @@ def compile_file(
     prependdir: str | None = None,
     limit_sl_dest: str | None = None,
     hardlink_dupes: bool = False,
-    loader_override: Type[PySourceFileLoader] | None = None,
+    loader_override: type[PySourceFileLoader] | None = None,
     strict_compile: bool = False,
 ) -> bool:
     """Byte-compile one file.
@@ -377,7 +379,7 @@ def compile_path(
     legacy: bool = False,
     optimize: int | list[int] = -1,
     invalidation_mode: py_compile.PycInvalidationMode | None = None,
-    loader_override: Type[PySourceFileLoader] | None = None,
+    loader_override: type[PySourceFileLoader] | None = None,
     strict_compile: bool = False,
 ) -> bool:
     """Byte-compile all module on sys.path.
@@ -390,8 +392,8 @@ def compile_path(
     quiet: as for compile_dir() (default 0)
     legacy: as for compile_dir() (default False)
     optimize: as for compile_dir() (default -1)
-    invalidation_mode: as for compiler_dir()
-    loader_override: as for compiler_dir()
+    invalidation_mode: as for compile_dir()
+    loader_override: as for compile_dir()
     """
     success = True
     for dir in sys.path:
@@ -559,7 +561,7 @@ def main() -> bool:
         "-e",
         metavar="DIR",
         dest="limit_sl_dest",
-        help="Ignore symlinks pointing outsite of the DIR",
+        help="Ignore symlinks pointing outside of the DIR",
     )
     parser.add_argument(
         "--hardlink-dupes",
@@ -584,8 +586,6 @@ def main() -> bool:
     compile_dests = args.compile_dest
 
     if args.rx:
-        import re
-
         args.rx = re.compile(args.rx)
 
     if args.limit_sl_dest == "":

@@ -4,17 +4,19 @@
 
 #include "cinderx/Jit/codegen/arch.h"
 #include "cinderx/Jit/codegen/code_section.h"
+#include "cinderx/Jit/compilation_lock.h"
 #include "cinderx/Jit/lir/operand.h"
 #include "cinderx/Jit/lir/symbol_mapping.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <limits>
 #include <regex>
 #include <string>
 #include <utility>
 
-namespace jit::lir {
+namespace cinderx::jit::lir {
 
 std::unordered_set<std::string>& GetStringLiterals() {
   static std::unordered_set<std::string> string_literals_;
@@ -40,13 +42,14 @@ Parser::Token Parser::getNextToken(const char* str) {
       {"E[A-DS][IPX]", kPhyReg},
       {"[A-D]L", kPhyReg},
       {"[A-DS][IPX]L?", kPhyReg},
+      {R"(\[RBP\((-?\d+)\)\])", kStack},
 #elif defined(CINDER_AARCH64)
       {"[XWD][0-9]+", kPhyReg},
+      {R"(\[X29\((-?\d+)\)\])", kStack},
 #else
       {"[RD][0-9]+", kPhyReg},
 #endif
       {"XMM[0-9]+", kPhyReg},
-      {R"(\[RBP[ ]?-[ ]?(\d+)\])", kStack},
       {"\\[(0x[0-9a-fA-F]+)\\]", kAddress},
       {R"((\d+)(\(0x[0-9a-fA-F]+\))?)", kImmediate},
       {"BB%(\\d+)", kBasicBlockRef},
@@ -67,7 +70,13 @@ Parser::Token Parser::getNextToken(const char* str) {
     }
 
     if (m.size() > 1) {
-      return {pattern.type, m.length(), strtoll(m.str(1).c_str(), nullptr, 0)};
+      int64_t value;
+      if (pattern.type == kImmediate || pattern.type == kAddress) {
+        value = static_cast<int64_t>(strtoull(m.str(1).c_str(), nullptr, 0));
+      } else {
+        value = strtoll(m.str(1).c_str(), nullptr, 0);
+      }
+      return {pattern.type, m.length(), value};
     }
     return {pattern.type, m.length()};
   }
@@ -111,6 +120,17 @@ static auto& map_get_throw(
 }
 
 std::unique_ptr<Function> Parser::parse(const std::string& code) {
+  func_ = nullptr;
+  block_ = nullptr;
+  instr_ = nullptr;
+  block_index_map_.clear();
+  output_index_map_.clear();
+  basic_block_refs_.clear();
+  instr_refs_.clear();
+  basic_block_succs_.clear();
+  incoming_edges_.clear();
+  pending_phi_inputs_.clear();
+
   enum {
     FUNCTION,
     BASIC_BLOCK,
@@ -132,6 +152,8 @@ std::unique_ptr<Function> Parser::parse(const std::string& code) {
   const char* codestr = code.c_str();
   const char* cur = codestr;
   const char* end = codestr + code.size();
+  int phi_predecessor_id = -1;
+  std::unique_ptr<Operand> phi_input;
 
   while (cur != end) {
     auto token = getNextToken(cur);
@@ -181,7 +203,7 @@ std::unique_ptr<Function> Parser::parse(const std::string& code) {
             continue;
           }
 
-          instr_ = block_->allocateInstr(Instruction::kNone, nullptr);
+          instr_ = block_->allocateInstr(Opcode::kNop, nullptr);
           instr_->setId(-1);
           auto output = instr_->output();
           if (type == kId) {
@@ -228,7 +250,11 @@ std::unique_ptr<Function> Parser::parse(const std::string& code) {
         }
         case INSTR_NAME: {
           expect(type == kId, cur, "Expect an instruction name.");
-          instr_->setOpcode(getInstrOpcode(std::string(cur, token.length)));
+          InstrKind kind = getInstrKind(std::string(cur, token.length));
+          instr_->setOpcode(kind.opcode);
+          if (kind.cond != Condition::kInvalid) {
+            instr_->setCondition(kind.cond);
+          }
           state = INSTR_INPUT;
           break;
         }
@@ -238,9 +264,11 @@ std::unique_ptr<Function> Parser::parse(const std::string& code) {
             break;
           }
           if (type == kParLeft) {
+            expect(instr_->isPhi(), cur, "Only phi inputs can be pairs.");
             state = PHI_INPUT_FIRST;
           } else {
-            parseInput(token, cur);
+            expect(!instr_->isPhi(), cur, "Expect '(' before phi input.");
+            instr_->appendInput(parseInput(token, cur));
             state = INSTR_INPUT_TYPE;
           }
           break;
@@ -255,11 +283,10 @@ std::unique_ptr<Function> Parser::parse(const std::string& code) {
               instr_->getNumInputs() > 0,
               cur,
               "Expect data type to follow an input.");
-          OperandBase* input_base =
-              instr_->getInput(instr_->getNumInputs() - 1);
-          if (!input_base->isLinked()) {
-            Operand* input = static_cast<Operand*>(input_base);
-            auto data_type = getOperandDataType(std::string(cur, token.length));
+          Operand* input = instr_->getInput(instr_->getNumInputs() - 1);
+          if (!input->isLinked()) {
+            DataType data_type =
+                getOperandDataType(std::string(cur, token.length));
             input->setDataType(data_type);
           }
           state = INSTR_INPUT_COMMA;
@@ -279,7 +306,11 @@ std::unique_ptr<Function> Parser::parse(const std::string& code) {
         case PHI_INPUT_FIRST: {
           // first argument of phi input pairs - basic block id
           expect(type == kBasicBlockRef, cur, "Expect a basic block id.");
-          parseInput(token, cur);
+          expect(
+              token.data <= std::numeric_limits<int>::max(),
+              cur,
+              "Basic block id is out of range.");
+          phi_predecessor_id = static_cast<int>(token.data);
           state = PHI_INPUT_COMMA;
           break;
         }
@@ -289,27 +320,23 @@ std::unique_ptr<Function> Parser::parse(const std::string& code) {
           break;
         }
         case PHI_INPUT_SECOND: {
-          // second argument of phi input pairs - a variable
-          parseInput(token, cur);
+          // second argument of phi input pairs - a value
+          expect(type != kBasicBlockRef, cur, "Phi input must be a value.");
+          phi_input = parseInput(token, cur);
           state = PHI_INPUT_SECOND_TYPE;
           break;
         }
         case PHI_INPUT_SECOND_TYPE: {
+          expect(phi_input != nullptr, cur, "Expect phi input value.");
           if (type == kParRight) {
             state = PHI_INPUT_PAR;
             continue;
           }
           expect(type == kDataType, cur, "Expect phi input second data type.");
-          expect(
-              instr_->getNumInputs() > 0,
-              cur,
-              "Expect data type to follow an input.");
-          OperandBase* input_base =
-              instr_->getInput(instr_->getNumInputs() - 1);
-          if (!input_base->isLinked()) {
-            Operand* input = static_cast<Operand*>(input_base);
-            auto data_type = getOperandDataType(std::string(cur, token.length));
-            input->setDataType(data_type);
+          if (!phi_input->isLinked()) {
+            DataType data_type =
+                getOperandDataType(std::string(cur, token.length));
+            phi_input->setDataType(data_type);
           }
           state = PHI_INPUT_PAR;
           break;
@@ -317,6 +344,11 @@ std::unique_ptr<Function> Parser::parse(const std::string& code) {
         case PHI_INPUT_PAR: {
           // expect a right parenthesis
           expect(type == kParRight, cur, "Expect a right parenthesis");
+          pending_phi_inputs_.push_back(
+              PendingPhiInput{
+                  instr_,
+                  phi_predecessor_id,
+                  std::exchange(phi_input, nullptr)});
           state = INSTR_INPUT_COMMA;
           break;
         }
@@ -334,6 +366,7 @@ std::unique_ptr<Function> Parser::parse(const std::string& code) {
 
   fixOperands();
   connectBasicBlocks();
+  installPhiInputs();
   fixUnknownIds();
 
   return func;
@@ -371,7 +404,7 @@ void Parser::setSuccessorBlocks(const std::string& bbdef, BasicBlock* bb) {
 DataType Parser::getOperandDataType(const std::string& name) const {
   static const std::unordered_map<std::string, DataType>
       type_name_to_data_type = {
-#define TYPE_NAME_TO_DATA_TYPE(v, ...) {":" #v, OperandBase::k##v},
+#define TYPE_NAME_TO_DATA_TYPE(v, ...) {":" #v, Operand::k##v},
           FOREACH_OPERAND_DATA_TYPE(TYPE_NAME_TO_DATA_TYPE)
 #undef TYPE_NAME_TO_DATA_TYPE
       };
@@ -380,25 +413,41 @@ DataType Parser::getOperandDataType(const std::string& name) const {
       type_name_to_data_type, name, "DataType for {}", name);
 }
 
-Instruction::Opcode Parser::getInstrOpcode(const std::string& name) const {
-  static const std::unordered_map<std::string, Instruction::Opcode>
-      instr_name_to_opcode = {
-#define INSTR_NAME_TO_OPCODE(v, ...) {#v, Instruction::k##v},
-          FOREACH_INSTR_TYPE(INSTR_NAME_TO_OPCODE)
+// BranchCC and Compare are spelled with the per-condition names their opcodes
+// used to have, so the same LIR text still parses.
+Parser::InstrKind Parser::getInstrKind(const std::string& name) const {
+  static const std::unordered_map<std::string, InstrKind> instr_name_to_kind =
+      [] {
+        std::unordered_map<std::string, InstrKind> map;
+#define INSTR_NAME_TO_OPCODE(v, ...) \
+  map.emplace(#v, InstrKind{Opcode::k##v, Condition::kInvalid});
+        FOREACH_LIR_OPCODE(INSTR_NAME_TO_OPCODE)
 #undef INSTR_NAME_TO_OPCODE
-      };
+#define BRANCH_NAME_TO_KIND(NAME, NEGATED, SWAPPED, BRANCH) \
+  map.emplace(#BRANCH, InstrKind{Opcode::kBranchCC, Condition::k##NAME});
+        FOREACH_LIR_CONDITION(BRANCH_NAME_TO_KIND)
+#undef BRANCH_NAME_TO_KIND
+#define COMPARE_NAME_TO_KIND(COMPARE, CONDITION) \
+  map.emplace(#COMPARE, InstrKind{Opcode::kCompare, Condition::k##CONDITION});
+        FOREACH_LIR_COMPARE(COMPARE_NAME_TO_KIND)
+#undef COMPARE_NAME_TO_KIND
+        return map;
+      }();
 
   return map_get_throw<ParserException>(
-      instr_name_to_opcode, name, "Opcode for {}", name);
+      instr_name_to_kind, name, "Opcode for {}", name);
 }
 
-void Parser::parseInput(const Token& token, const char* code) {
+std::unique_ptr<Operand> Parser::parseInput(
+    const Token& token,
+    const char* code) {
+  auto operand = std::make_unique<Operand>(instr_);
+  Operand* operand_ptr = operand.get();
   auto type = token.type;
   switch (type) {
     case kVReg: {
-      auto linked_opnd = instr_->allocateLinkedInput(nullptr);
       auto id = token.data;
-      instr_refs_.emplace(linked_opnd, id);
+      instr_refs_.emplace(operand_ptr, id);
       break;
     }
     case kPhyReg: {
@@ -408,51 +457,51 @@ void Parser::parseInput(const Token& token, const char* code) {
           reg != jit::codegen::PhyLocation::REG_INVALID,
           code,
           "Unable to parse physical register.");
-      instr_->allocatePhyRegisterInput(reg);
+      operand->setPhyRegister(reg);
 
       break;
     }
     case kStack: {
-      instr_->allocateStackInput(token.data);
+      operand->setStackSlot(token.data);
       break;
     }
     case kAddress: {
-      instr_->allocateAddressInput(reinterpret_cast<void*>(token.data));
+      operand->setMemoryAddress(reinterpret_cast<void*>(token.data));
       break;
     }
     case kImmediate: {
-      instr_->allocateImmediateInput(token.data);
+      operand->setConstant(token.data);
       break;
     }
     case kBasicBlockRef: {
-      auto opnd = instr_->allocateImmediateInput(0);
-      basic_block_refs_.emplace(opnd, token.data);
+      basic_block_refs_.emplace(operand_ptr, token.data);
       break;
     }
     case kIndirect: {
-      auto opnd = instr_->allocateMemoryIndirectInput(PhyLocation::REG_INVALID);
-      parseIndirect(opnd, std::string_view(code, token.length), code);
+      parseIndirect(operand_ptr, std::string_view(code, token.length), code);
       break;
     }
     case kId: {
       std::string name(code, token.length);
       const uint64_t* addr = pyFunctionFromName(name);
       expect(addr != nullptr, code, "Can't find such a function");
-      instr_->allocateImmediateInput(*addr, OperandBase::kObject);
+      operand->setConstant(*addr, Operand::kObject);
       break;
     }
     case kStringLiteral: {
-      ThreadedCompileSerialize guard;
+      // Extract the string content (without quotes).
+      std::string str_content(code + 1, token.length - 2);
+      JITCompilationLock lock;
       std::unordered_set<std::string>& v = GetStringLiterals();
-      auto ret = v.emplace(code, 1, token.length - 2);
-      instr_->allocateImmediateInput(
-          reinterpret_cast<uint64_t>((*ret.first).c_str()),
-          OperandBase::kObject);
+      auto ret = v.emplace(std::move(str_content));
+      operand->setConstant(
+          reinterpret_cast<uint64_t>((*ret.first).c_str()), Operand::kObject);
       break;
     }
     default:
       expect(false, code, "Unable to parse instruction input.");
   }
+  return operand;
 }
 
 void Parser::parseIndirect(
@@ -548,21 +597,56 @@ void Parser::fixOperands() {
 }
 
 void Parser::connectBasicBlocks() {
-  // Note - Order of successors matters.
-  // It depends on the order in which we add pairs to basic_block_succs_
+  // The printer orders predecessors by block ID. Recreate incoming edges in
+  // that order while preserving the successor order within each source block.
+  std::stable_sort(
+      basic_block_succs_.begin(),
+      basic_block_succs_.end(),
+      [](const auto& left, const auto& right) {
+        return left.first->id() < right.first->id();
+      });
   for (auto& succ_pair : basic_block_succs_) {
     BasicBlock* source_block = succ_pair.first;
     int dest_block_id = succ_pair.second;
-    source_block->addSuccessor(
+    incoming_edges_.push_back(source_block->addSuccessor(
         map_get_throw<ParserException>(
-            block_index_map_, dest_block_id, "Block id {}", dest_block_id));
+            block_index_map_, dest_block_id, "Block id {}", dest_block_id)));
+  }
+}
+
+void Parser::installPhiInputs() {
+  for (auto& pending : pending_phi_inputs_) {
+    BasicBlock* const predecessor = map_get_throw<ParserException>(
+        block_index_map_,
+        pending.predecessor_id,
+        "Block id {}",
+        pending.predecessor_id);
+    BasicBlock* const successor = pending.phi->basicBlock();
+    const auto edge = std::find_if(
+        incoming_edges_.begin(),
+        incoming_edges_.end(),
+        [predecessor, successor, phi = pending.phi](
+            const IncomingEdge& candidate) {
+          return candidate.predecessor() == predecessor &&
+              candidate.successor() == successor &&
+              (phi->getNumInputs() == 0 ||
+               phi->phiInput(candidate.incomingSlot()) == nullptr);
+        });
+    if (edge == incoming_edges_.end()) {
+      throw ParserException(
+          fmt::format(
+              "Unable to parse - no unfilled edge from BB%{} to BB%{}",
+              pending.predecessor_id,
+              successor->id()));
+    }
+    pending.phi->addPhiInput(*edge, std::move(pending.value));
   }
 }
 
 void Parser::fixUnknownIds() {
   // find largest ID
   int largest_id = -1;
-  for (auto& bb : func_->basicblocks()) {
+  for (auto& bb : func_->basicBlocks()) {
     if (bb->id() > largest_id) {
       largest_id = bb->id();
     }
@@ -575,7 +659,7 @@ void Parser::fixUnknownIds() {
   func_->setNextId(largest_id + 1);
   // all basic blocks should have been assigned an ID
   // assign ID's to instructions without ID's
-  for (auto& bb : func_->basicblocks()) {
+  for (auto& bb : func_->basicBlocks()) {
     for (auto& instr : bb->instructions()) {
       if (instr->id() == -1) {
         instr->setId(func_->allocateId());
@@ -584,4 +668,4 @@ void Parser::fixUnknownIds() {
   }
 }
 
-} // namespace jit::lir
+} // namespace cinderx::jit::lir

@@ -3,16 +3,15 @@
 #pragma once
 
 #include "cinderx/Jit/code_allocator_iface.h"
-#include "cinderx/Jit/codegen/code_section.h"
 
 #include <asmjit/asmjit.h>
 
 #include <atomic>
+#include <mutex>
 #include <span>
-#include <unordered_map>
 #include <vector>
 
-namespace jit {
+namespace cinderx::jit {
 
 /*
   A CodeAllocator allocates memory for live JIT code. This is an abstract
@@ -29,11 +28,12 @@ namespace jit {
 */
 class CodeAllocator : public ICodeAllocator {
  public:
+  CodeAllocator();
   ~CodeAllocator() override = default;
 
   // To be called once by JIT initialization after enough configuration has been
   // loaded to determine which global code allocator type to use.
-  static ICodeAllocator* make();
+  [[nodiscard]] static ICodeAllocator* make();
 
   AllocateResult addCode(asmjit::CodeHolder* code) override;
   asmjit::Error releaseCode(void* code) override;
@@ -41,71 +41,103 @@ class CodeAllocator : public ICodeAllocator {
   size_t usedBytes() const override;
   const asmjit::Environment& asmJitEnvironment() const override;
 
+  void atForkPrepare() override;
+  void atForkParent() override;
+  void atForkChild() override;
+
  protected:
   asmjit::JitRuntime runtime_;
   std::atomic<size_t> used_bytes_{0};
+
+  // Serializes every operation that reaches asmjit's own JitAllocator lock.
+  // That lock is private to asmjit with no way to reset it in a forked child,
+  // so this makes it observably free at fork time instead: atForkPrepare()
+  // holds this, which means no thread can be inside asmjit when the fork
+  // happens.
+  mutable std::mutex runtime_mutex_;
 };
 
 // A code allocator which tries to allocate all code on huge pages.
+//
+// When multiple code sections are enabled, hot code is allocated on huge pages
+// and cold code is allocated on separate pages (optionally huge pages as well,
+// controlled by the cold_code_huge_pages config).
 class CodeAllocatorCinder : public CodeAllocator {
  public:
   ~CodeAllocatorCinder() override;
 
   size_t lostBytes() const {
-    return lost_bytes_;
+    return lost_bytes_.load(std::memory_order_relaxed);
   }
 
   size_t fragmentedAllocs() const {
-    return fragmented_allocs_;
+    return fragmented_allocs_.load(std::memory_order_relaxed);
   }
 
   size_t hugeAllocs() const {
-    return huge_allocs_;
+    return huge_allocs_.load(std::memory_order_relaxed);
   }
 
   AllocateResult addCode(asmjit::CodeHolder* code) override;
   asmjit::Error releaseCode(void* code) override;
   bool contains(const void* ptr) const override;
 
+  void atForkPrepare() override;
+  void atForkParent() override;
+  void atForkChild() override;
+
  private:
-  // List of chunks allocated for use in deallocation
+  // Add code with hot/cold section splitting. Called by addCode() when
+  // multiple_code_sections is enabled. Caller must hold allocator_mutex_.
+  AllocateResult addSplitCode(asmjit::CodeHolder* code);
+
+  // Ensure the given bump allocator has at least `size` bytes free, allocating
+  // a new chunk if necessary.
+  void ensureSpace(
+      uint8_t*& alloc,
+      size_t& alloc_free,
+      size_t size,
+      bool use_huge_pages);
+
+  // Ensure both hot and cold bump allocators have enough space for the given
+  // sizes. If either needs a new allocation, a single contiguous region is
+  // allocated and split between hot (first half) and cold (second half). This
+  // guarantees cross-section jumps are within ARM64's relative branch range
+  // (±128MB for B/BL, ±1MB for B.cond). Used only on aarch64.
+  void ensureSplitSpace(size_t hot_needed, size_t cold_needed);
+
+  // Protects all allocator-owned state used by addCode()/contains().
+  mutable std::mutex allocator_mutex_;
+
+  // List of all chunks allocated, for use in deallocation and contains().
   std::vector<std::span<uint8_t>> allocations_;
 
-  // Pointer to next free address in the current chunk
-  uint8_t* current_alloc_{nullptr};
-  // Free space in the current chunk
-  size_t current_alloc_free_{0};
+  // Hot code allocation state.
+  uint8_t* hot_alloc_{nullptr};
+  size_t hot_alloc_free_{0};
+
+  // Cold code allocation state (used when multiple code sections are enabled).
+  uint8_t* cold_alloc_{nullptr};
+  size_t cold_alloc_free_{0};
 
   // Number of bytes in total lost when allocations didn't fit neatly into
   // the bytes remaining in a chunk so a new one was allocated.
-  size_t lost_bytes_{0};
-  // Number of chunks allocated (= to number of huge pages used)
-  size_t huge_allocs_{0};
+  std::atomic<size_t> lost_bytes_{0};
+  // Number of chunks allocated which successfully used huge pages.
+  std::atomic<size_t> huge_allocs_{0};
   // Number of chunks allocated which did not use huge pages.
-  size_t fragmented_allocs_{0};
+  std::atomic<size_t> fragmented_allocs_{0};
 };
 
-class MultipleSectionCodeAllocator : public CodeAllocator {
- public:
-  ~MultipleSectionCodeAllocator() override;
-
-  AllocateResult addCode(asmjit::CodeHolder* code) override;
-  asmjit::Error releaseCode(void* code) override;
-  bool contains(const void* ptr) const override;
-
- private:
-  void createSlabs() noexcept;
-
-  std::unordered_map<codegen::CodeSection, uint8_t*> code_sections_;
-  std::unordered_map<codegen::CodeSection, size_t> code_section_free_sizes_;
-
-  uint8_t* code_alloc_{nullptr};
-  size_t total_allocation_size_{0};
-};
+// pthread_atfork() handlers covering both the process-global code-allocation
+// state and the current ICodeAllocator, if one exists.
+void codeAllocatorAtForkPrepare();
+void codeAllocatorAtForkParent();
+void codeAllocatorAtForkChild();
 
 void populateCodeSections(
     std::vector<std::pair<void*, std::size_t>>& output_vector,
     asmjit::CodeHolder& code,
     void* entry);
 
-} // namespace jit
+} // namespace cinderx::jit

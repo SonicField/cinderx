@@ -7,15 +7,17 @@
 #include "cinderx/Jit/hir/ssa.h"
 #include "cinderx/RuntimeTests/fixtures.h"
 
-#include <ostream>
+namespace cinderx {
+
+using namespace cinderx::jit::hir;
+
+namespace {
 
 class SSAifyTest : public RuntimeTest {};
 
-using namespace jit::hir;
-
-static void testCheckFunc(const char* hir_source, const char* expected_err) {
+void testCheckFunc(const char* hir_source, const char* expected_err) {
   std::ostringstream err;
-  auto func = HIRParser().ParseHIR(hir_source);
+  auto func = HIRParser().parseHIR(hir_source);
   ASSERT_NE(func, nullptr);
   ASSERT_FALSE(checkFunc(*func, err));
   EXPECT_EQ(err.str(), expected_err);
@@ -84,11 +86,11 @@ TEST(CheckFuncTest, NonFirstPhi) {
   // HIRParser() fixes the positions of Phis, so we have to manually construct
   // the bad code here.
   Function func;
-  auto b0 = func.cfg.entry_block = func.cfg.AllocateBlock();
-  auto b1 = func.cfg.AllocateBlock();
-  auto v0 = func.env.AllocateRegister();
-  auto v1 = func.env.AllocateRegister();
-  auto v2 = func.env.AllocateRegister();
+  auto b0 = func.cfg.entry_block = func.cfg.allocateBlock();
+  auto b1 = func.cfg.allocateBlock();
+  auto v0 = func.env.allocateRegister();
+  auto v1 = func.env.allocateRegister();
+  auto v2 = func.env.allocateRegister();
 
   b0->append<LoadConst>(v0, TNoneType);
   b0->append<CondBranch>(v0, b0, b1);
@@ -107,11 +109,11 @@ TEST(CheckFuncTest, NonFirstPhi) {
 
 TEST(CheckFuncTest, RegisterInstr) {
   Function func;
-  auto b0 = func.cfg.entry_block = func.cfg.AllocateBlock();
-  auto v0 = func.env.AllocateRegister();
+  auto b0 = func.cfg.entry_block = func.cfg.allocateBlock();
+  auto v0 = func.env.allocateRegister();
 
   b0->append<LoadConst>(v0, TNoneType);
-  v0->set_instr(nullptr);
+  v0->setInstr(nullptr);
   b0->append<Return>(v0);
 
   const char* expected_err =
@@ -253,9 +255,9 @@ fun test {
 
 TEST(CheckFuncTest, BadCFG) {
   Function func;
-  auto b0 = func.cfg.entry_block = func.cfg.AllocateBlock();
-  std::unique_ptr<BasicBlock> b1{func.cfg.AllocateUnlinkedBlock()};
-  auto tmp = func.env.AllocateRegister();
+  auto b0 = func.cfg.entry_block = func.cfg.allocateBlock();
+  std::unique_ptr<BasicBlock> b1{func.cfg.allocateUnlinkedBlock()};
+  auto tmp = func.env.allocateRegister();
 
   b0->append<Branch>(b1.get());
 
@@ -268,54 +270,14 @@ TEST(CheckFuncTest, BadCFG) {
 
   // Unlink the orphan block from the CFG before it's destroyed, to avoid
   // exploding in ~BasicBlock.
-  b0->GetTerminator()->edge(0)->set_to(nullptr);
+  b0->getTerminator()->edge(0)->setTo(nullptr);
 }
 
-TEST(CheckFuncTest, UnlinkedPredecessor) {
-  Function func;
-  auto b0 = func.cfg.entry_block = func.cfg.AllocateBlock();
-  auto b1 = func.cfg.AllocateBlock();
-  std::unique_ptr<BasicBlock> b2{func.cfg.AllocateUnlinkedBlock()};
-  auto tmp = func.env.AllocateRegister();
-
-  b0->append<Branch>(b1);
-
-  b1->append<LoadConst>(tmp, TNoneType);
-  b1->append<Return>(tmp);
-
-  b2->append<Branch>(b1);
-
-  std::ostringstream err;
-  ASSERT_FALSE(checkFunc(func, err));
-  EXPECT_EQ(err.str(), "ERROR: bb 1 has unreachable predecessor bb 2\n");
-}
-
-TEST(CheckFuncTest, UnreachableBlock) {
-  Function func;
-  auto b0 = func.cfg.entry_block = func.cfg.AllocateBlock();
-  auto b1 = func.cfg.AllocateBlock();
-  auto b2 = func.cfg.AllocateBlock();
-  auto tmp0 = func.env.AllocateRegister();
-  auto tmp1 = func.env.AllocateRegister();
-
-  b0->append<Branch>(b1);
-
-  b1->append<LoadConst>(tmp0, TNoneType);
-  b1->append<Return>(tmp0);
-
-  b2->append<LoadConst>(tmp1, TNoneType);
-  b2->append<Return>(tmp1);
-
-  std::ostringstream err;
-  ASSERT_FALSE(checkFunc(func, err));
-  EXPECT_EQ(err.str(), "ERROR: CFG contains unreachable bb 2\n");
-}
-
-static void testSSAify(const char* hir_source, const char* expected) {
-  std::unique_ptr<Function> func(HIRParser().ParseHIR(hir_source));
+void testSSAify(const char* hir_source, const char* expected) {
+  std::unique_ptr<Function> func(HIRParser().parseHIR(hir_source));
   ASSERT_NE(func, nullptr);
-  SSAify().Run(*func);
-  ASSERT_EQ(HIRPrinter().ToString(*func), expected);
+  SSAify().run(*func);
+  ASSERT_EQ(HIRPrinter().toString(*func), expected);
 }
 
 TEST_F(SSAifyTest, PlacesPhisCorrectlyAtCondBranchJoins) {
@@ -561,15 +523,13 @@ fun test {
 }
 
 TEST_F(SSAifyTest, HandlesLocalDefOfTrivialPhi) {
-  // Make sure we correctly handle the case where the register corresponding to
-  // the output of a trivial phi is redefined later in the same block.
+  // Make sure we correctly handle the case where a variable whose merge Phi is
+  // trivial (and so gets eliminated) is redefined later in the same block.
   //
-  // In the CFG below, bb1 uses v0 and later redefines it. When converting this
-  // to SSA, an incomplete phi will be placed in bb1 for v0. After processing
-  // bb3 we'll realize that the phi would have been trivial and never place
-  // it. Since v0 was redefined in the same block, subsequent uses of v0 should
-  // use the value produced by the redefinition, not whatever replaced the
-  // trivial phi's output.
+  // In the CFG below, bb1 uses v0 and later redefines it. The merge Phi for v0
+  // in bb1 is trivial and gets eliminated. Since v0 was redefined in the same
+  // block, subsequent uses of v0 should use the value produced by the
+  // redefinition, not the value the eliminated Phi resolved to.
   const char* hir_source = R"(
 fun test {
   bb 0 {
@@ -615,12 +575,8 @@ fun test {
         CurInstrOffset -2
       }
     }
-    v6:NoneType = LoadConst<NoneType>
-    Branch<4>
-  }
-
-  bb 4 (preds 1) {
-    Return v6
+    v4:NoneType = LoadConst<NoneType>
+    Return v4
   }
 
   bb 3 (preds 2) {
@@ -637,23 +593,11 @@ fun test {
 }
 
 TEST_F(SSAifyTest, PropagatesRegisterReplacements) {
-  // This tests that we correctly handle chains of replaced registers.
-  // (e.g. when $v3 has been replaced by $v2, which has been replaced by $v1.
-  //
-  // When processing the CFG below, the SSA conversion algorithm will
-  // do the following:
-  //
-  // 0. When visiting bb 0, we record a local def for x, $v0.
-  // 1. When visiting bb 2, we place an incomplete phi for x in bb 1
-  //    and use its output as the local def for x in bb 2, $v1.
-  // 2. When visiting bb 3, we place another incomplete phi for x, $v2.
-  // 3. After visiting bb 3, we complete the phi that we placed in (2).
-  //    It would be trivial, so we record that $v2 should be replaced
-  //    with $v1.
-  // 4. After visiting bb 5, we complete the phi in bb 1. It too would
-  //    have been trivial, so we replace $v1 with $v0.
-  //
-  // This leads to the replacement chain of $v2 -> $v1 -> $v0.
+  // This tests that a variable with a single reaching definition read across a
+  // CFG with several merge points resolves back to that definition. The merge
+  // Phis placed for x in bb1 and bb3 are all trivial and get eliminated, so
+  // every use of x should resolve to its original definition ($v3 below) with
+  // no Phis left behind.
   const char* hir_source = R"(
 fun test {
   bb 0 {
@@ -723,8 +667,8 @@ fun test {
   }
 
   bb 6 (preds 5) {
-    v9:NoneType = LoadConst<NoneType>
-    Return v9
+    v5:NoneType = LoadConst<NoneType>
+    Return v5
   }
 }
 )";
@@ -807,19 +751,19 @@ fun test {
   }
 
   bb 2 (preds 1) {
-    v12:Object = BinaryOp<Subscript> v6 v8 {
+    v9:Object = BinaryOp<Subscript> v6 v8 {
       FrameState {
         CurInstrOffset -2
       }
     }
-    v13:NoneType = LoadConst<NoneType>
-    v14:Object = BinaryOp<Add> v12 v13 {
+    v10:NoneType = LoadConst<NoneType>
+    v11:Object = BinaryOp<Add> v9 v10 {
       FrameState {
         CurInstrOffset -2
       }
     }
-    Decref v12
-    CondBranch<1, 3> v14
+    Decref v9
+    CondBranch<1, 3> v11
   }
 
   bb 3 (preds 1, 2) {
@@ -865,3 +809,7 @@ fun test {
 )";
   EXPECT_NO_FATAL_FAILURE(testSSAify(hir_source, expected));
 }
+
+} // namespace
+
+} // namespace cinderx

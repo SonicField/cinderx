@@ -3,10 +3,11 @@
 #include "cinderx/Jit/lir/block_builder.h"
 
 #include "cinderx/Common/util.h"
+#include "cinderx/Jit/codegen/arch.h"
 #include "cinderx/Jit/lir/function.h"
 #include "cinderx/Jit/lir/instruction.h"
 
-namespace jit::lir {
+namespace cinderx::jit::lir {
 
 DataType hirTypeToDataType(hir::Type tp) {
   if (tp <= hir::TCDouble) {
@@ -40,8 +41,7 @@ std::size_t BasicBlockBuilder::makeDeoptMetadata() {
   JIT_CHECK(deopt_base != nullptr, "Current HIR instruction can't deopt");
 
   if (!cur_deopt_metadata_.has_value()) {
-    cur_deopt_metadata_ =
-        env_->code_rt->addDeoptMetadata(DeoptMetadata::fromInstr(*deopt_base));
+    cur_deopt_metadata_ = env_->addDeoptMetadata(*deopt_base);
   }
   return cur_deopt_metadata_.value();
 }
@@ -62,15 +62,7 @@ void BasicBlockBuilder::switchBlock(BasicBlock* block) {
   cur_bb_ = block;
 }
 
-Instruction* BasicBlockBuilder::appendBranch(
-    Instruction::Opcode opcode,
-    BasicBlock* true_bb) {
-  auto instr = appendInstr(opcode);
-  cur_bb_->addSuccessor(true_bb);
-  return instr;
-}
-
-Instruction* BasicBlockBuilder::createInstr(Instruction::Opcode opcode) {
+Instruction* BasicBlockBuilder::createInstr(Opcode opcode) {
   return cur_bb_->allocateInstr(opcode, cur_hir_instr_);
 }
 
@@ -107,14 +99,52 @@ void BasicBlockBuilder::createInstrOutput(
   JIT_DCHECK(
       pair.second,
       "Multiple outputs with the same name ({})- HIR is not in SSA form.",
-      dst->name());
+      *dst);
   auto output = instr->output();
   output->setVirtualRegister();
   output->setDataType(hirTypeToDataType(dst->type()));
 }
 
-std::vector<BasicBlock*> BasicBlockBuilder::Generate() {
+std::vector<BasicBlock*> BasicBlockBuilder::generate() {
   return bbs_;
 }
 
-} // namespace jit::lir
+bool BasicBlockBuilder::usesImmediateInput(
+    [[maybe_unused]] hir::Type const& tp) {
+#ifdef CINDER_AARCH64
+  if (tp.hasIntSpec()) {
+    return asmjit::arm::Utils::isAddSubImm(static_cast<uint64_t>(tp.intSpec()));
+  } else if (tp.hasObjectSpec()) {
+    return asmjit::arm::Utils::isAddSubImm(
+        reinterpret_cast<uint64_t>(tp.objectSpec()));
+  }
+  return false;
+#else
+  return true;
+#endif
+}
+
+void BasicBlockBuilder::createRegisterInput(
+    Instruction* instr,
+    hir::Register* val) {
+  auto tp = val->type();
+  auto dat = hirTypeToDataType(tp);
+  // We don't turn constant floats into immediates, as we always
+  // need to load these from general purpose registers or memory
+  // anyways.
+  if (usesImmediateInput(tp)) {
+    if (tp.hasIntSpec()) {
+      instr->allocateImmediateInput(static_cast<uint64_t>(tp.intSpec()), dat);
+      return;
+    } else if (tp.hasObjectSpec()) {
+      env_->addReference(tp.objectSpec());
+      instr->allocateImmediateInput(
+          reinterpret_cast<uint64_t>(tp.objectSpec()), DataType::kObject);
+      return;
+    }
+  }
+
+  createInstrInput(instr, val);
+}
+
+} // namespace cinderx::jit::lir

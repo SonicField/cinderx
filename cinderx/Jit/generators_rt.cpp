@@ -2,24 +2,23 @@
 
 #include "cinderx/Jit/generators_rt.h"
 
-#if PY_VERSION_HEX >= 0x030C0000
-
 #include "internal/pycore_frame.h"
 #include "internal/pycore_genobject.h"
+#include "internal/pycore_object.h" // _PyObject_GC_TRACK()/_PyObject_GC_UNTRACK()
 #include "internal/pycore_pyerrors.h" // _PyErr_ClearExcState()
 
 #include "cinderx/Common/log.h"
+#include "cinderx/Jit/config.h"
 #include "cinderx/Jit/context.h"
 #include "cinderx/Jit/deopt.h"
 #include "cinderx/Jit/frame.h"
-#include "cinderx/Jit/generators_borrowed.h"
 #include "cinderx/Jit/generators_mm.h"
 #include "cinderx/UpstreamBorrow/borrowed.h"
 #include "cinderx/module_state.h"
 
 #include <string_view>
 
-namespace jit {
+namespace cinderx::jit {
 
 PyObject* JitGenObject::yieldFrom() {
   GenDataFooter* gen_footer = genDataFooter();
@@ -37,41 +36,196 @@ namespace {
 const destructor original_gen_dealloc = PyGen_Type.tp_dealloc;
 const destructor original_coro_dealloc = PyCoro_Type.tp_dealloc;
 
+// Track a GC object whose type is known to have GC support.
+template <class T>
+void track(T arg) {
+  BorrowedRef<> obj{_PyObject_CAST(arg)};
+#if defined(META_PYTHON)
+  _PyObject_GC_TRACK(obj);
+#else
+  PyObject_GC_Track(obj);
+#endif
+}
+
+// Untrack a GC object whose type is known to have GC support.
+template <class T>
+void untrack(T arg) {
+  BorrowedRef<> obj{_PyObject_CAST(arg)};
+#if defined(META_PYTHON)
+  _PyObject_GC_UNTRACK(obj);
+#else
+  PyObject_GC_UnTrack(obj);
+#endif
+}
+
+GenDataFooter* neverResumedGeneratorFooter(PyObject* obj, ModuleState* state) {
+  auto* gen = reinterpret_cast<JitGenObject*>(obj);
+  if (gen->gi_frame_state != FRAME_CREATED || Py_TYPE(obj) != state->gen_type) {
+    return nullptr;
+  }
+
+  _PyInterpreterFrame* frame = generatorFrame(gen);
+  if (frame->frame_obj != nullptr) {
+    return nullptr;
+  }
+  GenDataFooter* footer = gen->genDataFooter();
+#ifdef ENABLE_LIGHTWEIGHT_FRAMES
+  if (footer->frame_header.frame_status & JIT_FRAME_INITIALIZED) {
+    return nullptr;
+  }
+#endif
+  return footer;
+}
+
+void clearNeverResumedGenerator(
+    JitGenObject* gen,
+    GenDataFooter* footer,
+    ModuleState* state) {
+  JIT_DCHECK(footer->yieldPoint != nullptr, "Missing initial yield point");
+  const DeoptMetadata& deopt_meta =
+      footer->compiled_func->runtime()->getDeoptMetadata(
+          footer->yieldPoint->deoptIdx());
+  JIT_DCHECK(
+      deopt_meta.inline_depth() == 0,
+      "inline functions not supported for generators");
+
+  _PyInterpreterFrame* frame = generatorFrame(gen);
+  gen->gi_frame_state = FRAME_CLEARED;
+  frame->previous = nullptr;
+  footer->yieldPoint = nullptr;
+  releaseGeneratorOwnedRefs(deopt_meta, footer);
+#ifdef ENABLE_LIGHTWEIGHT_FRAMES
+  jitFrameClearExceptCode(frame, &footer->frame_header);
+#else
+  jitFrameClearExceptCode(frame);
+#endif
+  _PyErr_ClearExcState(&gen->gi_exc_state);
+  deopt_jit_gen_object_only(gen, footer, state);
+}
+
+// Reimplementation of CPython's gen_dealloc that uses our custom free-list
+// (Ci_free_jit_list_gen) instead of PyObject_GC_Del for memory recycling.
+void gen_dealloc_with_custom_free(
+    PyObject* self,
+    bool clear_never_resumed = false,
+    GenDataFooter* footer = nullptr,
+    ModuleState* state = nullptr) {
+  JIT_DCHECK(
+      PyGen_Check(self) || PyCoro_CheckExact(self) || clear_never_resumed,
+      "gen_dealloc_with_custom_free called on a non-generator object");
+
+  auto* gen = reinterpret_cast<PyGenObject*>(self);
+
+  untrack(gen);
+
+  if (gen->gi_weakreflist != nullptr) {
+    PyObject_ClearWeakRefs(self);
+  }
+
+  if (clear_never_resumed) {
+#if PY_VERSION_HEX >= 0x030F0000
+    gen->gi_frame_state = FRAME_CLEARED;
+#else
+    gen->gi_frame_state = FRAME_COMPLETED;
+#endif
+  } else {
+    // Re-track so the finalizer can run; it may resurrect the object.
+    track(self);
+    if (PyObject_CallFinalizerFromDealloc(self)) {
+      return;
+    }
+    untrack(self);
+  }
+
+  JIT_DCHECK(
+      !PyAsyncGen_CheckExact(gen),
+      "Async generators aren't supported by the JIT");
+
+  if (PyCoro_CheckExact(gen)) {
+    Py_CLEAR(reinterpret_cast<PyCoroObject*>(gen)->cr_origin_or_finalizer);
+  }
+
+  _PyInterpreterFrame* frame = generatorFrame(gen);
+  if (clear_never_resumed) {
+    clearNeverResumedGenerator(
+        reinterpret_cast<JitGenObject*>(gen), footer, state);
+  } else if (gen->gi_frame_state < FRAME_CLEARED) {
+    gen->gi_frame_state = FRAME_CLEARED;
+    frame->previous = nullptr;
+    _PyFrame_ClearExceptCode(frame);
+    _PyErr_ClearExcState(&gen->gi_exc_state);
+  }
+
+  Ci_STACK_CLEAR(frame->FRAME_EXECUTABLE);
+
+  Py_CLEAR(gen->gi_name);
+  Py_CLEAR(gen->gi_qualname);
+
+#ifdef ENABLE_GENERATOR_AWAITER
+  Py_CLEAR(gen->gi_ci_awaiter);
+#endif
+
+  state = state != nullptr ? state : cinderx::getModuleState();
+  state->jit_gen_free_list->free(self);
+}
+
 void jitgen_dealloc(PyObject* self) {
-  if (!deopt_jit_gen(self)) {
+  ModuleState* state = cinderx::getModuleState();
+  GenDataFooter* footer = neverResumedGeneratorFooter(self, state);
+  bool clear_never_resumed = footer != nullptr;
+  if (!clear_never_resumed && !deopt_jit_gen(self)) {
     JIT_ABORT("Tried to dealloc a running JIT generator");
   }
 
-  // CPython deallocation modified to respect our free-list.
-  Cix_gen_dealloc_with_custom_free(self);
+  gen_dealloc_with_custom_free(self, clear_never_resumed, footer, state);
 }
 
 int jitgen_traverse(PyObject* obj, visitproc visit, void* arg) {
   JitGenObject* jit_gen = JitGenObject::cast(obj);
   if (jit_gen != nullptr) {
     const GenDataFooter* gen_footer = jit_gen->genDataFooter();
-    if (gen_footer->yieldPoint == nullptr) {
-      return 0;
+    if (!_Py_IsImmortal(gen_footer->compiled_func)) {
+      // If we immortalized it then we didn't allocate the GC header either.
+      Py_VISIT(gen_footer->compiled_func);
     }
-    size_t deopt_idx = gen_footer->yieldPoint->deoptIdx();
-    const DeoptMetadata& meta =
-        gen_footer->code_rt->getDeoptMetadata(deopt_idx);
-    for (const LiveValue& value : meta.live_values) {
-      if (value.ref_kind != hir::RefKind::kOwned) {
-        continue;
+    // Only visit JIT-specific live values if we have a valid yield point.
+    // If yieldPoint is null, the generator hasn't yielded yet or has completed,
+    // but we still need to call PyGen_Type.tp_traverse below to visit standard
+    // generator references (gi_code, gi_frame, etc.).
+    if (gen_footer->yieldPoint != nullptr) {
+      size_t deopt_idx = gen_footer->yieldPoint->deoptIdx();
+      const DeoptMetadata& meta =
+          gen_footer->compiled_func->runtime()->getDeoptMetadata(deopt_idx);
+      for (const LiveValue& value : meta.live_values) {
+        if (value.ref_kind != hir::RefKind::kOwned) {
+          continue;
+        }
+        codegen::PhyLocation loc = value.location;
+        JIT_CHECK(
+            !loc.isRegister(),
+            "DeoptMetadata for Yields should not reference registers");
+        PyObject* v = *reinterpret_cast<PyObject**>(
+            reinterpret_cast<uintptr_t>(gen_footer) + loc.loc);
+        Py_VISIT(v);
       }
-      codegen::PhyLocation loc = value.location;
-      JIT_CHECK(
-          !loc.is_register(),
-          "DeoptMetadata for Yields should not reference registers");
-      PyObject* v = *reinterpret_cast<PyObject**>(
-          reinterpret_cast<uintptr_t>(gen_footer) + loc.loc);
-      Py_VISIT(v);
+      JIT_CHECK(JitGen_CheckAny(obj), "Deopted during GC traversal");
     }
-    JIT_CHECK(JitGen_CheckAny(obj), "Deopted during GC traversal");
+
+#if PY_VERSION_HEX < 0x030E0000 && defined(ENABLE_LIGHTWEIGHT_FRAMES)
+    // In lightweight frame mode, frame->f_funcobj is set to a reifier singleton
+    // rather than the actual function. The real function is stored in the
+    // FrameHeader and contains func_closure with closure cells that may
+    // participate in reference cycles. We must visit it explicitly since
+    // _PyFrame_Traverse won't see it.
+    if (jit_gen->gi_frame_state < FRAME_CLEARED) {
+      _PyInterpreterFrame* frame = generatorFrame(jit_gen);
+      BorrowedRef<PyFunctionObject> func = jitFrameGetFunction(frame);
+      Py_VISIT(func.get());
+    }
+#endif
   }
   // Try to use CPython traverse as much as we can as it has internals which
-  // are hard to borrow in 3.14 (compares 'visit' to a speicifc internal
+  // are hard to borrow in 3.14 (compares 'visit' to a specific internal
   // function).
   return PyGen_Type.tp_traverse(obj, visit, arg);
 }
@@ -80,10 +234,31 @@ void raise_already_running_exception(JitGenObject* jit_gen) {
   // If the executor is running we cannot deopt so have to replicate the
   // errors from CPython here.
   const char* msg = "generator already executing";
-  if (Py_TYPE(jit_gen) == cinderx::getModuleState()->coroType()) {
+  if (Py_TYPE(jit_gen) == cinderx::getModuleState()->coro_type) {
     msg = "coroutine already executing";
   }
   PyErr_SetString(PyExc_ValueError, msg);
+}
+
+// Result of sending into a generator that has already finished, mirroring the
+// FRAME_STATE_FINISHED arm of CPython's gen_send_ex().
+PySendResult
+send_to_exhausted_gen(JitGenObject* gen, PyObject* arg, PyObject** presult) {
+  if (Py_TYPE(gen) == cinderx::getModuleState()->coro_type) {
+    PyErr_SetString(
+        PyExc_RuntimeError, "cannot reuse already awaited coroutine");
+  } else if (arg != nullptr) {
+    // Only send() gets a value back; next() wants a bare StopIteration.
+    *presult = Py_None;
+    return PYGEN_RETURN;
+  }
+  *presult = nullptr;
+  return PYGEN_ERROR;
+}
+
+bool is_reentered_during_teardown(JitGenObject* gen) {
+  return FRAME_STATE_FINISHED(gen->gi_frame_state) &&
+      gen->gi_exc_state.previous_item != nullptr;
 }
 
 // Resumes a JIT generator. Calling this performs the same work as invoking the
@@ -143,6 +318,10 @@ PySendResult jitgen_am_send(PyObject* obj, PyObject* arg, PyObject** presult) {
   JitGenObject* gen = JitGenObject::cast(obj);
   if (gen == nullptr) {
     return Py_TYPE(obj)->tp_as_async->am_send(obj, arg, presult);
+  }
+
+  if (is_reentered_during_teardown(gen)) {
+    return send_to_exhausted_gen(gen, arg, presult);
   }
 
   // Check for user programming errors.
@@ -222,9 +401,25 @@ PySendResult jitgen_am_send(PyObject* obj, PyObject* arg, PyObject** presult) {
   return result ? PYGEN_RETURN : PYGEN_ERROR;
 }
 
+// Wrapper installed as am_send when the JIT is paused (e.g. instrumentation
+// active). Deopts the generator so it resumes in interpreter mode with proper
+// monitoring support, then delegates to the (now CPython) type's am_send.
+PySendResult
+jitgen_am_send_with_deopt(PyObject* obj, PyObject* arg, PyObject** presult) {
+  auto* gen = reinterpret_cast<JitGenObject*>(obj);
+  if (is_reentered_during_teardown(gen)) {
+    return jitgen_am_send(obj, arg, presult);
+  }
+  if (deopt_jit_gen(obj)) {
+    return Py_TYPE(obj)->tp_as_async->am_send(obj, arg, presult);
+  }
+  // Generator is FRAME_EXECUTING and can't be deopted right now.
+  return jitgen_am_send(obj, arg, presult);
+}
+
 PyObject* jitgen_send(PyObject* obj, PyObject* arg) {
   PyObject* result = nullptr;
-  if (jitgen_am_send(obj, arg, &result) == PYGEN_RETURN) {
+  if (Py_TYPE(obj)->tp_as_async->am_send(obj, arg, &result) == PYGEN_RETURN) {
     if (result == Py_None) {
       PyErr_SetNone(PyExc_StopIteration);
     } else {
@@ -237,7 +432,8 @@ PyObject* jitgen_send(PyObject* obj, PyObject* arg) {
 
 PyObject* jitgen_iternext(PyObject* obj) {
   PyObject* result = nullptr;
-  if (jitgen_am_send(obj, nullptr, &result) == PYGEN_RETURN) {
+  if (Py_TYPE(obj)->tp_as_async->am_send(obj, nullptr, &result) ==
+      PYGEN_RETURN) {
     if (result != Py_None) {
       _PyGen_SetStopIterationValue(result);
     }
@@ -254,28 +450,42 @@ PyObject* jitgen_iternext(PyObject* obj) {
 // generator may end up in the interpreter unnecessarily. So, I made the
 // machinery to cache methods anyway and we may as well use it. This does all
 // make the assumption that the methods on PyGen_Type don't change.
-typedef PyObject* (
-    *GenThrowMeth)(PyObject* obj, PyObject* const* args, Py_ssize_t nargs);
+using GenThrowMeth = PyObject* (*)(PyObject * obj,
+                                   PyObject* const* args,
+                                   Py_ssize_t nargs);
 GenThrowMeth gen_throw_meth;
 PyCFunction gen_close_meth;
 PyCFunction gen___sizeof___meth;
 
 PyObject* jitgen_throw(PyObject* obj, PyObject* const* args, Py_ssize_t nargs) {
+  auto* gen = reinterpret_cast<JitGenObject*>(obj);
+  if (is_reentered_during_teardown(gen)) {
+    if (Py_TYPE(gen) == cinderx::getModuleState()->coro_type) {
+      PyErr_SetString(
+          PyExc_RuntimeError, "cannot reuse already awaited coroutine");
+      return nullptr;
+    }
+    return gen_throw_meth(obj, args, nargs);
+  }
   // Always deopt as an exception being raised internally would cause a JIT
   // generator to deopt anyway.
   if (!deopt_jit_gen(obj)) {
-    raise_already_running_exception(reinterpret_cast<JitGenObject*>(obj));
+    raise_already_running_exception(gen);
     return nullptr;
   }
   return gen_throw_meth(obj, args, nargs);
 }
 
 PyObject* jitgen_close(PyObject* obj, PyObject*) {
+  auto* gen = reinterpret_cast<JitGenObject*>(obj);
+  if (is_reentered_during_teardown(gen)) {
+    Py_RETURN_NONE;
+  }
   // Always deopt as closing either raises an exception in the generator which
   // would cause a deopt anyway or if the generator is already done then deopt
   // is cheap and won't rexecute in the interpreter.
   if (!deopt_jit_gen(obj)) {
-    raise_already_running_exception(reinterpret_cast<JitGenObject*>(obj));
+    raise_already_running_exception(gen);
     return nullptr;
   }
   return gen_close_meth(obj, nullptr);
@@ -294,12 +504,17 @@ PyObject* jitgen_sizeof(PyObject* obj, PyObject*) {
   if (base_size_int == -1 && PyErr_Occurred()) {
     return nullptr;
   }
+  // The base size comes from CPython's gen_sizeof(), which derives everything
+  // from the code object and so cannot see the JIT data in the generator's
+  // tail.  Add:
   // +1 word for storing the GenDataFooter pointer
   // +size of the GenDataFooter
   // +the size of the JIT register spill area.
+  uint32_t spill_size =
+      jit_gen->genDataFooter()->compiled_func->runtime()->spillSize();
   return PyLong_FromSsize_t(
       base_size_int + sizeof(GenDataFooter*) + sizeof(GenDataFooter) +
-      jit_gen->genDataFooter()->spillWords * sizeof(uint64_t));
+      spill_size);
 }
 
 PyObject* jitgen_getyieldfrom(PyObject* obj, void*) {
@@ -325,6 +540,13 @@ PyObject* jitcoro_getclass(PyObject*, void*) {
 void jitgen_finalize(PyObject* obj) {
   PyGenObject* gen = reinterpret_cast<PyGenObject*>(obj);
 
+  ModuleState* state = cinderx::getModuleState();
+  if (GenDataFooter* footer = neverResumedGeneratorFooter(obj, state)) {
+    clearNeverResumedGenerator(
+        reinterpret_cast<JitGenObject*>(gen), footer, state);
+    return;
+  }
+
   // Fast-path: generator has completed so there's nothing to do.
   if (FRAME_STATE_FINISHED(gen->gi_frame_state)) {
     return;
@@ -337,13 +559,33 @@ void jitgen_finalize(PyObject* obj) {
   PyGen_Type.tp_finalize(obj);
 }
 
-typedef struct {
+int jitgen_clear(PyObject* obj) {
+  // tp_clear is called by the cyclic GC to break reference cycles.
+  // We need to deopt the JIT generator so that the standard generator
+  // tp_clear can properly clear all references.
+  //
+  // We cannot deopt while the generator's JIT code is on the stack, either
+  // because it is still running or because it has finished and is releasing
+  // its locals. In that case, return 0 without clearing - the GC will try
+  // again later or the generator will complete and be collected normally.
+  if (!deopt_jit_gen(obj)) {
+    return 0;
+  }
+  // After deopting, the object is now a regular PyGenObject/PyCoroObject.
+  // Delegate to the base type's tp_clear to break cycles.
+  if (PyGen_Type.tp_clear != nullptr) {
+    return PyGen_Type.tp_clear(obj);
+  }
+  return 0;
+}
+
+struct JitCoroWrapper {
   PyObject_HEAD
   PyObject* cw_coroutine;
-} JitCoroWrapper;
+};
 
 void jitcoro_wrapper_dealloc(JitCoroWrapper* cw) {
-  PyObject_GC_UnTrack(reinterpret_cast<PyObject*>(cw));
+  untrack(reinterpret_cast<PyObject*>(cw));
   Py_CLEAR(cw->cw_coroutine);
   PyObject_GC_Del(cw);
 }
@@ -468,13 +710,14 @@ PyTypeObject _JitCoroWrapper_Type = {
 };
 
 namespace {
+
 PyObject* jitcoro_await(PyCoroObject* coro) {
   JitCoroWrapper* cw = PyObject_GC_New(JitCoroWrapper, &_JitCoroWrapper_Type);
   if (cw == nullptr) {
     return nullptr;
   }
   cw->cw_coroutine = Py_NewRef(coro);
-  PyObject_GC_Track(cw);
+  track(cw);
   return reinterpret_cast<PyObject*>(cw);
 }
 
@@ -528,10 +771,18 @@ static PyGetSetDef jitcoro_getsetlist[] = {
     {"__name__", nullptr, nullptr, nullptr},
     {"__qualname__", nullptr, nullptr, nullptr},
     {"cr_await", (getter)jitgen_getyieldfrom, nullptr, nullptr},
+#if PY_VERSION_HEX >= 0x030E0000 && PY_VERSION_HEX < 0x030F0000
+    {"cr_running", (getter)Cix_cr_getrunning, nullptr, nullptr},
+#else
     {"cr_running", nullptr, nullptr, nullptr},
+#endif
     {"cr_frame", nullptr, nullptr, nullptr},
     {"cr_code", nullptr, nullptr, nullptr},
+#if PY_VERSION_HEX >= 0x030E0000 && PY_VERSION_HEX < 0x030F0000
+    {"cr_suspended", (getter)Cix_cr_getsuspended, nullptr, nullptr},
+#else
     {"cr_suspended", nullptr, nullptr, nullptr},
+#endif
 #if PY_VERSION_HEX >= 0x030F0000
     {"cr_state", nullptr, nullptr, nullptr},
 #endif
@@ -597,9 +848,26 @@ static PyAsyncMethods jitcoro_as_async = {
 
 } // namespace
 
+void patchJitGenAmSendForDeopt() {
+  BorrowedRef<PyTypeObject> gen_type = cinderx::getModuleState()->gen_type;
+  BorrowedRef<PyTypeObject> coro_type = cinderx::getModuleState()->coro_type;
+  gen_type->tp_as_async->am_send =
+      reinterpret_cast<sendfunc>(jitgen_am_send_with_deopt);
+  coro_type->tp_as_async->am_send =
+      reinterpret_cast<sendfunc>(jitgen_am_send_with_deopt);
+}
+
+void unpatchJitGenAmSendForDeopt() {
+  BorrowedRef<PyTypeObject> gen_type = cinderx::getModuleState()->gen_type;
+  BorrowedRef<PyTypeObject> coro_type = cinderx::getModuleState()->coro_type;
+  gen_type->tp_as_async->am_send = reinterpret_cast<sendfunc>(jitgen_am_send);
+  coro_type->tp_as_async->am_send = reinterpret_cast<sendfunc>(jitgen_am_send);
+}
+
 PyType_Slot gen_slots[] = {
     {Py_tp_dealloc, reinterpret_cast<void*>(jitgen_dealloc)},
     {Py_tp_traverse, reinterpret_cast<void*>(jitgen_traverse)},
+    {Py_tp_clear, reinterpret_cast<void*>(jitgen_clear)},
     {Py_tp_finalize, reinterpret_cast<void*>(jitgen_finalize)},
     {Py_tp_iter, reinterpret_cast<void*>(PyObject_SelfIter)},
     {Py_tp_iternext, reinterpret_cast<void*>(jitgen_iternext)},
@@ -635,6 +903,7 @@ static_assert(sizeof(PyGenObject) == sizeof(PyCoroObject));
 PyType_Slot coro_slots[] = {
     {Py_tp_dealloc, reinterpret_cast<void*>(jitgen_dealloc)},
     {Py_tp_traverse, reinterpret_cast<void*>(jitgen_traverse)},
+    {Py_tp_clear, reinterpret_cast<void*>(jitgen_clear)},
     {Py_tp_finalize, reinterpret_cast<void*>(jitgen_finalize)},
     {Py_tp_methods, jitcoro_methods},
     {Py_tp_members, jitcoro_memberlist},
@@ -656,18 +925,42 @@ PyType_Spec JitCoro_Spec = {
     .slots = coro_slots,
 };
 
-void deopt_jit_gen_object_only(JitGenObject* gen) {
+void deopt_jit_gen_object_only(
+    JitGenObject* gen,
+    GenDataFooter* footer,
+    ModuleState* state) {
+  // Release the strong reference to the CompiledFunction that was taken
+  // when the generator was allocated.
+  [[maybe_unused]] bool has_cached_footer = footer != nullptr;
+  if (footer == nullptr) {
+    footer = gen->genDataFooter();
+  }
+
   PyTypeObject* old_type = Py_TYPE(gen);
 
-  PyTypeObject* type = Py_TYPE(gen) == cinderx::getModuleState()->genType()
-      ? &PyGen_Type
-      : &PyCoro_Type;
+  if (state == nullptr) {
+    state = cinderx::getModuleState();
+  }
+  PyTypeObject* type =
+      Py_TYPE(gen) == state->gen_type ? &PyGen_Type : &PyCoro_Type;
   Py_DECREF(old_type);
   Py_SET_TYPE(reinterpret_cast<PyObject*>(gen), type);
-  if (getConfig().frame_mode == FrameMode::kLightweight) {
-    auto frame = generatorFrame(gen);
+#ifdef ENABLE_LIGHTWEIGHT_FRAMES
+  auto frame = generatorFrame(gen);
+  if (gen->gi_frame_state != FRAME_CLEARED) {
     jitFrameRemoveReifier(frame);
+  } else if constexpr (PY_VERSION_HEX < 0x030E0000) {
+    // Normally we'll clear the function via jitFrameClearExceptCode. But
+    // a user can call clear on a reified frame object which transfers
+    // ownership of the _PyInterpreterFrame to the PyFrameObject and marks
+    // the generator frame as cleared. In that case we still need to decref
+    // the function which is stored before the _PyInterpreterFrame in 3.12.
+    if (!has_cached_footer) {
+      Py_XDECREF(jitFrameGetFunction(frame));
+    }
   }
+#endif
+  Py_CLEAR(footer->compiled_func);
 }
 
 bool deopt_jit_gen(PyObject* obj) {
@@ -678,23 +971,35 @@ bool deopt_jit_gen(PyObject* obj) {
   if (jit_gen->gi_frame_state == FRAME_EXECUTING) {
     return false;
   }
-  GenDataFooter* gen_footer = jit_gen->genDataFooter();
+  if (jit_gen->gi_exc_state.previous_item != nullptr) {
+    JIT_DCHECK(
+        FRAME_STATE_FINISHED(jit_gen->gi_frame_state),
+        "JIT generator is executing with an unexpected frame state");
+    // CPython links gi_exc_state into the thread's exception stack while a
+    // generator is executing.  The JIT keeps that link until resumeEntry()
+    // returns, so a non-null previous_item here means that teardown Decrefs are
+    // still running even though gi_frame_state is already finished.  Deopting
+    // would release the code we are executing, so refuse.  Normal generator
+    // operations handle this state before trying to deopt; this remains
+    // necessary for callers such as _deopt_gen() and global deopt.
+    return false;
+  }
 
+  GenDataFooter* gen_footer = jit_gen->genDataFooter();
   if (gen_footer->yieldPoint) {
     // TODO: This "deopting" mechanism should be better shared with the
     // similar machinery for general JIT deopting. Among other things we're
     // missing deopt logging here. Although if we used the existing stuff
     // for this it might be misleading as the "cause" will not be an
     // executed instruction.
-    const DeoptMetadata& deopt_meta = gen_footer->code_rt->getDeoptMetadata(
-        gen_footer->yieldPoint->deoptIdx());
+    const DeoptMetadata& deopt_meta =
+        gen_footer->compiled_func->runtime()->getDeoptMetadata(
+            gen_footer->yieldPoint->deoptIdx());
     JIT_CHECK(
         deopt_meta.inline_depth() == 0,
         "inline functions not supported for generators");
     auto frame = generatorFrame(jit_gen);
-    if (getConfig().frame_mode == FrameMode::kLightweight) {
-      jitFramePopulateFrame(frame);
-    }
+    jitFramePopulateFrame(frame);
     reifyGeneratorFrame(
         frame, deopt_meta, deopt_meta.innermostFrame(), gen_footer);
     // Ownership of references has been transferred from JIT to interpreter.
@@ -714,8 +1019,8 @@ bool deopt_jit_gen(PyObject* obj) {
 void init_jit_genobject_type() {
   using namespace std::literals;
   // Copy base type functions
-  BorrowedRef<PyTypeObject> gen_type = cinderx::getModuleState()->genType();
-  BorrowedRef<PyTypeObject> coro_type = cinderx::getModuleState()->coroType();
+  BorrowedRef<PyTypeObject> gen_type = cinderx::getModuleState()->gen_type;
+  BorrowedRef<PyTypeObject> coro_type = cinderx::getModuleState()->coro_type;
 
   gen_type->tp_repr = PyGen_Type.tp_repr;
 
@@ -807,12 +1112,12 @@ void init_jit_genobject_type() {
   copy_methods(PyGen_Type.tp_methods, gen_type->tp_methods);
   copy_methods(PyCoro_Type.tp_methods, coro_type->tp_methods);
 
-#ifdef Py_GIL_DISABLED
-  cinderx::getModuleState()->setJitGenFreeList(
-      new JITGenFreeThreadedFreeList());
-#else
-  cinderx::getModuleState()->setJitGenFreeList(new JitGenFreeList());
-#endif
+  if constexpr (kFreeThreadedBuild) {
+    cinderx::getModuleState()->jit_gen_free_list.reset(
+        new JITGenFreeThreadedFreeList());
+  } else {
+    cinderx::getModuleState()->jit_gen_free_list.reset(new JitGenFreeList());
+  }
 
   // Override dealloc so we can use a "free-list" for our objects.
   JIT_CHECK(
@@ -837,54 +1142,9 @@ void shutdown_jit_genobject_type() {
   PyCoro_Type.tp_dealloc = original_coro_dealloc;
 }
 
-static PyMethodDef anextawaitable_methods[] = {
-    {"send", (PyCFunction)Ci_anextawaitable_send, METH_O, ""},
-    {"throw", (PyCFunction)Ci_anextawaitable_throw, METH_VARARGS, ""},
-#if PY_VERSION_HEX >= 0x030E0000
-    {"close", (PyCFunction)Ci_anextawaitable_close, METH_NOARGS, ""},
-#else
-    {"close", (PyCFunction)Ci_anextawaitable_close, METH_VARARGS, ""},
-#endif
-    {nullptr, nullptr} /* Sentinel */
-};
-
-PyType_Slot anext_awaitable_slots[] = {
-    {Py_tp_dealloc, reinterpret_cast<void*>(Ci_anextawaitable_dealloc)},
-    {Py_tp_traverse, reinterpret_cast<void*>(Ci_anextawaitable_traverse)},
-    {Py_tp_methods, anextawaitable_methods},
-    {Py_tp_iternext, reinterpret_cast<void*>(Ci_anextawaitable_iternext)},
-    {Py_tp_iter, reinterpret_cast<void*>(PyObject_SelfIter)},
-    {Py_am_await, reinterpret_cast<void*>(PyObject_SelfIter)},
-    {0, nullptr},
-};
-
-PyType_Spec JitAnextAwaitable_Spec = {
-    .name = "builtins.anext_awaitable",
-    .basicsize = sizeof(anextawaitableobject),
-    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC | Py_TPFLAGS_IMMUTABLETYPE,
-    .slots = anext_awaitable_slots,
-};
-
-PyObject* JitGen_AnextAwaitable_New(
-    cinderx::ModuleState* moduleState,
-    PyObject* awaitable,
-    PyObject* defaultValue) {
-  anextawaitableobject* anext =
-      PyObject_GC_New(anextawaitableobject, moduleState->anextAwaitableType());
-  if (anext == nullptr) {
-    return nullptr;
-  }
-  anext->wrapped = Py_NewRef(awaitable);
-  anext->default_value = Py_NewRef(defaultValue);
-  PyObject_GC_Track(anext);
-  return (PyObject*)anext;
-}
-
-} // namespace jit
+} // namespace cinderx::jit
 
 PyObject* JitGen_yf(PyGenObject* gen) {
-  jit::JitGenObject* jit_gen = jit::JitGenObject::cast(gen);
+  auto jit_gen = cinderx::jit::JitGenObject::cast(gen);
   return jit_gen == nullptr ? _PyGen_yf(gen) : jit_gen->yieldFrom();
 }
-
-#endif // PY_VERSION_HEX >= 0x030C0000

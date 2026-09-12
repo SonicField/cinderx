@@ -7,16 +7,16 @@
 #include "cinderx/Jit/config.h"
 #include "cinderx/Jit/threaded_compile.h"
 
+#include <charconv>
 #include <fstream>
 #include <stdexcept>
 #include <string>
 
-namespace jit {
+namespace cinderx::jit {
 
 std::unique_ptr<JITList> JITList::create() {
   JIT_DCHECK(
-      !getThreadedCompileContext().compileRunning(),
-      "unexpected multithreading");
+      !ThreadedCompileContext::compileRunning(), "unexpected multithreading");
   auto qualnames = Ref<>::steal(PyDict_New());
   if (qualnames == nullptr) {
     return nullptr;
@@ -64,19 +64,18 @@ bool JITList::parseLine(std::string_view line) {
 
   std::string_view name = line.substr(0, atpos);
   std::string_view loc_str = line.substr(atpos + 1);
-  auto cln_pos = loc_str.find(':');
+  auto cln_pos = loc_str.rfind(':');
   if (cln_pos == std::string_view::npos) {
     return false;
   }
-  std::string_view file = line.substr(atpos + 1, cln_pos);
+  std::string_view file = loc_str.substr(0, cln_pos);
   std::string_view file_line = loc_str.substr(cln_pos + 1);
   return addEntryCode(name, file, file_line);
 }
 
 bool JITList::addEntryFunc(BorrowedRef<> module_name, BorrowedRef<> qualname) {
   JIT_DCHECK(
-      !getThreadedCompileContext().compileRunning(),
-      "unexpected multithreading");
+      !ThreadedCompileContext::compileRunning(), "unexpected multithreading");
   auto qualname_set = Ref<>::create(PyDict_GetItem(qualnames_, module_name));
   if (qualname_set == nullptr) {
     qualname_set = Ref<>::steal(PySet_New(nullptr));
@@ -94,8 +93,7 @@ bool JITList::addEntryFunc(
     std::string_view module_name,
     std::string_view qualname) {
   JIT_DCHECK(
-      !getThreadedCompileContext().compileRunning(),
-      "unexpected multithreading");
+      !ThreadedCompileContext::compileRunning(), "unexpected multithreading");
   Ref<> mn_obj = stringAsUnicode(module_name);
   if (mn_obj == nullptr) {
     return false;
@@ -112,8 +110,7 @@ bool JITList::addEntryCode(
     BorrowedRef<> file,
     BorrowedRef<> line_no) {
   JIT_DCHECK(
-      !getThreadedCompileContext().compileRunning(),
-      "unexpected multithreading");
+      !ThreadedCompileContext::compileRunning(), "unexpected multithreading");
   auto file_set = Ref<>::create(PyDict_GetItem(name_file_line_no_, name));
   if (file_set == nullptr) {
     file_set = Ref<>::steal(PyDict_New());
@@ -142,8 +139,7 @@ bool JITList::addEntryCode(
     std::string_view file,
     std::string_view line_no_str) {
   JIT_DCHECK(
-      !getThreadedCompileContext().compileRunning(),
-      "unexpected multithreading");
+      !ThreadedCompileContext::compileRunning(), "unexpected multithreading");
   Ref<> name_obj = stringAsUnicode(name);
   if (name_obj == nullptr) {
     return false;
@@ -165,7 +161,7 @@ bool JITList::addEntryCode(
   }
 
   auto line_no_obj = Ref<>::steal(PyLong_FromLong(line_no));
-  if (file_obj == nullptr) {
+  if (line_no_obj == nullptr) {
     return false;
   }
   return addEntryCode(name_obj, basename_obj, line_no_obj);
@@ -182,8 +178,7 @@ int JITList::lookupFunc(BorrowedRef<PyFunctionObject> func) const {
 
 int JITList::lookupCode(BorrowedRef<PyCodeObject> code) const {
   JIT_DCHECK(
-      !getThreadedCompileContext().compileRunning(),
-      "Unexpected multithreading");
+      !ThreadedCompileContext::compileRunning(), "Unexpected multithreading");
 
   auto name =
       Ref<>::create(code->co_qualname ? code->co_qualname : code->co_name);
@@ -222,16 +217,14 @@ int JITList::lookupName(BorrowedRef<> module_name, BorrowedRef<> qualname)
 
 Ref<> JITList::getList() const {
   JIT_DCHECK(
-      !getThreadedCompileContext().compileRunning(),
-      "unexpected multithreading");
+      !ThreadedCompileContext::compileRunning(), "unexpected multithreading");
   return Ref<>::steal(
       PyTuple_Pack(2, qualnames_.get(), name_file_line_no_.get()));
 }
 
 std::unique_ptr<WildcardJITList> WildcardJITList::create() {
   JIT_DCHECK(
-      !getThreadedCompileContext().compileRunning(),
-      "unexpected multithreading");
+      !ThreadedCompileContext::compileRunning(), "unexpected multithreading");
   auto qualnames = Ref<>::steal(PyDict_New());
   if (qualnames == nullptr) {
     return nullptr;
@@ -248,23 +241,23 @@ std::unique_ptr<WildcardJITList> WildcardJITList::create() {
 
 Ref<> JITList::pathBasename(BorrowedRef<> path) const {
   JIT_DCHECK(
-      !getThreadedCompileContext().compileRunning(),
-      "unexpected multithreading");
-  if (path_sep_ == nullptr) {
-    const wchar_t* sep_str = L"/";
-    auto sep_str_obj = Ref<>::steal(PyUnicode_FromWideChar(&sep_str[0], 1));
-    if (sep_str_obj == nullptr) {
-      return nullptr;
-    }
-    path_sep_ = std::move(sep_str_obj);
-  }
-  auto split_path_obj = Ref<>::steal(PyUnicode_RSplit(path, path_sep_, 1));
-  if (split_path_obj == nullptr || !PyList_Check(split_path_obj) ||
-      PyList_GET_SIZE(split_path_obj.get()) < 1) {
+      !ThreadedCompileContext::compileRunning(), "unexpected multithreading");
+  Py_ssize_t len = PyUnicode_GetLength(path);
+  if (len < 0) {
     return nullptr;
   }
-  return Ref<>::create(PyList_GET_ITEM(
-      split_path_obj.get(), PyList_GET_SIZE(split_path_obj.get()) - 1));
+  // Find the last path separator, treating both '/' and '\\' (Windows) as
+  // separators. The basename is everything after it.
+  Py_ssize_t slash = PyUnicode_FindChar(path, '/', 0, len, -1);
+  if (slash == -2) {
+    return nullptr;
+  }
+  Py_ssize_t backslash = PyUnicode_FindChar(path, '\\', 0, len, -1);
+  if (backslash == -2) {
+    return nullptr;
+  }
+  Py_ssize_t sep = slash > backslash ? slash : backslash;
+  return Ref<>::steal(PyUnicode_Substring(path, sep + 1, len));
 }
 
 bool WildcardJITList::addEntryFunc(
@@ -305,8 +298,7 @@ int WildcardJITList::lookupName(
   }
 
   JIT_DCHECK(
-      !getThreadedCompileContext().compileRunning(),
-      "unexpected multithreading");
+      !ThreadedCompileContext::compileRunning(), "unexpected multithreading");
   auto func_name = Ref<>::steal(PyUnicode_Substring(qualname, idx + 1, len));
   if (func_name == nullptr) {
     return -1;
@@ -329,4 +321,4 @@ int WildcardJITList::lookupName(
   return 0;
 }
 
-} // namespace jit
+} // namespace cinderx::jit

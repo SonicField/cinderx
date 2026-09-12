@@ -4,14 +4,14 @@
 
 from __future__ import annotations
 
-from __static__ import rand, RAND_MAX
-
 import ast
 import builtins
 from ast import AST
 from collections import deque
 from types import CodeType
 from typing import Any, cast, TYPE_CHECKING
+
+from cinderx.static import rand, RAND_MAX
 
 from .. import consts
 from ..errors import ErrorSink
@@ -33,6 +33,7 @@ from .types import (
     LenFunction,
     NumClass,
     Object,
+    OverrideDecorator,
     ProdAssertFunction,
     reflect_builtin_function,
     RevealTypeFunction,
@@ -45,7 +46,7 @@ from .types import (
 
 
 if TYPE_CHECKING:
-    from . import Static310CodeGenerator, StaticCodeGenBase
+    from . import StaticCodeGenBase
 
 try:
     import xxclassloader
@@ -94,7 +95,6 @@ class Compiler:
             TypeName("builtins", "int"),
             self.type_env,
             pytype=int,
-            # pyre-fixme[16]: Module `__static__` has no attribute `RAND_MAX`.
             literal_value=RAND_MAX,
             is_final=True,
         )
@@ -221,6 +221,7 @@ class Compiler:
             "all": reflect_builtin_function(all, None, self.type_env),
             # pyre-ignore[6]: Pyre can't know this callable is a BuiltinFunctionType
             "any": reflect_builtin_function(any, None, self.type_env),
+            # pyrefly: ignore [bad-argument-type]
             "anext": reflect_builtin_function(anext, None, self.type_env),
             # pyre-ignore[6]: Pyre can't know this callable is a BuiltinFunctionType
             "ascii": reflect_builtin_function(ascii, None, self.type_env),
@@ -232,13 +233,15 @@ class Compiler:
             "callable": reflect_builtin_function(callable, None, self.type_env),
             # pyre-ignore[6]: Pyre can't know this callable is a BuiltinFunctionType
             "chr": reflect_builtin_function(chr, None, self.type_env),
+            # pyrefly: ignore [bad-argument-type]
             "compile": reflect_builtin_function(compile, None, self.type_env),
             # pyre-ignore[6]: Pyre can't know this callable is a BuiltinFunctionType
             "dir": reflect_builtin_function(dir, None, self.type_env),
+            # pyrefly: ignore [bad-argument-type]
             "divmod": reflect_builtin_function(divmod, None, self.type_env),
-            # pyre-ignore[6]: Pyre can't know this callable is a BuiltinFunctionType
+            # pyrefly: ignore [bad-argument-type]
             "eval": reflect_builtin_function(eval, None, self.type_env),
-            # pyre-ignore[6]: Pyre can't know this callable is a BuiltinFunctionType
+            # pyrefly: ignore [bad-argument-type]
             "exec": reflect_builtin_function(exec, None, self.type_env),
             # pyre-ignore[6]: Pyre can't know this callable is a BuiltinFunctionType
             "format": reflect_builtin_function(format, None, self.type_env),
@@ -250,19 +253,27 @@ class Compiler:
             "id": reflect_builtin_function(id, None, self.type_env),
             # pyre-ignore[6]: Pyre can't know this callable is a BuiltinFunctionType
             "input": reflect_builtin_function(input, None, self.type_env),
+            # pyrefly: ignore [bad-argument-type]
             "iter": reflect_builtin_function(iter, None, self.type_env),
+            # pyrefly: ignore [bad-argument-type]
             "next": reflect_builtin_function(next, None, self.type_env),
             # pyre-ignore[6]: Pyre can't know this callable is a BuiltinFunctionType
             "oct": reflect_builtin_function(oct, None, self.type_env),
+            # pyrefly: ignore [bad-argument-type]
             "open": reflect_builtin_function(open, None, self.type_env),
             # pyre-ignore[6]: Pyre can't know this callable is a BuiltinFunctionType
             "ord": reflect_builtin_function(ord, None, self.type_env),
+            # pyrefly: ignore [bad-argument-type]
             "pow": reflect_builtin_function(pow, None, self.type_env),
+            # pyrefly: ignore [bad-argument-type]
             "print": reflect_builtin_function(print, None, self.type_env),
             # pyre-ignore[6]: Pyre can't know this callable is a BuiltinFunctionType
             "repr": reflect_builtin_function(repr, None, self.type_env),
+            # pyrefly: ignore [bad-argument-type]
             "round": reflect_builtin_function(round, None, self.type_env),
+            # pyrefly: ignore [bad-argument-type]
             "sum": reflect_builtin_function(sum, None, self.type_env),
+            # pyrefly: ignore [bad-argument-type]
             "vars": reflect_builtin_function(vars, None, self.type_env),
             # FIXME: This is IG-specific. Add a way to customize the set of builtins
             # while initializing the loader.
@@ -306,6 +317,9 @@ class Compiler:
             "Protocol": self.type_env.protocol,
             "Optional": self.type_env.optional,
             "overload": self.type_env.overload,
+            "override": OverrideDecorator(
+                TypeName("typing", "override"), self.type_env
+            ),
             "Union": self.type_env.union,
             "Tuple": self.type_env.tuple,
             "Type": self.type_env.dynamic,
@@ -315,6 +329,10 @@ class Compiler:
         }
         typing_extensions_children: dict[str, Value] = {
             "Annotated": self.type_env.annotated,
+            "NamedTuple": self.type_env.named_tuple,
+            "override": OverrideDecorator(
+                TypeName("typing_extensions", "override"), self.type_env
+            ),
             "Protocol": self.type_env.protocol,
             "TypedDict": self.type_env.typed_dict,
         }
@@ -448,16 +466,19 @@ class Compiler:
             if hasattr(xxclassloader, "foo"):
                 funcs = {
                     "foo": reflect_builtin_function(
+                        # pyrefly: ignore [bad-argument-type]
                         xxclassloader.foo,
                         None,
                         self.type_env,
                     ),
                     "bar": reflect_builtin_function(
+                        # pyrefly: ignore [bad-argument-type]
                         xxclassloader.bar,
                         None,
                         self.type_env,
                     ),
                     "neg": reflect_builtin_function(
+                        # pyrefly: ignore [bad-argument-type]
                         xxclassloader.neg,
                         None,
                         self.type_env,
@@ -548,13 +569,13 @@ class Compiler:
             tree = cached_tree
         # Analyze variable scopes
         future_flags = find_futures(0, tree)
-        # TASK(TT209531178): This class still implicitly assumes 3.10
-        code_generator = cast("Static310CodeGenerator", self.code_generator)
+        code_generator = cast("StaticCodeGenBase", self.code_generator)
         s = code_generator._SymbolVisitor(future_flags)
         s.visit(tree)
 
         # Analyze the types of objects within local scopes
-        type_binder = TypeBinder(
+        type_binder = self.make_type_binder(
+            # pyrefly: ignore [bad-argument-type]
             s,
             filename,
             self,
@@ -563,7 +584,21 @@ class Compiler:
             enable_patching=enable_patching,
         )
         type_binder.visit(tree)
+        # pyrefly: ignore [bad-return]
         return tree, s
+
+    def make_type_binder(
+        self,
+        symbols: SymbolVisitor,
+        filename: str,
+        compiler: Compiler,
+        module_name: str,
+        optimize: int,
+        enable_patching: bool = False,
+    ) -> TypeBinder:
+        return TypeBinder(
+            symbols, filename, compiler, module_name, optimize, enable_patching
+        )
 
     def compile(
         self,
@@ -589,7 +624,7 @@ class Compiler:
         optimize: int,
         enable_patching: bool = False,
         builtins: dict[str, Any] = builtins.__dict__,
-    ) -> Static310CodeGenerator:
+    ) -> StaticCodeGenBase:
         tree, s = self._bind(name, filename, tree, source, optimize, enable_patching)
         if self.error_sink.has_errors:
             raise self.error_sink.errors[0]
@@ -616,7 +651,7 @@ class Compiler:
         )
         code_gen.visit(tree)
         del self.ast_cache[source]
-        return cast("Static310CodeGenerator", code_gen)
+        return cast("StaticCodeGenBase", code_gen)
 
     def import_module(self, name: str, optimize: int) -> ModuleTable | None:
         pass

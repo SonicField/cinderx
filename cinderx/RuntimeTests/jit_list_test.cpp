@@ -4,11 +4,13 @@
 #include "cinderx/Jit/jit_list.h"
 #include "cinderx/RuntimeTests/fixtures.h"
 
+namespace cinderx {
+
 using JITListTest = RuntimeTest;
 using WildcardJITListTest = RuntimeTest;
 
-using jit::JITList;
-using jit::WildcardJITList;
+using cinderx::jit::JITList;
+using cinderx::jit::WildcardJITList;
 
 TEST_F(JITListTest, ParseLine) {
   auto jitlist = JITList::create();
@@ -63,6 +65,16 @@ TEST_F(JITListTest, LookupFuncCode) {
       reinterpret_cast<PyCodeObject*>(func->func_code);
   ASSERT_NE(code, nullptr);
   ASSERT_EQ(jitlist->lookupCode(code), 0);
+}
+
+TEST_F(JITListTest, ParseLineWithWindowsPath) {
+  auto jitlist = JITList::create();
+  ASSERT_NE(jitlist, nullptr);
+
+  // Windows-style path with drive letter colon — parser must split on the
+  // last colon (before the line number), not the drive letter colon.
+  EXPECT_TRUE(jitlist->parseLine("func@D:/a/cinderx/test.py:42"));
+  EXPECT_TRUE(jitlist->parseLine("func@D:\\a\\cinderx\\test.py:42"));
 }
 
 TEST_F(WildcardJITListTest, ParseLine) {
@@ -120,3 +132,5 @@ TEST_F(WildcardJITListTest, Lookup) {
   EXPECT_TRUE(jitlist->lookupName(foo, foo_bar_evaluate));
   EXPECT_FALSE(jitlist->lookupName(bar, foo_evaluate));
 }
+
+} // namespace cinderx

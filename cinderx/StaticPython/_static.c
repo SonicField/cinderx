@@ -3,10 +3,16 @@
 #include "cinderx/python.h"
 
 #include "internal/pycore_call.h"
+#include "internal/pycore_object.h"
 #include "internal/pycore_pystate.h"
 
 #if PY_VERSION_HEX >= 0x030D0000
 #include "internal/pycore_modsupport.h"
+#endif
+
+#if PY_VERSION_HEX >= 0x030E0000
+#include "internal/pycore_object_deferred.h"
+#include "internal/pycore_uniqueid.h"
 #endif
 
 #include "cinderx/CachedProperties/cached_properties.h"
@@ -25,6 +31,39 @@
 #include "cinderx/StaticPython/typed_method_def.h"
 #include "cinderx/StaticPython/vtable_builder.h"
 #include "cinderx/UpstreamBorrow/borrowed.h"
+
+static int type_refcount_indicates_escape(
+    PyObject* type,
+    Py_ssize_t expected_refcount) {
+  assert(PyType_Check(type));
+  assert(PyType_HasFeature((PyTypeObject*)type, Py_TPFLAGS_HEAPTYPE));
+  Py_ssize_t refcount = Py_REFCNT(type);
+
+#ifdef Py_GIL_DISABLED
+  // TODO: Pending references owned by other threads cannot be read safely
+  // here. If a metaclass or base publishes the type, this check can miss
+  // instances created by another thread. Closing that race requires
+  // synchronizing all threads across both this check and the layout update, or
+  // finalizing the layout before user callbacks can publish the type.
+  PyHeapTypeObject* heap_type = (PyHeapTypeObject*)type;
+  Py_ssize_t unique_id = heap_type->unique_id;
+
+  if (unique_id != _Py_INVALID_UNIQUE_ID) {
+    Py_ssize_t index = unique_id - 1;
+    _PyThreadStateImpl* tstate = (_PyThreadStateImpl*)_PyThreadState_GET();
+
+    if (index < tstate->refcounts.size) {
+      refcount += tstate->refcounts.values[index];
+    }
+  }
+
+  if (_PyObject_HasDeferredRefcount(type)) {
+    refcount -= _Py_REF_DEFERRED;
+  }
+#endif
+
+  return refcount != expected_refcount;
+}
 
 PyDoc_STRVAR(
     _static__doc__,
@@ -70,17 +109,31 @@ static int _static_exec(PyObject* m) {
     return -1;
   }
 
-  if (PyType_Ready(&Ci_CheckedListRevIter_Type) < 0 ||
-      PyType_Ready(&Ci_CheckedListIter_Type) < 0 ||
-      PyType_Ready(&Ci_CheckedDictItems_Type) < 0 ||
-      PyType_Ready(&Ci_CheckedDictValues_Type) < 0 ||
-      PyType_Ready(&Ci_CheckedDictIterKey_Type) < 0 ||
-      PyType_Ready(&Ci_CheckedDictIterValue_Type) < 0 ||
-      PyType_Ready(&Ci_CheckedDictIterItem_Type) < 0 ||
-      PyType_Ready(&Ci_CheckedDictRevIterKey_Type) < 0 ||
-      PyType_Ready(&Ci_CheckedDictRevIterItem_Type) < 0 ||
-      PyType_Ready(&Ci_CheckedDictRevIterValue_Type) < 0 ||
-      PyType_Ready(&Ci_CheckedDictKeys_Type) < 0 ||
+  if ((Ci_CheckedDictIterKey_Type = (PyTypeObject*)PyType_FromSpec(
+           &Ci_CheckedDictIterKey_Spec)) == NULL ||
+      (Ci_CheckedDictIterValue_Type = (PyTypeObject*)PyType_FromSpec(
+           &Ci_CheckedDictIterValue_Spec)) == NULL ||
+      (Ci_CheckedDictIterItem_Type = (PyTypeObject*)PyType_FromSpec(
+           &Ci_CheckedDictIterItem_Spec)) == NULL ||
+      (Ci_CheckedDictRevIterKey_Type = (PyTypeObject*)PyType_FromSpec(
+           &Ci_CheckedDictRevIterKey_Spec)) == NULL ||
+      (Ci_CheckedDictRevIterItem_Type = (PyTypeObject*)PyType_FromSpec(
+           &Ci_CheckedDictRevIterItem_Spec)) == NULL ||
+      (Ci_CheckedDictRevIterValue_Type = (PyTypeObject*)PyType_FromSpec(
+           &Ci_CheckedDictRevIterValue_Spec)) == NULL) {
+    return -1;
+  }
+
+  if ((Ci_CheckedListRevIter_Type = (PyTypeObject*)PyType_FromSpec(
+           &Ci_CheckedListRevIter_Spec)) == NULL ||
+      (Ci_CheckedListIter_Type =
+           (PyTypeObject*)PyType_FromSpec(&Ci_CheckedListIter_Spec)) == NULL ||
+      (Ci_CheckedDictItems_Type =
+           (PyTypeObject*)PyType_FromSpec(&Ci_CheckedDictItems_Spec)) == NULL ||
+      (Ci_CheckedDictValues_Type = (PyTypeObject*)PyType_FromSpec(
+           &Ci_CheckedDictValues_Spec)) == NULL ||
+      (Ci_CheckedDictKeys_Type =
+           (PyTypeObject*)PyType_FromSpec(&Ci_CheckedDictKeys_Spec)) == NULL ||
       PyType_Ready(&_PyType_MethodThunk) < 0 ||
       PyType_Ready(&_PyType_StaticThunk) < 0 ||
       PyType_Ready(&_PyType_PropertyThunk) < 0 ||
@@ -309,8 +362,6 @@ typedef struct {
   int is_coroutine;
 } _Py_ContextManagerWrapper;
 
-static PyObject* _return_none;
-
 int ctxmgrwrp_import_value(
     const char* module,
     const char* name,
@@ -322,6 +373,7 @@ int ctxmgrwrp_import_value(
   if (*dest == NULL) {
     PyObject* value = PyObject_GetAttrString(mod, name);
     if (value == NULL) {
+      Py_DECREF(mod);
       return -1;
     }
     *dest = value;
@@ -383,12 +435,26 @@ static PyObject* ctxmgrwrp_exit(
        * We need to actually produce a co-routine which is going to return
        * None to do that, so we have a helper function which does just that.
        */
-      if (_return_none == NULL &&
-          ctxmgrwrp_import_value("__static__", "_return_none", &_return_none)) {
-        return NULL;
+      PyObject* rn = Ci_GetReturnNone();
+      if (rn == NULL) {
+        PyObject* imported = NULL;
+        if (ctxmgrwrp_import_value("__static__", "_return_none", &imported)) {
+          return NULL;
+        }
+        if (!PyFunction_Check(imported)) {
+          PyErr_Format(
+              PyExc_TypeError,
+              "Expected __static__._return_none to be a function, got %s",
+              Py_TYPE(imported)->tp_name);
+          Py_DECREF(imported);
+          return NULL;
+        }
+        Ci_SetReturnNone((PyFunctionObject*)imported);
+        Py_DECREF(imported);
+        rn = Ci_GetReturnNone();
       }
 
-      return _PyObject_CallNoArgs(_return_none);
+      return _PyObject_CallNoArgs(rn);
     }
     Py_RETURN_NONE;
   } else {
@@ -427,8 +493,6 @@ static PyObject* ctxmgrwrp_cb(
   }
   return ctxmgrwrp_exit(result != NULL, NULL, result, awaitable->state);
 }
-
-extern int _PyObject_GetMethod(PyObject*, PyObject*, PyObject**);
 
 static PyObject* get_descr(PyObject* obj, PyObject* self) {
   descrgetfunc f = Py_TYPE(obj)->tp_descr_get;
@@ -595,12 +659,6 @@ static PyObject* ctxmgrwrp_make_awaitable(
 
 PyTypeObject _PyContextDecoratorWrapper_Type;
 
-#if PY_VERSION_HEX < 0x030C0000
-#define IS_AWAITED(nargsf) (nargsf & Ci_Py_AWAITED_CALL_MARKER)
-#else
-#define IS_AWAITED(nargsf) false
-#endif
-
 static PyObject* ctxmgrwrp_vectorcall(
     PyFunctionObject* func,
     PyObject* const* args,
@@ -624,7 +682,7 @@ static PyObject* ctxmgrwrp_vectorcall(
    * of the coroutine.  Otherwise we're not a co-routine or we're eagerly
    * awaited in which case we'll call __enter__ now and capture __exit__
    * before any possible side effects to match the normal eval loop */
-  if (!self->is_coroutine || IS_AWAITED(nargsf)) {
+  if (!self->is_coroutine) {
     exit = ctxmgrwrp_enter(self, &ctx_mgr);
     if (exit == NULL) {
       return NULL;
@@ -635,32 +693,7 @@ static PyObject* ctxmgrwrp_vectorcall(
   PyObject* res = _PyObject_Vectorcall(self->func, args, nargsf, kwargs);
   /* TASK(T128335015): Enable this when we have async/await support. */
   if (self->is_coroutine && res != NULL) {
-#if PY_VERSION_HEX < 0x030C0000
-    /* If it's a co-routine either pass up the eagerly awaited value or
-     * pass out a wrapping awaitable */
-    int eager = Ci_PyWaitHandle_CheckExact(res);
-    if (eager) {
-      Ci_PyWaitHandleObject* handle = (Ci_PyWaitHandleObject*)res;
-      if (handle->wh_waiter == NULL) {
-        assert(nargsf & Ci_Py_AWAITED_CALL_MARKER && exit != NULL);
-        // pass in unwrapped result into exit so it could be released in error
-        // case
-        PyObject* result =
-            ctxmgrwrp_exit(1, ctx_mgr, handle->wh_coro_or_result, exit);
-        Py_DECREF(exit);
-        Py_XDECREF(ctx_mgr);
-        if (result == NULL) {
-          // wrapped result is released in ctxmgrwrp_exit, now release the
-          // waithandle itself
-          Ci_PyWaitHandle_Release((PyObject*)handle);
-          return NULL;
-        }
-        return res;
-      }
-    }
-#else
     int eager = 0;
-#endif
     return ctxmgrwrp_make_awaitable(self, ctx_mgr, exit, res, eager);
   }
 
@@ -702,7 +735,6 @@ static void ctxmgrwrp_dealloc(_Py_ContextManagerWrapper* self) {
 PyTypeObject _PyContextDecoratorWrapper_Type = {
     PyVarObject_HEAD_INIT(NULL, 0) "context_decorator_wrapper",
     sizeof(_Py_ContextManagerWrapper),
-    .tp_base = &_PyWeakref_RefType,
     .tp_dealloc = (destructor)ctxmgrwrp_dealloc,
     .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
     .tp_traverse = (traverseproc)ctxmgrwrp_traverse,
@@ -727,8 +759,6 @@ static PyMethodDef _WeakrefCallback = {
     METH_O,
     NULL};
 
-static PyObject* weakref_callback;
-
 PyObject* make_context_decorator_wrapper(
     PyObject* mod,
     PyObject* const* args,
@@ -749,11 +779,14 @@ PyObject* make_context_decorator_wrapper(
   PyFunctionObject* wrapper_func = (PyFunctionObject*)args[1];
   PyObject* wrapped_func = args[2];
 
-  if (weakref_callback == NULL) {
-    weakref_callback = PyCFunction_New(&_WeakrefCallback, NULL);
-    if (weakref_callback == NULL) {
+  PyObject* wrcb = Ci_GetWeakrefCallback();
+  if (wrcb == NULL) {
+    wrcb = PyCFunction_New(&_WeakrefCallback, NULL);
+    if (wrcb == NULL) {
       return NULL;
     }
+    Ci_SetWeakrefCallback((PyCFunctionObject*)wrcb);
+    Py_DECREF(wrcb);
   }
 
   PyObject* wrargs = PyTuple_New(2);
@@ -763,8 +796,8 @@ PyObject* make_context_decorator_wrapper(
 
   PyTuple_SET_ITEM(wrargs, 0, (PyObject*)wrapper_func);
   Py_INCREF(wrapper_func);
-  PyTuple_SET_ITEM(wrargs, 1, weakref_callback);
-  Py_INCREF(weakref_callback);
+  PyTuple_SET_ITEM(wrargs, 1, wrcb);
+  Py_INCREF(wrcb);
 
   _Py_ContextManagerWrapper* ctxmgr_wrapper =
       (_Py_ContextManagerWrapper*)_PyWeakref_RefType.tp_new(
@@ -793,47 +826,6 @@ PyObject* make_context_decorator_wrapper(
   return (PyObject*)wrapper_func;
 }
 
-#if PY_VERSION_HEX < 0x030C0000
-
-Ci_Py_TYPED_SIGNATURE(Ci_static_rand, Ci_Py_SIG_INT32, NULL);
-
-static Py_ssize_t static_property_missing_fget(PyObject* mod, PyObject* self) {
-  PyErr_SetString(PyExc_AttributeError, "unreadable attribute");
-  return -1;
-}
-
-Ci_Py_TYPED_SIGNATURE(
-    static_property_missing_fget,
-    Ci_Py_SIG_ERROR,
-    &Ci_Py_Sig_Object,
-    NULL);
-
-static Py_ssize_t
-static_property_missing_fset(PyObject* mod, PyObject* self, PyObject* val) {
-  PyErr_SetString(PyExc_AttributeError, "can't set attribute");
-  return -1;
-}
-
-Ci_Py_TYPED_SIGNATURE(
-    static_property_missing_fset,
-    Ci_Py_SIG_ERROR,
-    &Ci_Py_Sig_Object,
-    &Ci_Py_Sig_Object,
-    NULL);
-
-static Py_ssize_t static_property_missing_fdel(PyObject* mod, PyObject* self) {
-  PyErr_SetString(PyExc_AttributeError, "can't del attribute");
-  return -1;
-}
-
-Ci_Py_TYPED_SIGNATURE(
-    static_property_missing_fdel,
-    Ci_Py_SIG_ERROR,
-    &Ci_Py_Sig_Object,
-    NULL);
-
-#else
-
 static PyObject* static_property_missing_fget(PyObject* mod, PyObject* self) {
   PyErr_SetString(PyExc_AttributeError, "unreadable attribute");
   return NULL;
@@ -849,8 +841,6 @@ static PyObject* static_property_missing_fdel(PyObject* mod, PyObject* self) {
   PyErr_SetString(PyExc_AttributeError, "can't del attribute");
   return NULL;
 }
-
-#endif
 
 static int create_overridden_slot_descriptors_with_default(PyTypeObject* type) {
   PyObject* mro = type->tp_mro;
@@ -1109,10 +1099,8 @@ error:
   return NULL;
 }
 
-#if PY_VERSION_HEX >= 0x030C0000
 #define PyHeapType_GET_MEMBERS(type) \
   (PyMemberDef*)PyObject_GetItemData((PyObject*)type);
-#endif
 
 static int type_new_descriptors(
     const PyObject* slots,
@@ -1233,10 +1221,7 @@ static int type_new_descriptors(
   /* Round slotoffset up so any child class layouts start properly aligned. */
   slotoffset = _Py_SIZE_ROUND_UP(slotoffset, sizeof(PyObject*));
 
-#if PY_VERSION_HEX >= 0x030C0000
-  if (!PyType_HasFeature(type, Py_TPFLAGS_PREHEADER))
-#endif
-  {
+  if (!PyType_HasFeature(type, Py_TPFLAGS_PREHEADER)) {
     if (type->tp_dictoffset) {
       if (type->tp_base->tp_itemsize == 0) {
         type->tp_dictoffset = slotoffset;
@@ -1250,10 +1235,8 @@ static int type_new_descriptors(
       slotoffset += sizeof(PyObject*);
       needs_gc = 1;
     }
-#if PY_VERSION_HEX >= 0x030C0000
   } else {
     needs_gc = 1;
-#endif
   }
 
   // We should have checked for leakage earlier...
@@ -1432,12 +1415,16 @@ static int init_cached_properties(
       char attr_name[strlen(name) - strlen(async_prefix) + 1];
       strcpy(attr_name, name + strlen(async_prefix));
       attr = PyUnicode_FromString(attr_name);
+      if (attr == NULL) {
+        return -1;
+      }
       PyObject* descr = PyDict_GetItem(_PyType_GetDict(type), attr);
       if (descr == NULL) {
         PyErr_Format(
             PyExc_TypeError,
             "cached property descriptor doesn't exist: %R",
             attr);
+        Py_DECREF(attr);
         return -1;
       }
 
@@ -1451,12 +1438,16 @@ static int init_cached_properties(
       char attr_name[strlen(name) - strlen(normal_prefix) + 1];
       strcpy(attr_name, name + strlen(normal_prefix));
       attr = PyUnicode_FromString(attr_name);
+      if (attr == NULL) {
+        return -1;
+      }
       PyObject* descr = PyDict_GetItem(_PyType_GetDict(type), attr);
       if (descr == NULL) {
         PyErr_Format(
             PyExc_TypeError,
             "cached property descriptor doesn't exist: %R",
             attr);
+        Py_DECREF(attr);
         return -1;
       }
 
@@ -1479,12 +1470,16 @@ static int init_cached_properties(
     int res;
     res = PyObject_SetAttr((PyObject*)type, attr, property);
     if (res != 0) {
+      Py_DECREF(property);
+      Py_DECREF(attr);
       return -1;
     }
 
     // Next clear the backing slot
     res = PyObject_SetAttr((PyObject*)type, impl_name, NULL);
     if (res != 0) {
+      Py_DECREF(property);
+      Py_DECREF(attr);
       return -1;
     }
     Py_DECREF(property);
@@ -1499,7 +1494,9 @@ static PyObject* _static___build_cinder_class__(
     PyObject* self,
     PyObject* const* args,
     Py_ssize_t nargs) {
+#ifndef Py_GIL_DISABLED
   DEFINE_STATIC_STRING(__final_method_names__);
+#endif
 
   PyObject* mkw;
   PyObject* type = NULL;
@@ -1525,8 +1522,14 @@ static PyObject* _static___build_cinder_class__(
   }
 
   int has_class_cell = PyObject_IsTrue(args[3]);
+  if (has_class_cell < 0) {
+    return NULL;
+  }
   PyObject* final_method_names = args[4];
   int final = PyObject_IsTrue(args[5]);
+  if (final < 0) {
+    return NULL;
+  }
   PyObject* cached_properties = args[6];
   if (!PyTuple_CheckExact(cached_properties)) {
     PyErr_SetString(
@@ -1577,7 +1580,14 @@ static PyObject* _static___build_cinder_class__(
   }
 
   int res;
+#ifdef Py_GIL_DISABLED
+  // FT interning expects a non-interned string to be mortal before promoting
+  // it. DEFINE_STATIC_STRING creates an immortal string without interning it.
+  res = PyObject_SetAttrString(
+      type, "__final_method_names__", final_method_names);
+#else
   res = PyObject_SetAttr(type, s___final_method_names__, final_method_names);
+#endif
   if (res != 0) {
     goto error;
   }
@@ -1624,9 +1634,10 @@ static PyObject* _static___build_cinder_class__(
       slot_count++;
     }
 #endif
+
     // Type by default has 2 references, the one which we'll return, and one
     // which is a circular reference between the type and its MRO
-    if (Py_REFCNT(type) != 2 + slot_count) {
+    if (type_refcount_indicates_escape(type, 2 + slot_count)) {
       leaked_type = 1;
     }
   }
@@ -1675,6 +1686,7 @@ PyObject* resolve_primitive_descr(PyObject* mod, PyObject* descr) {
   return PyLong_FromLong(type_code);
 }
 
+#ifndef WIN32
 static PyObject* lookup_native_symbol(
     PyObject* Py_UNUSED(module),
     PyObject** args,
@@ -1710,6 +1722,7 @@ PyObject* clear_dlsym_cache(PyObject* Py_UNUSED(module)) {
   _PyClassloader_Clear_DlSym_Cache();
   Py_RETURN_NONE;
 }
+#endif
 
 static int sp_audit_hook(const char* event, PyObject* args, void* data) {
   if (strcmp(event, "object.__setattr__") != 0 || PyTuple_GET_SIZE(args) != 3) {
@@ -1734,10 +1747,8 @@ static int sp_audit_hook(const char* event, PyObject* args, void* data) {
   return 0;
 }
 
-static int sp_audit_hook_installed = 0;
-
 static PyObject* install_sp_audit_hook(PyObject* mod) {
-  if (sp_audit_hook_installed) {
+  if (Ci_GetSpAuditHookInstalled()) {
     Py_RETURN_NONE;
   }
   void* kData = NULL;
@@ -1746,7 +1757,7 @@ static PyObject* install_sp_audit_hook(PyObject* mod) {
         PyExc_RuntimeError, "Could not install Static Python audit hook");
     return NULL;
   }
-  sp_audit_hook_installed = 1;
+  Ci_SetSpAuditHookInstalled(true);
   Py_RETURN_NONE;
 }
 
@@ -1780,11 +1791,7 @@ static PyMethodDef static_methods[] = {
      (PyCFunction)(void (*)(void))set_type_code,
      METH_FASTCALL,
      ""},
-#if PY_VERSION_HEX < 0x030C0000
-    {"rand", (PyCFunction)&Ci_static_rand_def, Ci_METH_TYPED, ""},
-#else
     {"rand", (PyCFunction)&Ci_static_rand, METH_NOARGS, ""},
-#endif
     {"is_type_static", (PyCFunction)(void (*)(void))is_type_static, METH_O, ""},
     {"set_type_static",
      (PyCFunction)(void (*)(void))set_type_static,
@@ -1803,20 +1810,6 @@ static PyMethodDef static_methods[] = {
      (PyCFunction)(void (*)(void))make_context_decorator_wrapper,
      METH_FASTCALL,
      ""},
-#if PY_VERSION_HEX < 0x030C0000
-    {"_property_missing_fget",
-     (PyCFunction)&static_property_missing_fget_def,
-     Ci_METH_TYPED,
-     ""},
-    {"_property_missing_fset",
-     (PyCFunction)&static_property_missing_fset_def,
-     Ci_METH_TYPED,
-     ""},
-    {"_property_missing_fdel",
-     (PyCFunction)&static_property_missing_fdel_def,
-     Ci_METH_TYPED,
-     ""},
-#else
     {"_property_missing_fget",
      (PyCFunction)&static_property_missing_fget,
      METH_O,
@@ -1829,7 +1822,6 @@ static PyMethodDef static_methods[] = {
      (PyCFunction)&static_property_missing_fdel,
      METH_O,
      ""},
-#endif
     {"resolve_primitive_descr",
      (PyCFunction)(void (*)(void))resolve_primitive_descr,
      METH_O,
@@ -1839,6 +1831,7 @@ static PyMethodDef static_methods[] = {
      METH_FASTCALL,
      ""},
     {"init_subclass", (PyCFunction)init_subclass, METH_O, ""},
+#ifndef WIN32
     {"lookup_native_symbol",
      (PyCFunction)(void (*)(void))lookup_native_symbol,
      METH_FASTCALL,
@@ -1859,6 +1852,7 @@ static PyMethodDef static_methods[] = {
      (PyCFunction)(void (*)(void))clear_dlsym_cache,
      METH_FASTCALL,
      ""},
+#endif
     {"install_sp_audit_hook",
      (PyCFunction)(void (*)(void))install_sp_audit_hook,
      METH_NOARGS,
@@ -1895,6 +1889,20 @@ static int static_clear(PyObject* mod) {
 
 static void static_free(PyObject* mod) {
   static_clear(mod);
+
+  Py_CLEAR(Ci_CheckedDictIterKey_Type);
+  Py_CLEAR(Ci_CheckedDictIterValue_Type);
+  Py_CLEAR(Ci_CheckedDictIterItem_Type);
+  Py_CLEAR(Ci_CheckedDictRevIterKey_Type);
+  Py_CLEAR(Ci_CheckedDictRevIterItem_Type);
+  Py_CLEAR(Ci_CheckedDictRevIterValue_Type);
+
+  Py_CLEAR(Ci_CheckedDictKeys_Type);
+  Py_CLEAR(Ci_CheckedDictItems_Type);
+  Py_CLEAR(Ci_CheckedDictValues_Type);
+
+  Py_CLEAR(Ci_CheckedListIter_Type);
+  Py_CLEAR(Ci_CheckedListRevIter_Type);
 }
 
 static PyModuleDef_Slot _static_slots[] = {{Py_mod_exec, _static_exec}, {}};
@@ -1911,11 +1919,16 @@ static struct PyModuleDef _staticmodule = {
     (freefunc)static_free};
 
 PyObject* _static_init() {
+  Ci_Py_Sig_String_Opt.se_default_value = Py_None;
+  Ci_Py_Sig_Object_Opt.se_default_value = Py_None;
+  Ci_Py_Sig_T1_Opt.se_default_value = Py_None;
+  Ci_Py_Sig_T0_Opt.se_default_value = Py_None;
   return PyModuleDef_Init(&_staticmodule);
 }
 
 int _Ci_CreateStaticModule(void) {
   PyObject* mod = _Ci_CreateBuiltinModule(&_staticmodule, "_static");
+  _PyContextDecoratorWrapper_Type.tp_base = &_PyWeakref_RefType;
   if (mod == NULL) {
     return -1;
   }

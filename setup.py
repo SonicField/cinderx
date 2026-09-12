@@ -11,6 +11,7 @@ import datetime
 import glob
 import os
 import os.path
+import platform
 import re
 import shutil
 import subprocess
@@ -18,7 +19,6 @@ import sys
 import sysconfig
 from enum import Enum
 from functools import lru_cache
-from typing import Callable
 
 from setuptools import Extension, find_packages, setup
 from setuptools.command.build import build as build
@@ -82,7 +82,7 @@ def get_compiler() -> tuple[str, str]:
     gcc_path = shutil.which("gcc")
     gxx_path = shutil.which("g++")
 
-    if gcc_path and gxx_path:
+    if gcc_path and gxx_path and platform.system() != "Windows":
         try:
             result = subprocess.run(
                 [gcc_path, "--version"],
@@ -113,8 +113,11 @@ def get_compiler() -> tuple[str, str]:
             print(f"Failed to determine GCC version: {e}, checking for Clang")
 
     # Fall back to Clang
-    clang_path = shutil.which("clang")
-    clangxx_path = shutil.which("clang++")
+    if platform.system() != "Windows":
+        clang_path = shutil.which("clang")
+        clangxx_path = shutil.which("clang++")
+    else:
+        clang_path = clangxx_path = shutil.which("clang-cl")
 
     if clang_path and clangxx_path:
         print(f"Using Clang: {clang_path}, {clangxx_path}")
@@ -183,7 +186,7 @@ class BuildCommand(build):
         cinderx_so_dir = os.path.join(os.getcwd(), self.build_lib)
         if "PYTHONPATH" in workload_env:
             workload_env["PYTHONPATH"] = (
-                f"{cinderx_so_dir}:{workload_env['PYTHONPATH']}"
+                f"{cinderx_so_dir}{os.pathsep}{workload_env['PYTHONPATH']}"
             )
         else:
             workload_env["PYTHONPATH"] = cinderx_so_dir
@@ -195,9 +198,6 @@ class BuildCommand(build):
             """
 import cinderx
 
-import sys
-sys.argv.append("--pgo")
-
 def main():
     # This import must not be in the module body as it will start the tests
     # running, and those using multiprocessing will fail because the initial
@@ -207,6 +207,7 @@ def main():
 if __name__ == "__main__":
     main()
             """,
+            "--pgo",
         ]
 
         print(f"Running workload with PYTHONPATH={workload_env['PYTHONPATH']}")
@@ -216,12 +217,30 @@ if __name__ == "__main__":
         }
         if is_clang:
             workload_args["cwd"] = clang_pgo_dir
+
+        subprocess.run(workload_cmd, **workload_args)
+        workload_env["CINDERX_JIT_ALL"] = "1"
+
+        # Not everything passes w/ the JIT but we still want the coverage
+        workload_args["check"] = False
+        # pickle crashes due to lack of recursion enforcement
+        workload_cmd += ["-x", "test_pickle"]
         subprocess.run(workload_cmd, **workload_args)
 
         if is_clang:
             print_section("PGO STAGE 2b: Merging profile data")
 
             llvm_profdata = shutil.which("llvm-profdata")
+            if not llvm_profdata and sys.platform == "darwin":
+                # Apple Clang ships llvm-profdata in the Xcode toolchain but
+                # doesn't put it on PATH; locate it via xcrun.
+                result = subprocess.run(
+                    ["xcrun", "-f", "llvm-profdata"],
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode == 0:
+                    llvm_profdata = result.stdout.strip()
             if not llvm_profdata:
                 raise RuntimeError("Cannot find llvm-profdata")
             glob_path = os.path.join(clang_pgo_dir, "*.profraw")
@@ -315,21 +334,16 @@ class BuildPy(build_py):
 
         super().run()
 
-        # Copy opcodes/${PY_VERSION}/opcode.py to cinderx/opcode.py.
+        # Copy opcodes/${PY_VERSION_UNDERSCORED}/opcode.py to cinderx/opcode.py.
         py_version = compute_py_version()
         out_path = self.get_module_outfile(self.build_lib, ["cinderx"], "opcode")
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        ver_dir = f"{py_version.replace('.', '_')}"
         self.copy_file(
-            os.path.join(PYTHON_LIB_DIR, f"opcodes/{py_version}/opcode.py"),
+            os.path.join(PYTHON_LIB_DIR, f"opcodes/{ver_dir}/opcode.py"),
             out_path,
             preserve_mode=False,
         )
-
-        # For OSS builds always surface the CinderX import errors
-        dev_build_file = os.path.join(self.get_package_dir("cinderx"), ".dev_build")
-        print(f"Writing .dev_build file to {dev_build_file}")
-        with open(dev_build_file, "w") as f:
-            f.write("\n")
 
 
 class CMakeExtension(Extension):
@@ -371,17 +385,27 @@ class BuildExt(build_ext):
         build_dir = self.build_temp
         os.makedirs(build_dir, exist_ok=True)
 
+        # get_ext_fullpath returns a file path (e.g., "scratch/lib/_cinderx.cp314-win_amd64.pyd").
         # pyre-ignore[16]: No pyre types for build_ext.
-        extension_dir = os.path.abspath(self.get_ext_fullpath(extension.name))
-        os.makedirs(extension_dir, exist_ok=True)
+        ext_fullpath = os.path.abspath(self.get_ext_fullpath(extension.name))
+        ext_dir = os.path.dirname(ext_fullpath)
+        os.makedirs(ext_dir, exist_ok=True)
 
         cc, cxx = get_compiler()
 
         build_type = os.environ.get("CMAKE_BUILD_TYPE", "RelWithDebInfo")
         verbose_makefile = os.environ.get("CMAKE_VERBOSE_MAKEFILE", "OFF")
-        cmake_args = [
+
+        cmake_generator = os.environ.get("CMAKE_GENERATOR")
+        if not cmake_generator and shutil.which("ninja"):
+            cmake_generator = "Ninja"
+
+        cmake_args = []
+        if cmake_generator:
+            cmake_args += ["-G", cmake_generator]
+        cmake_args += [
             f"-DCMAKE_BUILD_TYPE={build_type}",
-            f"-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={os.path.dirname(extension_dir)}",
+            f"-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={ext_dir}",
             f"-DCMAKE_C_COMPILER={cc}",
             f"-DCMAKE_CXX_COMPILER={cxx}",
             f"-DCMAKE_VERBOSE_MAKEFILE:BOOL={verbose_makefile}",
@@ -395,6 +419,10 @@ class BuildExt(build_ext):
             cmake_args.append("-DENABLE_PGO_USE=ON")
             if self.cinderx_pgo_profile_path:
                 cmake_args.append(f"-DPGO_PROFILE_FILE={self.cinderx_pgo_profile_path}")
+
+        build_runtime_tests = os.environ.get("CINDERX_BUILD_RUNTIME_TESTS") == "1"
+        if build_runtime_tests:
+            cmake_args.append("-DBUILD_RUNTIME_TESTS=ON")
 
         # LTO configuration
         enable_lto = os.environ.get("CINDERX_ENABLE_LTO", None)
@@ -421,27 +449,34 @@ class BuildExt(build_ext):
         py_version = compute_py_version()
         options["PY_VERSION"] = py_version
         options["Python_ROOT_DIR"] = self._find_python()
+        options["Python_EXECUTABLE"] = sys.executable
 
         meta_python = "+meta" in sys.version
         linux = sys.platform == "linux"
+        mac = sys.platform == "darwin"
         meta_312 = meta_python and py_version == "3.12"
         is_314plus = py_version == "3.14" or py_version == "3.15"
+        is_315 = py_version == "3.15"
+        free_threading = bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
 
-        set_option("META_PYTHON", meta_python)
         set_option("ENABLE_ADAPTIVE_STATIC_PYTHON", meta_312)
-        set_option("ENABLE_DISASSEMBLER", False)
+        set_option("ENABLE_DISASSEMBLER", True)
         set_option("ENABLE_ELF_READER", linux)
         set_option("ENABLE_EVAL_HOOK", meta_312)
-        set_option("ENABLE_FUNC_EVENT_MODIFY_QUALNAME", meta_312)
+        set_option("ENABLE_FREE_THREADING", free_threading)
+        set_option("ENABLE_FUNC_EVENT_MODIFY_QUALNAME", meta_312 or is_315)
         set_option("ENABLE_GENERATOR_AWAITER", meta_312)
-        set_option("ENABLE_INTERPRETER_LOOP", meta_312 or is_314plus)
+        set_option("ENABLE_INTERPRETER_LOOP", True)
         set_option("ENABLE_LAZY_IMPORTS", meta_312)
         set_option("ENABLE_LIGHTWEIGHT_FRAMES", meta_312)
         set_option("ENABLE_PARALLEL_GC", meta_312)
-        set_option("ENABLE_PEP523_HOOK", meta_312 or is_314plus)
+        set_option("ENABLE_PEP523_HOOK", True)
         set_option("ENABLE_PERF_TRAMPOLINE", meta_312)
+        set_option("ENABLE_PREFORK_MODEL", False)
         set_option("ENABLE_SYMBOLIZER", linux)
+        set_option("ENABLE_XXCLASSLOADER", False)
         set_option("ENABLE_USDT", linux)
+        set_option("ENABLE_ZLIB", linux or mac)
 
         for name, value in options.items():
             cmake_args.append(f"-D{name}={value}")
@@ -454,9 +489,35 @@ class BuildExt(build_ext):
             str(os.cpu_count() or 1),
         ]
 
+        if platform.system() == "Windows":
+            cmake_args.extend(["-G", "Ninja"])
+
         # pyre-ignore[16]: No pyre types for build_ext.
         self.spawn(["cmake"] + cmake_args + ["-B", build_dir, CHECKOUT_ROOT_DIR])
         self.spawn(["cmake", "--build", build_dir] + build_args)
+
+        if build_runtime_tests:
+            self._copy_runtime_tests(build_dir)
+
+        if not os.path.exists(ext_fullpath):
+            raise RuntimeError(f"CMake extension output not found: {ext_fullpath}")
+
+    def _copy_runtime_tests(self, build_dir: str) -> None:
+        output_dir = os.environ.get("CINDERX_RUNTIME_TESTS_OUTPUT_DIR")
+        if output_dir is None:
+            return
+
+        runtime_tests_name = (
+            "RuntimeTests.exe" if platform.system() == "Windows" else "RuntimeTests"
+        )
+        runtime_tests_path = os.path.join(build_dir, runtime_tests_name)
+        if not os.path.exists(runtime_tests_path):
+            raise RuntimeError(f"RuntimeTests binary not found: {runtime_tests_path}")
+
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = os.path.join(output_dir, runtime_tests_name)
+        print(f"Copying {runtime_tests_path} -> {output_path}")
+        shutil.copy(runtime_tests_path, output_path)
 
     def _find_python(self) -> str:
         # Normally this would use "data", but that goes to a temporary build directory
@@ -479,7 +540,9 @@ def main() -> None:
         },
         packages=find_packages(where=PYTHON_LIB_DIR, exclude=["test_cinderx*"]),
         package_dir={"": PYTHON_LIB_DIR},
-        package_data={"cinderx": [".dev_build"]},
+        package_data={
+            "cinderx.compiler.strict": ["stubs/**/*.pys"],
+        },
     )
 
 

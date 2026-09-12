@@ -5,10 +5,10 @@
 #include "cinderx/Jit/lir/instruction.h"
 #include "cinderx/Jit/lir/printer.h"
 
-namespace jit::lir {
+namespace cinderx::jit::lir {
 
 bool verifyPostRegAllocInvariants(Function* func, std::ostream& err) {
-  auto& blocks = func->basicblocks();
+  auto& blocks = func->basicBlocks();
   for (auto iter = blocks.begin(); iter != blocks.end();) {
     auto& block = *iter;
     ++iter;
@@ -16,13 +16,35 @@ bool verifyPostRegAllocInvariants(Function* func, std::ostream& err) {
     BasicBlock* next_block = iter == blocks.end() ? nullptr : *iter;
     std::unordered_set<BasicBlock*> branched_blocks;
     for (auto& instr : block->instructions()) {
-      if (instr->isBranch() || instr->isBranchCC()) {
+      if (instr->isBranch() || isBranchCC(instr->opcode()) ||
+          instr->isBranchBitSet() || instr->isBranchBitNotSet()) {
+        size_t label_input_idx = 0;
+        if (instr->isBranchBitSet() || instr->isBranchBitNotSet()) {
+          JIT_DCHECK(
+              instr->getNumInputs() == 3,
+              "BranchBitSet/BranchBitNotSet must have value, bit, and label "
+              "inputs.");
+          label_input_idx = 2;
+        } else {
+          JIT_DCHECK(
+              instr->getNumInputs() == 1, "Branch must have a single input.");
+        }
+        auto operand = instr->getInput(label_input_idx);
+        if (operand->isInd() || operand->isImm()) {
+          // Indirect or direct-address branch — no CFG successor to verify.
+          continue;
+        }
         JIT_DCHECK(
-            instr->getNumInputs() == 1, "Branch must have a single input.");
-        auto operand = instr->getInput(0);
+            operand->type() == Operand::kLabel, "Branch must jump to a label.");
+        branched_blocks.insert(operand->getBasicBlock());
+      } else if (isCmpBranch(instr->opcode())) {
         JIT_DCHECK(
-            operand->type() == OperandBase::kLabel,
-            "Branch must jump to a label.");
+            instr->getNumInputs() == 2,
+            "CmpBranch must have register and label inputs.");
+        auto operand = instr->getInput(1);
+        JIT_DCHECK(
+            operand->type() == Operand::kLabel,
+            "CmpBranch second input must be a label.");
         branched_blocks.insert(operand->getBasicBlock());
       }
     }
@@ -50,4 +72,4 @@ bool verifyPostRegAllocInvariants(Function* func, std::ostream& err) {
   return true;
 }
 
-} // namespace jit::lir
+} // namespace cinderx::jit::lir

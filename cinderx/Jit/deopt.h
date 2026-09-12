@@ -4,6 +4,9 @@
 
 #include "cinderx/python.h"
 
+#include "cinderx/Common/containers.h"
+#include "cinderx/Common/frozen_list.h"
+#include "cinderx/Jit/bytecode.h"
 #include "cinderx/Jit/codegen/arch.h"
 #include "cinderx/Jit/hir/hir.h"
 
@@ -12,11 +15,25 @@
 #include <fmt/ranges.h>
 
 #include <cstdint>
+#include <unordered_set>
 
-namespace jit {
+namespace cinderx::jit {
 
 // Return the ValueKind to use for a value with the given Type.
 hir::ValueKind deoptValueKind(hir::Type type);
+
+// Filters HIR live registers down to the values needed to recreate the
+// interpreter frame, release owned references, or report a guilty value.
+class DeoptLiveRegFilter {
+ public:
+  explicit DeoptLiveRegFilter(const hir::DeoptBase& instr);
+
+  bool isUsed(const hir::RegState& reg_state) const;
+
+ private:
+  const hir::DeoptBase& instr_;
+  std::unordered_set<hir::Register*> frame_state_regs_;
+};
 
 // LiveValue contains metadata about a live value at a specific point in a
 // JIT-compiled function.
@@ -70,15 +87,17 @@ struct LiveValue {
   }
 };
 
-#define DEOPT_REASONS(X)     \
-  X(GuardFailure)            \
-  X(YieldFrom)               \
-  X(Raise)                   \
-  X(RaiseStatic)             \
-  X(UnhandledException)      \
-  X(UnhandledUnboundLocal)   \
-  X(UnhandledUnboundFreevar) \
-  X(UnhandledNullField)
+#define DEOPT_REASONS(X)                                                \
+  X(GuardFailure)                                                       \
+  X(YieldFrom)                                                          \
+  X(Raise)                                                              \
+  X(RaiseStatic)                                                        \
+  X(UnhandledException)                                                 \
+  X(UnhandledUnboundLocal)                                              \
+  X(UnhandledUnboundFreevar)                                            \
+  X(UnhandledNullField)                                                 \
+  /* TODO(T262710971): Add a dedicated Instrumentation deopt reason. */ \
+  X(PeriodicTaskFailure)
 
 enum class DeoptReason : char {
 #define REASON(name) k##name,
@@ -86,12 +105,10 @@ enum class DeoptReason : char {
 #undef REASON
 };
 
-bool shouldResumeInterpreterInErrorHandler(DeoptReason reason);
-
 const char* deoptReasonName(DeoptReason reason);
 
-// Deopt metadata that is specific to a particular (shadow) frame whose code
-// may have been inlined.
+// Deopt metadata that is specific to a particular frame whose code may have
+// been inlined.
 struct DeoptFrameMetadata {
   // Locals + cellvars + freevars. This contains an index into live_values or
   // -1 to indicate that a variable is dead. This is somewhat oddly named in
@@ -197,13 +214,29 @@ struct DeoptMetadata {
 
   // Construct a `DeoptMetadata` instance from the information in `instr`.
   static DeoptMetadata fromInstr(const jit::hir::DeoptBase& instr);
+  static DeoptMetadata fromInstr(const jit::hir::LiveValuesBase& instr);
 };
 
-#if PY_VERSION_HEX < 0x030C0000
-using CiPyFrameObjType = PyFrameObject;
-#else
-using CiPyFrameObjType = _PyInterpreterFrame;
-#endif
+// A simple interface for reading the contents of registers + memory.
+//
+// One instance should cover a whole deopt: reading a primitive live value has
+// to box it, and the cache below is what keeps every frame-state slot backed
+// by that value pointing at a single object.
+class MemoryView {
+ public:
+  explicit MemoryView(const uint64_t* regs);
+
+  BorrowedRef<> readBorrowed(const LiveValue& value) const;
+  Ref<> readOwned(const LiveValue& value) const;
+  uint64_t readRaw(const LiveValue& value) const;
+
+ private:
+  const uint64_t* regs_;
+
+  // Objects materialized for primitive live values, keyed by the value they
+  // came from.  Holds a reference for as long as this view is alive.
+  mutable UnorderedMap<const LiveValue*, Ref<>> boxed_primitives_;
+};
 
 // Update `frame` so that execution can resume in the interpreter.
 //
@@ -211,8 +244,8 @@ using CiPyFrameObjType = _PyInterpreterFrame;
 // DeoptMetadatas. It may be size_t(-1) to indicate that `meta` is transient
 // and not in Runtime's list.
 //
-// The `regs` argument contains the values of all general purpose registers,
-// in the same order as they appear in `jit::codegen::PhyLocation`.
+// Reifying several frames of one deopt must share a single `mem`, so that a
+// live value referenced by more than one frame yields the same object.
 //
 // After this function is called, ownership of all references specified by
 // deopt_meta have been transferred to `frame`.
@@ -223,44 +256,35 @@ using CiPyFrameObjType = _PyInterpreterFrame;
 // May return a reference to an object that is relevant to the deopt event. The
 // meaning of this object depends on meta.reason.
 void reifyFrame(
-    CiPyFrameObjType* frame,
+    _PyInterpreterFrame* frame,
     const DeoptMetadata& meta,
     const DeoptFrameMetadata& frame_meta,
-    const uint64_t* regs);
+    const MemoryView& mem,
+    bool is_instrumentation_deopt = false);
 
 // Like reifyFrame(), but for a suspended generator. Takes a single base
 // pointer for spill data rather than a full set of registers.
 void reifyGeneratorFrame(
-    CiPyFrameObjType* frame,
+    _PyInterpreterFrame* frame,
     const DeoptMetadata& meta,
     const DeoptFrameMetadata& frame_meta,
     const void* base);
-
-// A simple interface for reading the contents of registers + memory
-struct MemoryView {
-  const uint64_t* regs;
-
-  BorrowedRef<> readBorrowed(const LiveValue& value) const;
-  Ref<> readOwned(const LiveValue& value) const;
-
- private:
-  uint64_t readRaw(const LiveValue& value) const {
-    jit::codegen::PhyLocation loc = value.location;
-    if (loc.is_register()) {
-      return regs[loc.loc];
-    } else {
-      uint64_t frame_pointer = regs[codegen::arch::reg_frame_pointer_loc.loc];
-      // loc.loc is relative offset from RBP (i.e. negative as stack grows down)
-      return *(reinterpret_cast<uint64_t*>(frame_pointer + loc.loc));
-    }
-  }
-};
 
 // Release any owned references in the given set of registers or spill data.
 void releaseRefs(const DeoptMetadata& meta, const MemoryView& mem);
 void releaseRefs(const DeoptMetadata& meta, const void* base);
 
+// Release owned object references from a suspended generator that will never
+// resume. Unlike releaseRefs(), primitive values do not need to be boxed when
+// the frame is being discarded.
+void releaseGeneratorOwnedRefs(const DeoptMetadata& meta, const void* base);
+
 // Call once per deopt.
 Ref<> profileDeopt(const DeoptMetadata& meta, const MemoryView& mem);
 
-} // namespace jit
+void visitLiveDeferredRefs(
+    const DeoptMetadata& meta,
+    uintptr_t frame_base,
+    gcvisitobjects_t visit);
+
+} // namespace cinderx::jit

@@ -2,10 +2,11 @@
 
 #include <gtest/gtest.h>
 
-#ifdef BUCK_BUILD
+#ifdef CINDERX_RUNTIME_TESTS_STATIC_CINDERX
 #include "cinderx/_cinderx-lib.h"
 #endif
 
+#include "cinderx/Common/util.h"
 #include "cinderx/Jit/compiler.h"
 #include "cinderx/Jit/hir/builtin_load_method_elimination.h"
 #include "cinderx/Jit/hir/clean_cfg.h"
@@ -18,10 +19,11 @@
 #include "cinderx/Jit/hir/phi_elimination.h"
 #include "cinderx/Jit/hir/refcount_insertion.h"
 #include "cinderx/Jit/hir/simplify.h"
+#include "cinderx/Jit/hir/sink_primitive_box.h"
 #include "cinderx/RuntimeTests/fixtures.h"
 #include "cinderx/RuntimeTests/testutil.h"
 
-#ifdef BUCK_BUILD
+#ifdef CINDERX_RUNTIME_TESTS_USE_BUCK_RESOURCES
 #include "tools/cxx/Resources.h"
 #endif
 
@@ -30,28 +32,28 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <string>
 
 namespace {
 
-using jit::Compiler;
-using jit::PassConfig;
-using jit::hir::Function;
-using jit::hir::Pass;
+using namespace cinderx;
+using namespace cinderx::jit;
+using namespace cinderx::jit::hir;
 
 class AllPasses : public Pass {
  public:
   AllPasses() : Pass("@AllPasses") {}
 
-  void Run(Function& irfunc) override {
+  void run(Function& irfunc) override {
     Compiler::runPasses(irfunc, PassConfig::kAll);
   }
 
-  static std::unique_ptr<AllPasses> Factory() {
+  static std::unique_ptr<AllPasses> factory() {
     return std::make_unique<AllPasses>();
   }
 
- private:
-  DISALLOW_COPY_AND_ASSIGN(AllPasses);
+  AllPasses(const AllPasses&) = delete;
+  AllPasses& operator=(const AllPasses&) = delete;
 };
 
 using PassFactory = std::function<std::unique_ptr<Pass>()>;
@@ -59,22 +61,21 @@ using PassFactory = std::function<std::unique_ptr<Pass>()>;
 class TestPassRegistry {
  public:
   TestPassRegistry() {
-    addPass(jit::hir::RefcountInsertion::Factory);
-    addPass(jit::hir::CopyPropagation::Factory);
-    addPass(jit::hir::CleanCFG::Factory);
-    addPass(jit::hir::DynamicComparisonElimination::Factory);
-    addPass(jit::hir::PhiElimination::Factory);
-    addPass(jit::hir::InlineFunctionCalls::Factory);
-    addPass(jit::hir::Simplify::Factory);
-    addPass(jit::hir::DeadCodeElimination::Factory);
-    addPass(jit::hir::GuardTypeRemoval::Factory);
-    addPass(jit::hir::BeginInlinedFunctionElimination::Factory);
-    addPass(jit::hir::BuiltinLoadMethodElimination::Factory);
-    if constexpr (PY_VERSION_HEX >= 0x030C0000) {
-      addPass(jit::hir::InsertUpdatePrevInstr::Factory);
-    }
+    addPass(RefcountInsertion::factory);
+    addPass(CopyPropagation::factory);
+    addPass(CleanCFG::factory);
+    addPass(DynamicComparisonElimination::factory);
+    addPass(PhiElimination::factory);
+    addPass(InlineFunctionCalls::factory);
+    addPass(Simplify::factory);
+    addPass(SinkPrimitiveBox::factory);
+    addPass(DeadCodeElimination::factory);
+    addPass(GuardTypeRemoval::factory);
+    addPass(BeginInlinedFunctionElimination::factory);
+    addPass(BuiltinLoadMethodElimination::factory);
+    addPass(InsertUpdatePrevInstr::factory);
 
-    addPass(AllPasses::Factory);
+    addPass(AllPasses::factory);
   }
 
   std::unique_ptr<Pass> makePass(const std::string& name) {
@@ -87,21 +88,22 @@ class TestPassRegistry {
     factories_.emplace(temp->name(), factory);
   }
 
- private:
-  DISALLOW_COPY_AND_ASSIGN(TestPassRegistry);
+  TestPassRegistry(const TestPassRegistry&) = delete;
+  TestPassRegistry& operator=(const TestPassRegistry&) = delete;
 
+ private:
   std::unordered_map<std::string, PassFactory> factories_;
 };
 
 class SkipFixture : public ::testing::Test {
  public:
   void TestBody() override {
-    GTEST_SKIP();
+    SKIP("Skipping from SkipFixture");
   }
 };
 
 void remap_txt_path(std::string& path) {
-#ifdef BUCK_BUILD
+#ifdef CINDERX_RUNTIME_TESTS_USE_BUCK_RESOURCES
   boost::filesystem::path hir_tests_path =
       build::getResourcePath("cinderx/RuntimeTests/hir_tests");
   path = (hir_tests_path / path).string();
@@ -113,6 +115,14 @@ void remap_txt_path(std::string& path) {
 void register_test(
     std::string path,
     RuntimeTest::Flags extra_flags = RuntimeTest::Flags{}) {
+#if defined(CINDERX_RUNTIME_TESTS_FEATURE_FREE)
+  // Minimal builds do not support the full set of features assumed by Static
+  // Python goldens.
+  if (extra_flags & RuntimeTest::kStaticCompiler) {
+    return;
+  }
+#endif
+
   remap_txt_path(path);
   auto suite = ReadHIRTestSuite(path.c_str());
   if (suite == nullptr) {
@@ -161,32 +171,36 @@ void register_test(
   }
 }
 
+#define _QUOTE_HELPER(x) #x
+#define _QUOTE(x) _QUOTE_HELPER(x)
+
 #ifdef BAKED_IN_PYTHONPATH
-#define _QUOTE(x) #x
-#define QUOTE(x) _QUOTE(x)
-#define _BAKED_IN_PYTHONPATH QUOTE(BAKED_IN_PYTHONPATH)
+#define _BAKED_IN_PYTHONPATH _QUOTE(BAKED_IN_PYTHONPATH)
+#endif
+
+#ifdef CINDERX_RUNTIME_TESTS_PYTHONPATH_PACKAGE
+#define _CINDERX_RUNTIME_TESTS_PYTHONPATH_PACKAGE \
+  _QUOTE(CINDERX_RUNTIME_TESTS_PYTHONPATH_PACKAGE)
 #endif
 
 } // namespace
 
-#ifdef BUCK_BUILD
+#ifdef CINDERX_RUNTIME_TESTS_STATIC_CINDERX
 PyMODINIT_FUNC PyInit__cinderx() {
   return _cinderx_lib_init();
 }
 #endif
 
 void registerCinderX() {
-#ifdef BUCK_BUILD
+#ifdef CINDERX_RUNTIME_TESTS_USE_BUCK_RESOURCES
   try {
     boost::filesystem::path python_install =
         build::getResourcePath("cinderx/RuntimeTests/python_install");
-#ifdef Py_GIL_DISABLED
-    std::string python_version =
-        fmt::format("python{}.{}t", PY_MAJOR_VERSION, PY_MINOR_VERSION);
-#else
-    std::string python_version =
-        fmt::format("python{}.{}", PY_MAJOR_VERSION, PY_MINOR_VERSION);
-#endif
+    std::string python_version = fmt::format(
+        "python{}.{}{}",
+        PY_MAJOR_VERSION,
+        PY_MINOR_VERSION,
+        kFreeThreadedBuild ? "t" : "");
     boost::filesystem::path lib_path = python_install / "lib" / python_version;
     boost::filesystem::path lib_dynload_path = lib_path / "lib-dynload";
     std::string python_install_str =
@@ -197,7 +211,9 @@ void registerCinderX() {
                  "build, re-running usually fixes the issue\n";
     throw;
   }
+#endif
 
+#ifdef CINDERX_RUNTIME_TESTS_STATIC_CINDERX
   if (PyImport_AppendInittab("_cinderx", PyInit__cinderx) != 0) {
     PyErr_Print();
     throw std::runtime_error{"Could not add cinderx to inittab"};
@@ -205,8 +221,22 @@ void registerCinderX() {
 #endif
 }
 
+// In the prefork-model build CinderX intentionally immortalizes JIT-compiled
+// objects, so they are never freed and LeakSanitizer reports them as leaks at
+// exit, failing the test binary even though every gtest passes. Turn leak
+// checking off for that build only; non-prefork builds keep leak detection.
+// kPreforkModel is a constexpr, so this folds to a constant return as required
+// by __lsan_is_turned_off().
+extern "C" __attribute__((used)) int __lsan_is_turned_off() {
+  return int{kPreforkModel};
+}
+
 int main(int argc, char* argv[]) {
-#ifdef BAKED_IN_PYTHONPATH
+#ifdef CINDERX_RUNTIME_TESTS_PYTHONPATH_PACKAGE
+  // OSS path: point PYTHONPATH at the in-tree cinderx package so
+  // RuntimeTest::SetUp() can explicitly import cinderx after Py_Initialize().
+  setenv("PYTHONPATH", _CINDERX_RUNTIME_TESTS_PYTHONPATH_PACKAGE, 1);
+#elif defined(BAKED_IN_PYTHONPATH)
   setenv("PYTHONPATH", _BAKED_IN_PYTHONPATH, 1);
 #endif
 
@@ -215,8 +245,7 @@ int main(int argc, char* argv[]) {
   ::testing::InitGoogleTest(&argc, argv);
 
   // Needed for update_hir_expected.py to know which expected output to update.
-  std::cout << "Python Version: " << PY_MAJOR_VERSION << "." << PY_MINOR_VERSION
-            << '\n';
+  std::cout << "Python Version: " << runtimeTestPythonVersion() << '\n';
 
   register_test("clean_cfg_test.txt");
   register_test("dynamic_comparison_elimination_test.txt");
@@ -236,25 +265,29 @@ int main(int argc, char* argv[]) {
   register_test("simplify_test.txt");
   register_test("simplify_uses_guard_types.txt");
   register_test("simplify_static_test.txt", RuntimeTest::kStaticCompiler);
+  register_test("sink_primitive_box_test.txt");
   register_test("dead_code_elimination_test.txt");
   register_test(
       "dead_code_elimination_and_simplify_test.txt",
       RuntimeTest::kStaticCompiler);
   register_test("builtin_load_method_elimination_test.txt");
+  register_test("leaf_function_test.txt");
+#if !defined(CINDERX_RUNTIME_TESTS_FEATURE_FREE)
+  // These goldens depend on lightweight frames and symbolized call targets.
   register_test("all_passes_test.txt");
+#endif
   register_test("all_passes_static_test.txt", RuntimeTest::kStaticCompiler);
-  register_test("native_calls_test.txt", RuntimeTest::kStaticCompiler);
+  if constexpr (kOS == OS::kLinux) {
+    // The goldens name the library to dlopen, and "libc.so.6" only exists on
+    // Linux.
+    register_test("native_calls_test.txt", RuntimeTest::kStaticCompiler);
+  }
   register_test("static_array_item_test.txt", RuntimeTest::kStaticCompiler);
 
-  wchar_t* argv0 = Py_DecodeLocale(argv[0], nullptr);
-  if (argv0 == nullptr) {
-    std::cerr << "Py_DecodeLocale() failed to allocate\n";
-    std::abort();
-  }
-  Py_SetProgramName(argv0);
+  cinderx::setPythonProgramName(argv[0]);
 
   // Prevent any test failures due to transient pointer values.
-  jit::setUseStablePointers(true);
+  setUseStablePointers(true);
 
   // Particularly with ASAN, we might need a really large stack size.
   struct rlimit rl;
@@ -262,8 +295,5 @@ int main(int argc, char* argv[]) {
   rl.rlim_max = RLIM_INFINITY;
   setrlimit(RLIMIT_STACK, &rl);
 
-  int result = RUN_ALL_TESTS();
-
-  PyMem_RawFree(argv0);
-  return result;
+  return RUN_ALL_TESTS();
 }

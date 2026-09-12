@@ -6,32 +6,67 @@
 #include "cinderx/Jit/threaded_compile.h"
 
 #include <algorithm>
+#include <ranges>
+#include <span>
 
-namespace jit::hir {
+namespace cinderx::jit::hir {
 
-DeoptBase::DeoptBase(Opcode op) : Instr(op) {}
+LiveValuesBase::LiveValuesBase(Opcode op) : Instr(op) {}
 
-DeoptBase::DeoptBase(Opcode op, const FrameState& frame) : Instr(op) {
+LiveValuesBase::LiveValuesBase(const LiveValuesBase& other)
+    : Instr(other), live_regs_{other.liveRegs()} {}
+
+const std::vector<RegState>& LiveValuesBase::liveRegs() const {
+  return live_regs_;
+}
+
+std::vector<RegState>& LiveValuesBase::liveRegs() {
+  return live_regs_;
+}
+
+bool LiveValuesBase::visitUses(const std::function<bool(Register*&)>& func) {
+  if (!Instr::visitUses(func)) {
+    return false;
+  }
+  for (RegState& reg_state : live_regs_) {
+    if (!func(reg_state.reg)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void LiveValuesBase::sortLiveRegs() {
+  std::sort(
+      live_regs_.begin(),
+      live_regs_.end(),
+      [](const RegState& a, const RegState& b) {
+        return a.reg->id() < b.reg->id();
+      });
+
+  if constexpr (kDebug) {
+    auto it = std::adjacent_find(
+        live_regs_.begin(),
+        live_regs_.end(),
+        [](const RegState& a, const RegState& b) { return a.reg == b.reg; });
+    JIT_DCHECK(it == live_regs_.end(), "Register {} is live twice", *it->reg);
+  }
+}
+
+DeoptBase::DeoptBase(Opcode op) : LiveValuesBase(op) {}
+
+DeoptBase::DeoptBase(Opcode op, const FrameState& frame) : LiveValuesBase(op) {
   setFrameState(frame);
 }
 
 DeoptBase::DeoptBase(const DeoptBase& other)
-    : Instr(other),
-      live_regs_{other.live_regs()},
+    : LiveValuesBase(other),
       guilty_reg_{other.guiltyReg()},
       nonce_{other.nonce()},
       descr_{other.descr()} {
   if (FrameState* copy_fs = other.frameState()) {
     setFrameState(std::make_unique<FrameState>(*copy_fs));
   }
-}
-
-const std::vector<RegState>& DeoptBase::live_regs() const {
-  return live_regs_;
-}
-
-std::vector<RegState>& DeoptBase::live_regs() {
-  return live_regs_;
 }
 
 DeoptBase* DeoptBase::asDeoptBase() {
@@ -42,17 +77,28 @@ const DeoptBase* DeoptBase::asDeoptBase() const {
   return this;
 }
 
+CallSiteLiveValuesBase::CallSiteLiveValuesBase(Opcode op)
+    : LiveValuesBase(op) {}
+
+CallSiteLiveValuesBase::CallSiteLiveValuesBase(
+    const CallSiteLiveValuesBase& other)
+    : LiveValuesBase(other) {}
+
+CallSiteLiveValuesBase* CallSiteLiveValuesBase::asCallSiteLiveValuesBase() {
+  return this;
+}
+
+const CallSiteLiveValuesBase* CallSiteLiveValuesBase::asCallSiteLiveValuesBase()
+    const {
+  return this;
+}
+
 bool DeoptBase::visitUses(const std::function<bool(Register*&)>& func) {
-  if (!Instr::visitUses(func)) {
+  if (!LiveValuesBase::visitUses(func)) {
     return false;
   }
   if (auto fs = frameState()) {
     if (!fs->visitUses(func)) {
-      return false;
-    }
-  }
-  for (auto& reg_state : live_regs_) {
-    if (!func(reg_state.reg)) {
       return false;
     }
   }
@@ -62,26 +108,6 @@ bool DeoptBase::visitUses(const std::function<bool(Register*&)>& func) {
     }
   }
   return true;
-}
-
-void DeoptBase::sortLiveRegs() {
-  std::sort(
-      live_regs_.begin(),
-      live_regs_.end(),
-      [](const RegState& a, const RegState& b) {
-        return a.reg->id() < b.reg->id();
-      });
-
-  if (kPyDebug) {
-    // Check for uniqueness after sorting rather than inside the predicate
-    // passed to std::sort(), in case sort() performs extra comparisons to
-    // sanity-check our predicate.
-    auto it = std::adjacent_find(
-        live_regs_.begin(),
-        live_regs_.end(),
-        [](const RegState& a, const RegState& b) { return a.reg == b.reg; });
-    JIT_DCHECK(it == live_regs_.end(), "Register {} is live twice", *it->reg);
-  }
 }
 
 void DeoptBase::setFrameState(std::unique_ptr<FrameState> state) {
@@ -104,7 +130,7 @@ int DeoptBase::nonce() const {
   return nonce_;
 }
 
-void DeoptBase::set_nonce(int nonce) {
+void DeoptBase::setNonce(int nonce) {
   nonce_ = nonce;
 }
 
@@ -137,7 +163,12 @@ std::string_view CallCFunc::funcName() const {
 }
 
 void Phi::setArgs(const std::unordered_map<BasicBlock*, Register*>& args) {
-  JIT_DCHECK(NumOperands() == args.size(), "arg mismatch");
+  // Can't resize a phi, the operands have already been allocated inline.
+  JIT_THROW_IF(
+      numOperands() != args.size(),
+      "Trying to update phi with {} arguments to one with {} arguments",
+      numOperands(),
+      args.size());
 
   basic_blocks_.clear();
   basic_blocks_.reserve(args.size());
@@ -160,6 +191,31 @@ void Phi::setArgs(const std::unordered_map<BasicBlock*, Register*>& args) {
   }
 }
 
+void Phi::setArgs(std::span<std::tuple<BasicBlock*, Register*>> args) {
+  // Can't resize a phi, the operands have already been allocated inline.
+  JIT_THROW_IF(
+      numOperands() != args.size(),
+      "Trying to update phi with {} arguments to one with {} arguments",
+      numOperands(),
+      args.size());
+
+  JIT_DCHECK(
+      std::ranges::is_sorted(
+          args,
+          [](const auto& a, const auto& b) {
+            return std::get<0>(a)->id < std::get<0>(b)->id;
+          }),
+      "Phi must be created with a (block,value) list sorted by block ID");
+
+  basic_blocks_.clear();
+  basic_blocks_.reserve(args.size());
+
+  for (size_t i = 0; i < args.size(); ++i) {
+    basic_blocks_.push_back(std::get<0>(args[i]));
+    operandAt(i) = std::get<1>(args[i]);
+  }
+}
+
 std::size_t Phi::blockIndex(const BasicBlock* block) const {
   auto it = std::lower_bound(
       basic_blocks_.begin(), basic_blocks_.end(), block, [](auto b1, auto b2) {
@@ -170,14 +226,46 @@ std::size_t Phi::blockIndex(const BasicBlock* block) const {
   return std::distance(basic_blocks_.begin(), it);
 }
 
+void Phi::replacePredecessor(BasicBlock* old_pred, BasicBlock* new_pred) {
+  auto it = std::lower_bound(
+      basic_blocks_.begin(),
+      basic_blocks_.end(),
+      old_pred->id,
+      [](auto block, int id) { return block->id < id; });
+  if (it == basic_blocks_.end() || *it != old_pred) {
+    return;
+  }
+
+  std::size_t i = std::distance(basic_blocks_.begin(), it);
+  Register* value = getOperand(i);
+
+  // Move the updated pair left until block IDs are sorted.
+  while (i > 0 && new_pred->id < basic_blocks_[i - 1]->id) {
+    basic_blocks_[i] = basic_blocks_[i - 1];
+    operandAt(i) = getOperand(i - 1);
+    --i;
+  }
+
+  // Move the updated pair right until block IDs are sorted.
+  while (i + 1 < basic_blocks_.size() &&
+         basic_blocks_[i + 1]->id < new_pred->id) {
+    basic_blocks_[i] = basic_blocks_[i + 1];
+    operandAt(i) = getOperand(i + 1);
+    ++i;
+  }
+
+  basic_blocks_[i] = new_pred;
+  operandAt(i) = value;
+}
+
 Edge::Edge(const Edge& other) {
-  set_from(other.from_);
-  set_to(other.to_);
+  setFrom(other.from_);
+  setTo(other.to_);
 }
 
 Edge::~Edge() {
-  set_from(nullptr);
-  set_to(nullptr);
+  setFrom(nullptr);
+  setTo(nullptr);
 }
 
 BasicBlock* Edge::from() const {
@@ -188,7 +276,7 @@ BasicBlock* Edge::to() const {
   return to_;
 }
 
-void Edge::set_from(BasicBlock* new_from) {
+void Edge::setFrom(BasicBlock* new_from) {
   if (from_) {
     from_->out_edges_.erase(this);
   }
@@ -198,7 +286,7 @@ void Edge::set_from(BasicBlock* new_from) {
   from_ = new_from;
 }
 
-void Edge::set_to(BasicBlock* new_to) {
+void Edge::setTo(BasicBlock* new_to) {
   if (to_) {
     to_->in_edges_.erase(this);
   }
@@ -238,24 +326,24 @@ std::string_view Instr::opname() const {
   return hirOpcodeName(opcode());
 }
 
-std::size_t Instr::NumOperands() const {
+std::size_t Instr::numOperands() const {
   return *(reinterpret_cast<const std::size_t*>(this) - 1);
 }
 
-Register* Instr::GetOperand(std::size_t i) const {
+Register* Instr::getOperand(std::size_t i) const {
   return const_cast<Instr*>(this)->operandAt(i);
 }
 
-std::span<Register* const> Instr::GetOperands() const {
-  return {operands(), NumOperands()};
+std::span<Register* const> Instr::getOperands() const {
+  return {operands(), numOperands()};
 }
 
-void Instr::SetOperand(std::size_t i, Register* reg) {
+void Instr::setOperand(std::size_t i, Register* reg) {
   operandAt(i) = reg;
 }
 
 bool Instr::visitUses(const std::function<bool(Register*&)>& func) {
-  auto num_uses = NumOperands();
+  auto num_uses = numOperands();
   for (std::size_t i = 0; i < num_uses; i++) {
     if (!func(operandAt(i))) {
       return false;
@@ -269,7 +357,7 @@ bool Instr::visitUses(const std::function<bool(Register*)>& func) const {
       [&func](Register*& reg) { return func(reg); });
 }
 
-bool Instr::Uses(Register* needle) const {
+bool Instr::uses(Register* needle) const {
   bool found = false;
   visitUses([&](const Register* reg) {
     if (reg == needle) {
@@ -281,7 +369,7 @@ bool Instr::Uses(Register* needle) const {
   return found;
 }
 
-void Instr::ReplaceUsesOf(Register* orig, Register* replacement) {
+void Instr::replaceUsesOf(Register* orig, Register* replacement) {
   visitUses([&](Register*& reg) {
     if (reg == orig) {
       reg = replacement;
@@ -296,15 +384,15 @@ Register* Instr::output() const {
 
 void Instr::setOutput(Register* dst) {
   if (output_ != nullptr) {
-    output_->set_instr(nullptr);
+    output_->setInstr(nullptr);
   }
   if (dst != nullptr) {
-    dst->set_instr(this);
+    dst->setInstr(this);
   }
   output_ = dst;
 }
 
-bool Instr::IsTerminator() const {
+bool Instr::isTerminator() const {
   switch (opcode()) {
     case Opcode::kBranch:
     case Opcode::kDeopt:
@@ -349,8 +437,8 @@ BasicBlock* Instr::successor(std::size_t i) const {
   return edge(i)->to();
 }
 
-void Instr::set_successor(std::size_t i, BasicBlock* to) {
-  edge(i)->set_to(to);
+void Instr::setSuccessor(std::size_t i, BasicBlock* to) {
+  edge(i)->setTo(to);
 }
 
 bool Instr::isReplayable() const {
@@ -368,8 +456,8 @@ bool Instr::isReplayable() const {
     case Opcode::kCheckSequenceBounds:
     case Opcode::kCheckVar:
     case Opcode::kCIntToCBool:
+    case Opcode::kCompactLongUnbox:
     case Opcode::kDoubleBinaryOp:
-    case Opcode::kFloatCompare:
     case Opcode::kFormatValue:
     case Opcode::kFormatWithSpec:
     case Opcode::kGetSecondOutput:
@@ -379,7 +467,8 @@ bool Instr::isReplayable() const {
     case Opcode::kHintType:
     case Opcode::kIndexUnbox:
     case Opcode::kIntBinaryOp:
-    case Opcode::kIntConvert:
+    case Opcode::kPrimitiveConvert:
+    case Opcode::kIsCompactLong:
     case Opcode::kIsNegativeAndErrOccurred:
     case Opcode::kLoadArg:
     case Opcode::kLoadArrayItem:
@@ -405,14 +494,18 @@ bool Instr::isReplayable() const {
     case Opcode::kPrimitiveCompare:
     case Opcode::kPrimitiveUnaryOp:
     case Opcode::kPrimitiveUnbox:
+    case Opcode::kUnaryNot:
     case Opcode::kRaise:
     case Opcode::kRaiseStatic:
     case Opcode::kRefineType:
+    case Opcode::kTagIfDeferred:
     case Opcode::kStealCellItem:
     case Opcode::kUpdatePrevInstr:
     case Opcode::kUnicodeCompare:
     case Opcode::kUnicodeConcat:
+    case Opcode::kUnicodeEqual:
     case Opcode::kUnicodeSubscr:
+    case Opcode::kUseObj:
     case Opcode::kUseType:
     case Opcode::kWaitHandleLoadCoroOrResult:
     case Opcode::kWaitHandleLoadWaiter: {
@@ -448,6 +541,7 @@ bool Instr::isReplayable() const {
     case Opcode::kDictSubscr:
     case Opcode::kDictUpdate:
     case Opcode::kEagerImportName:
+    case Opcode::kEndGeneratorFrame:
     case Opcode::kEndInlinedFunction:
     case Opcode::kFillTypeAttrCache:
     case Opcode::kFillTypeMethodCache:
@@ -469,19 +563,21 @@ bool Instr::isReplayable() const {
     case Opcode::kIsTruthy:
     case Opcode::kListAppend:
     case Opcode::kListExtend:
+    case Opcode::kListSubscr:
     case Opcode::kLoadAttr:
-    case Opcode::kLoadAttrCached:
     case Opcode::kLoadAttrSpecial:
     case Opcode::kLoadAttrSuper:
     case Opcode::kLoadGlobal:
     case Opcode::kLoadMethod:
-    case Opcode::kLoadMethodCached:
     case Opcode::kLoadModuleAttrCached:
     case Opcode::kLoadModuleMethodCached:
     case Opcode::kLoadMethodSuper:
     case Opcode::kLoadSpecial:
     case Opcode::kLongBinaryOp:
     case Opcode::kLongInPlaceOp:
+    case Opcode::kInitListElements:
+    case Opcode::kInitTupleElements:
+    case Opcode::kMaterializeRef:
     case Opcode::kMakeCell:
     case Opcode::kMakeCheckedDict:
     case Opcode::kMakeCheckedList:
@@ -510,18 +606,16 @@ bool Instr::isReplayable() const {
     case Opcode::kSnapshot:
     case Opcode::kStoreArrayItem:
     case Opcode::kStoreAttr:
-    case Opcode::kStoreAttrCached:
     case Opcode::kStoreSubscr:
     case Opcode::kTpAlloc:
     case Opcode::kUnaryOp:
     case Opcode::kUnicodeRepeat:
     case Opcode::kUnpackExToTuple:
+    case Opcode::kReserveStack:
+    case Opcode::kUnpackSequence:
     case Opcode::kUnreachable:
     case Opcode::kVectorCall:
     case Opcode::kWaitHandleRelease:
-    case Opcode::kYieldAndYieldFrom:
-    case Opcode::kYieldFrom:
-    case Opcode::kYieldFromHandleStopAsyncIteration:
     case Opcode::kYieldValue:
     case Opcode::kXDecref:
     case Opcode::kXIncref: {
@@ -531,50 +625,45 @@ bool Instr::isReplayable() const {
   JIT_ABORT("Bad opcode {}", static_cast<int>(opcode()));
 }
 
-void Instr::set_block(BasicBlock* block) {
+void Instr::setBlock(BasicBlock* block) {
   block_ = block;
-  if (IsTerminator()) {
+  if (isTerminator()) {
     for (std::size_t i = 0, n = numEdges(); i < n; ++i) {
-      edge(i)->set_from(block);
+      edge(i)->setFrom(block);
     }
   }
 }
 
-void Instr::InsertBefore(Instr& instr) {
-  block_node_.InsertBefore(&instr.block_node_);
-  link(instr.block());
+void Instr::insertBefore(Instr& instr) {
+  JIT_THROW_IF(
+      instr.block() == nullptr, "Inserting before unlinked instruction");
+  instr.block()->insertBefore(instr, *this);
 }
 
-void Instr::InsertAfter(Instr& instr) {
-  block_node_.InsertAfter(&instr.block_node_);
-  link(instr.block());
+void Instr::insertAfter(Instr& instr) {
+  JIT_THROW_IF(
+      instr.block() == nullptr, "Inserting after unlinked instruction");
+  instr.block()->insertAfter(instr, *this);
 }
 
-void Instr::ReplaceWith(Instr& instr) {
-  instr.InsertBefore(*this);
-  instr.setBytecodeOffset(bytecodeOffset());
-  unlink();
+void Instr::replaceWith(Instr& instr) {
+  JIT_THROW_IF(block_ == nullptr, "Replacing unlinked instruction");
+  block()->replace(*this, instr);
 }
 
-void Instr::ExpandInto(const std::vector<Instr*>& expansion) {
-  Instr* last = this;
-  for (Instr* instr : expansion) {
-    instr->InsertAfter(*last);
-    instr->setBytecodeOffset(bytecodeOffset());
-    last = instr;
-  }
-  unlink();
+void Instr::expandInto(const std::vector<Instr*>& expansion) {
+  JIT_THROW_IF(block_ == nullptr, "Expanding unlinked instruction");
+  block()->expand(*this, {expansion.data(), expansion.size()});
 }
 
 void Instr::link(BasicBlock* block) {
   JIT_CHECK(block_ == nullptr, "Instr is already linked");
-  set_block(block);
+  setBlock(block);
 }
 
 void Instr::unlink() {
   JIT_CHECK(block_ != nullptr, "Instr isn't linked");
-  block_node_.Unlink();
-  set_block(nullptr);
+  block_->remove(*this);
 }
 
 BasicBlock* Instr::block() const {
@@ -600,7 +689,7 @@ const FrameState* Instr::getDominatingFrameState() const {
   auto rend = block()->crend();
   auto it = block()->const_reverse_iterator_to(*this);
   for (it++; it != rend; it++) {
-    if (it->IsSnapshot()) {
+    if (it->isSnapshot()) {
       auto snapshot = static_cast<const Snapshot*>(&*it);
       return snapshot->frameState();
     }
@@ -619,8 +708,16 @@ const DeoptBase* Instr::asDeoptBase() const {
   return nullptr;
 }
 
+CallSiteLiveValuesBase* Instr::asCallSiteLiveValuesBase() {
+  return nullptr;
+}
+
+const CallSiteLiveValuesBase* Instr::asCallSiteLiveValuesBase() const {
+  return nullptr;
+}
+
 void* Instr::base() {
-  return reinterpret_cast<char*>(this) - (NumOperands() * kPointerSize) -
+  return reinterpret_cast<char*>(this) - (numOperands() * kPointerSize) -
       sizeof(size_t);
 }
 
@@ -634,10 +731,11 @@ Register* const* Instr::operands() const {
 
 Register*& Instr::operandAt(std::size_t i) {
   JIT_DCHECK(
-      i < NumOperands(),
-      "operand {} out of range (max is {})",
+      i < numOperands(),
+      "Operand {} out of range for {} (max is {})",
       i,
-      NumOperands() - 1);
+      opname(),
+      numOperands() - 1);
   return operands()[i];
 }
 
@@ -659,15 +757,15 @@ bool isAnyLoadMethod(const Instr& instr) {
   if (isLoadMethodBase(instr)) {
     return true;
   }
-  if (!instr.IsPhi() || instr.NumOperands() != 2) {
+  if (!instr.isPhi() || instr.numOperands() != 2) {
     return false;
   }
-  const Instr* arg1 = instr.GetOperand(0)->instr();
-  const Instr* arg2 = instr.GetOperand(1)->instr();
-  return (arg1->IsLoadTypeMethodCacheEntryValue() &&
-          arg2->IsFillTypeMethodCache()) ||
-      (arg2->IsLoadTypeMethodCacheEntryValue() &&
-       arg1->IsFillTypeMethodCache());
+  const Instr* arg1 = instr.getOperand(0)->instr();
+  const Instr* arg2 = instr.getOperand(1)->instr();
+  return (arg1->isLoadTypeMethodCacheEntryValue() &&
+          arg2->isFillTypeMethodCache()) ||
+      (arg2->isLoadTypeMethodCacheEntryValue() &&
+       arg1->isFillTypeMethodCache());
 }
 
 bool isPassthrough(const Instr& instr) {
@@ -683,6 +781,8 @@ bool isPassthrough(const Instr& instr) {
     case Opcode::kGuardIs:
     case Opcode::kGuardType:
     case Opcode::kRefineType:
+    case Opcode::kTagIfDeferred:
+    case Opcode::kUseObj:
     case Opcode::kUseType:
       return true;
 
@@ -705,6 +805,7 @@ bool isPassthrough(const Instr& instr) {
     case Opcode::kCallStaticRetVoid:
     case Opcode::kCheckSequenceBounds:
     case Opcode::kCIntToCBool:
+    case Opcode::kCompactLongUnbox:
     case Opcode::kCompare:
     case Opcode::kCompareBool:
     case Opcode::kConvertValue:
@@ -717,7 +818,6 @@ bool isPassthrough(const Instr& instr) {
     case Opcode::kFillTypeAttrCache:
     case Opcode::kFillTypeMethodCache:
     case Opcode::kFloatBinaryOp:
-    case Opcode::kFloatCompare:
     case Opcode::kFormatValue:
     case Opcode::kFormatWithSpec:
     case Opcode::kGetAIter:
@@ -732,18 +832,19 @@ bool isPassthrough(const Instr& instr) {
     case Opcode::kIndexUnbox:
     case Opcode::kInitialYield:
     case Opcode::kIntBinaryOp:
-    case Opcode::kIntConvert:
+    case Opcode::kPrimitiveConvert:
     case Opcode::kInvokeIterNext:
     case Opcode::kInvokeStaticFunction:
+    case Opcode::kIsCompactLong:
     case Opcode::kIsInstance:
     case Opcode::kIsNegativeAndErrOccurred:
     case Opcode::kIsTruthy:
     case Opcode::kListAppend:
     case Opcode::kListExtend:
+    case Opcode::kListSubscr:
     case Opcode::kLoadArg:
     case Opcode::kLoadArrayItem:
     case Opcode::kLoadAttr:
-    case Opcode::kLoadAttrCached:
     case Opcode::kLoadAttrSpecial:
     case Opcode::kLoadAttrSuper:
     case Opcode::kLoadCellItem:
@@ -757,7 +858,6 @@ bool isPassthrough(const Instr& instr) {
     case Opcode::kLoadGlobal:
     case Opcode::kLoadGlobalCached:
     case Opcode::kLoadMethod:
-    case Opcode::kLoadMethodCached:
     case Opcode::kLoadMethodSuper:
     case Opcode::kLoadSpecial:
     case Opcode::kLoadModuleAttrCached:
@@ -769,6 +869,7 @@ bool isPassthrough(const Instr& instr) {
     case Opcode::kLoadTypeMethodCacheEntryType:
     case Opcode::kLoadTypeMethodCacheEntryValue:
     case Opcode::kLoadVarObjectSize:
+    case Opcode::kMaterializeRef:
     case Opcode::kLongBinaryOp:
     case Opcode::kLongInPlaceOp:
     case Opcode::kLongCompare:
@@ -790,6 +891,7 @@ bool isPassthrough(const Instr& instr) {
     case Opcode::kPrimitiveCompare:
     case Opcode::kPrimitiveUnaryOp:
     case Opcode::kPrimitiveUnbox:
+    case Opcode::kUnaryNot:
     case Opcode::kRunPeriodicTasks:
     case Opcode::kSend:
     case Opcode::kSetCurrentAwaiter:
@@ -800,21 +902,20 @@ bool isPassthrough(const Instr& instr) {
     case Opcode::kSwapCellItem:
     case Opcode::kStoreArrayItem:
     case Opcode::kStoreAttr:
-    case Opcode::kStoreAttrCached:
     case Opcode::kStoreSubscr:
     case Opcode::kTpAlloc:
     case Opcode::kUnaryOp:
     case Opcode::kUnicodeCompare:
     case Opcode::kUnicodeConcat:
+    case Opcode::kUnicodeEqual:
     case Opcode::kUnicodeRepeat:
     case Opcode::kUnicodeSubscr:
     case Opcode::kUnpackExToTuple:
+    case Opcode::kReserveStack:
+    case Opcode::kUnpackSequence:
     case Opcode::kVectorCall:
     case Opcode::kWaitHandleLoadCoroOrResult:
     case Opcode::kWaitHandleLoadWaiter:
-    case Opcode::kYieldAndYieldFrom:
-    case Opcode::kYieldFrom:
-    case Opcode::kYieldFromHandleStopAsyncIteration:
     case Opcode::kYieldValue:
       return false;
 
@@ -830,11 +931,14 @@ bool isPassthrough(const Instr& instr) {
     case Opcode::kDeleteSubscr:
     case Opcode::kDeopt:
     case Opcode::kDeoptPatchpoint:
+    case Opcode::kEndGeneratorFrame:
     case Opcode::kEndInlinedFunction:
     case Opcode::kGuard:
     case Opcode::kHintType:
     case Opcode::kIncref:
     case Opcode::kInitFrameCellVars:
+    case Opcode::kInitListElements:
+    case Opcode::kInitTupleElements:
     case Opcode::kRaise:
     case Opcode::kRaiseAwaitableError:
     case Opcode::kRaiseStatic:
@@ -858,37 +962,142 @@ Register* modelReg(Register* reg) {
   // Even though GuardIs is a passthrough, it verifies that a runtime value is a
   // specific object, breaking the dependency on the instruction that produced
   // the runtime value
-  while (isPassthrough(*reg->instr()) && !(reg->instr()->IsGuardIs())) {
-    reg = reg->instr()->GetOperand(0);
+  while (isPassthrough(*reg->instr()) && !(reg->instr()->isGuardIs())) {
+    reg = reg->instr()->getOperand(0);
     JIT_DCHECK(reg != orig_reg, "Hit cycle while looking for model reg");
   }
   return reg;
 }
 
-Instr* BasicBlock::Append(Instr* instr) {
-  instrs_.PushBack(*instr);
+BasicBlock::BasicBlock(int id) : id{id} {}
+
+BasicBlock::~BasicBlock() {
+  JIT_DCHECK(
+      in_edges_.empty(), "Attempt to destroy a block with in-edges, {}", id);
+  clear();
+  JIT_DCHECK(
+      out_edges_.empty(), "out_edges not empty after deleting all instrs");
+}
+
+Instr* BasicBlock::append(Instr* instr) {
+  instrs_.pushBack(*instr);
   instr->link(this);
   return instr;
 }
 
+void BasicBlock::remove(Instr& instr) {
+  JIT_THROW_IF(
+      instr.block() != this, "Removing instr but it isn't in this block");
+  instrs_.remove(instr);
+  instr.setBlock(nullptr);
+}
+
 void BasicBlock::retargetPreds(BasicBlock* target) {
-  JIT_CHECK(target != this, "Can't retarget to self");
+  JIT_THROW_IF(target == this, "Can't retarget to self");
   for (auto it = in_edges_.begin(); it != in_edges_.end();) {
     auto edge = *it;
     ++it;
-    const_cast<Edge*>(edge)->set_to(target);
+    const_cast<Edge*>(edge)->setTo(target);
   }
 }
 
+void BasicBlock::becomeUnreachable() {
+  // Collect all branches leading to this block.  Has to be a set in case a
+  // predecessor block has more than one edge leading to this block, such as
+  // `CondBranch C, B1, B1`.
+  std::unordered_set<Instr*> pred_branches;
+  pred_branches.reserve(in_edges_.size());
+  for (const Edge* edge : in_edges_) {
+    BasicBlock* predecessor = edge->from();
+    pred_branches.emplace(predecessor->getTerminator());
+  }
+
+  for (Instr* branch : pred_branches) {
+    switch (branch->opcode()) {
+      case Opcode::kBranch:
+        branch->replaceWith(*Unreachable::create());
+        break;
+      case Opcode::kCondBranch:
+      case Opcode::kCondBranchCheckType:
+      case Opcode::kCondBranchIterNotDone: {
+        // Find the other successor that doesn't match this block.
+        BasicBlock* target = nullptr;
+        for (size_t i = 0; i < 2; ++i) {
+          if (branch->successor(i) == this) {
+            target = branch->successor(1 - i);
+            break;
+          }
+        }
+
+        JIT_THROW_IF(
+            target == nullptr,
+            "Expecting branch {} to have {} in successor list [{}, {}]",
+            branch->opname(),
+            id,
+            branch->successor(0)->id,
+            branch->successor(1)->id);
+
+        // Handle case where conditional branch had this block as both
+        // successors.
+        if (target != this) {
+          branch->replaceWith(*Branch::create(target));
+        } else {
+          branch->replaceWith(*Unreachable::create());
+        }
+
+        break;
+      }
+      default:
+        JIT_THROW(
+            "Unexpected branch instruction {} in block {}",
+            branch->opname(),
+            id);
+    }
+
+    delete branch;
+  }
+
+  JIT_THROW_IF(
+      in_edges_.size() != 0,
+      "Made block {} unreachable, but it still has in edges",
+      id);
+}
+
 void BasicBlock::push_front(Instr* instr) {
-  instrs_.PushFront(*instr);
+  instrs_.pushFront(*instr);
   instr->link(this);
 }
 
 Instr* BasicBlock::pop_front() {
-  Instr* result = &(instrs_.ExtractFront());
-  result->set_block(nullptr);
+  Instr* result = &(instrs_.extractFront());
+  result->setBlock(nullptr);
   return result;
+}
+
+void BasicBlock::insertBefore(Instr& existing, Instr& new_instr) {
+  JIT_THROW_IF(existing.block() != this, "Existing instr isn't in this block");
+  insert(&new_instr, instrs_.iterator_to(existing));
+}
+
+void BasicBlock::insertAfter(Instr& existing, Instr& new_instr) {
+  JIT_THROW_IF(existing.block() != this, "Existing instr isn't in this block");
+  insert(&new_instr, std::next(instrs_.iterator_to(existing)));
+}
+
+void BasicBlock::replace(Instr& existing, Instr& new_instr) {
+  insertBefore(existing, new_instr);
+  new_instr.setBytecodeOffset(existing.bytecodeOffset());
+  remove(existing);
+}
+
+void BasicBlock::expand(Instr& existing, std::span<Instr* const> expansion) {
+  Instr* last = &existing;
+  for (Instr* new_instr : expansion) {
+    insertAfter(*last, *new_instr);
+    new_instr->setBytecodeOffset(existing.bytecodeOffset());
+    last = new_instr;
+  }
+  remove(existing);
 }
 
 void BasicBlock::insert(Instr* instr, Instr::List::iterator it) {
@@ -906,34 +1115,124 @@ void BasicBlock::insert(Instr* instr, Instr::List::iterator it) {
   instr->link(this);
 }
 
+BasicBlock* BasicBlock::successor(std::size_t i) const {
+  return getTerminator()->successor(i);
+}
+
+void BasicBlock::setSuccessor(std::size_t i, BasicBlock* succ) {
+  getTerminator()->setSuccessor(i, succ);
+}
+
 void BasicBlock::clear() {
-  while (!instrs_.IsEmpty()) {
-    Instr* instr = &(instrs_.ExtractFront());
+  while (!instrs_.isEmpty()) {
+    Instr* instr = &(instrs_.extractFront());
     delete instr;
   }
 }
 
-BasicBlock::~BasicBlock() {
-  JIT_DCHECK(
-      in_edges_.empty(), "Attempt to destroy a block with in-edges, {}", id);
-  clear();
-  JIT_DCHECK(
-      out_edges_.empty(), "out_edges not empty after deleting all instrs");
+bool BasicBlock::empty() const {
+  return instrs_.isEmpty();
 }
 
-Instr* BasicBlock::GetTerminator() {
-  if (instrs_.IsEmpty()) {
+size_t BasicBlock::size() const {
+  return instrs_.size();
+}
+
+Instr& BasicBlock::front() {
+  return instrs_.front();
+}
+
+const Instr& BasicBlock::front() const {
+  return instrs_.front();
+}
+
+Instr& BasicBlock::back() {
+  return instrs_.back();
+}
+
+const Instr& BasicBlock::back() const {
+  return instrs_.back();
+}
+
+Instr::List::iterator BasicBlock::iterator_to(Instr& instr) {
+  return instrs_.iterator_to(instr);
+}
+
+Instr::List::const_iterator BasicBlock::const_iterator_to(
+    const Instr& instr) const {
+  return instrs_.const_iterator_to(instr);
+}
+
+Instr::List::iterator BasicBlock::begin() {
+  return instrs_.begin();
+}
+
+Instr::List::const_iterator BasicBlock::begin() const {
+  return instrs_.begin();
+}
+
+Instr::List::iterator BasicBlock::end() {
+  return instrs_.end();
+}
+
+Instr::List::const_iterator BasicBlock::end() const {
+  return instrs_.end();
+}
+
+Instr::List::reverse_iterator BasicBlock::reverse_iterator_to(Instr& instr) {
+  return instrs_.reverse_iterator_to(instr);
+}
+
+Instr::List::const_reverse_iterator BasicBlock::const_reverse_iterator_to(
+    const Instr& instr) const {
+  return instrs_.const_reverse_iterator_to(instr);
+}
+
+Instr::List::reverse_iterator BasicBlock::rbegin() {
+  return instrs_.rbegin();
+}
+
+Instr::List::const_reverse_iterator BasicBlock::rbegin() const {
+  return instrs_.rbegin();
+}
+
+Instr::List::reverse_iterator BasicBlock::rend() {
+  return instrs_.rend();
+}
+
+Instr::List::const_reverse_iterator BasicBlock::rend() const {
+  return instrs_.rend();
+}
+
+Instr::List::const_reverse_iterator BasicBlock::crend() const {
+  return instrs_.crend();
+}
+
+Instr* BasicBlock::getTerminator() {
+  if (instrs_.isEmpty()) {
     return nullptr;
   }
-  return &instrs_.Back();
+  return &instrs_.back();
+}
+
+const Instr* BasicBlock::getTerminator() const {
+  return const_cast<BasicBlock*>(this)->getTerminator();
+}
+
+const std::unordered_set<const Edge*>& BasicBlock::inEdges() const {
+  return in_edges_;
+}
+
+const std::unordered_set<const Edge*>& BasicBlock::outEdges() const {
+  return out_edges_;
 }
 
 Snapshot* BasicBlock::entrySnapshot() {
   for (auto& instr : instrs_) {
-    if (instr.IsPhi()) {
+    if (instr.isPhi()) {
       continue;
     }
-    if (instr.IsSnapshot()) {
+    if (instr.isSnapshot()) {
       return static_cast<Snapshot*>(&instr);
     }
     return nullptr;
@@ -941,91 +1240,52 @@ Snapshot* BasicBlock::entrySnapshot() {
   return nullptr;
 }
 
-bool BasicBlock::IsTrampoline() {
-  for (auto& instr : instrs_) {
-    if (instr.IsBranch()) {
-      auto succ = instr.successor(0);
-      // Don't consider a block a trampoline if its successor has one or more
-      // Phis, since this block may be necessary to pass a specific value to
-      // the Phi. This is correct but conservative: it's often safe to
-      // eliminate trampolines that jump to Phis, but that requires more
-      // involved analysis in the caller.
-      return succ != this && (succ->empty() || !succ->front().IsPhi());
-    }
-    if (instr.IsSnapshot()) {
-      continue;
-    }
-    return false;
-  }
-  // empty block
-  return false;
-}
-
 void BasicBlock::fixupPhis(BasicBlock* old_pred, BasicBlock* new_pred) {
   // This won't work correctly if this block has two incoming edges from the
   // same block, but we already can't handle that correctly with our current Phi
   // setup.
 
-  forEachPhi([&](Phi& phi) {
-    std::unordered_map<BasicBlock*, Register*> args;
-    for (size_t i = 0, n = phi.NumOperands(); i < n; ++i) {
-      auto block = phi.basic_blocks()[i];
-      if (block == old_pred) {
-        block = new_pred;
-      }
-      args[block] = phi.GetOperand(i);
-    }
-    phi.setArgs(args);
-  });
-}
-
-void BasicBlock::addPhiPredecessor(BasicBlock* old_pred, BasicBlock* new_pred) {
-  std::vector<Phi*> replacements;
-  forEachPhi([&](Phi& phi) {
-    for (auto block : phi.basic_blocks()) {
-      if (block == old_pred) {
-        replacements.push_back(&phi);
-        break;
-      }
-    }
-  });
-
-  for (auto phi : replacements) {
-    std::unordered_map<BasicBlock*, Register*> args;
-    for (size_t i = 0, n = phi->NumOperands(); i < n; ++i) {
-      auto block = phi->basic_blocks()[i];
-      if (block == old_pred) {
-        args[new_pred] = phi->GetOperand(i);
-      }
-      args[block] = phi->GetOperand(i);
-    }
-
-    phi->ReplaceWith(*Phi::create(phi->output(), args));
-    delete phi;
-  }
+  forEachPhi([&](Phi& phi) { phi.replacePredecessor(old_pred, new_pred); });
 }
 
 void BasicBlock::removePhiPredecessor(BasicBlock* old_pred) {
   for (auto it = instrs_.begin(); it != instrs_.end();) {
     auto& instr = *it;
     ++it;
-    if (!instr.IsPhi()) {
+    if (!instr.isPhi()) {
       break;
     }
 
-    Phi* phi = static_cast<Phi*>(&instr);
-    std::unordered_map<BasicBlock*, Register*> args;
-    for (size_t i = 0, n = phi->NumOperands(); i < n; ++i) {
-      auto block = phi->basic_blocks()[i];
-      if (block == old_pred) {
-        continue;
+    auto phi = static_cast<Phi*>(&instr);
+    auto num_operands = phi->numOperands();
+    std::vector<std::tuple<BasicBlock*, Register*>> args;
+    args.reserve(num_operands);
+    for (size_t i = 0; i < num_operands; ++i) {
+      BasicBlock* block = phi->basicBlocks()[i];
+      if (block != old_pred) {
+        args.emplace_back(block, phi->getOperand(i));
       }
-      args[block] = phi->GetOperand(i);
     }
-    phi->ReplaceWith(*Phi::create(phi->output(), args));
+    phi->replaceWith(*Phi::create(phi->output(), args));
     delete phi;
   }
 }
+
+namespace {
+
+template <typename Op>
+constexpr Op parseOpName(
+    std::string_view name,
+    std::span<const std::string_view> op_names,
+    std::string_view op_type) {
+  auto it = std::ranges::find(op_names, name);
+  if (it != op_names.end()) {
+    return static_cast<Op>(it - op_names.begin());
+  }
+  JIT_ABORT("Invalid {} '{}'", op_type, name);
+}
+
+} // namespace
 
 constexpr std::array<std::string_view, kNumCompareOps> kCompareOpNames = {
 #define OP_STR(NAME) #NAME,
@@ -1038,12 +1298,7 @@ std::string_view GetCompareOpName(CompareOp op) {
 }
 
 CompareOp ParseCompareOpName(std::string_view name) {
-  for (size_t i = 0; i < kCompareOpNames.size(); ++i) {
-    if (name == kCompareOpNames[i]) {
-      return static_cast<CompareOp>(i);
-    }
-  }
-  JIT_ABORT("Invalid CompareOp '{}'", name);
+  return parseOpName<CompareOp>(name, kCompareOpNames, "CompareOp");
 }
 
 constexpr std::array<std::string_view, kNumPrimitiveCompareOps>
@@ -1058,12 +1313,8 @@ std::string_view GetPrimitiveCompareOpName(PrimitiveCompareOp op) {
 }
 
 PrimitiveCompareOp ParsePrimitiveCompareOpName(std::string_view name) {
-  for (size_t i = 0; i < kPrimitiveCompareOpNames.size(); i++) {
-    if (name == kPrimitiveCompareOpNames[i]) {
-      return static_cast<PrimitiveCompareOp>(i);
-    }
-  }
-  JIT_ABORT("Invalid PrimitiveCompareOp '{}'", name);
+  return parseOpName<PrimitiveCompareOp>(
+      name, kPrimitiveCompareOpNames, "PrimitiveCompareOp");
 }
 
 std::optional<PrimitiveCompareOp> toPrimitiveCompareOp(CompareOp op) {
@@ -1104,12 +1355,7 @@ std::string_view GetBinaryOpName(BinaryOpKind op) {
 }
 
 BinaryOpKind ParseBinaryOpName(std::string_view name) {
-  for (size_t i = 0; i < kBinaryOpNames.size(); ++i) {
-    if (name == kBinaryOpNames[i]) {
-      return static_cast<BinaryOpKind>(i);
-    }
-  }
-  JIT_ABORT("Invalid BinaryOpKind '{}'", name);
+  return parseOpName<BinaryOpKind>(name, kBinaryOpNames, "BinaryOpKind");
 }
 
 constexpr std::array<std::string_view, kNumUnaryOpKinds> kUnaryOpNames = {
@@ -1123,12 +1369,7 @@ std::string_view GetUnaryOpName(UnaryOpKind op) {
 }
 
 UnaryOpKind ParseUnaryOpName(std::string_view name) {
-  for (size_t i = 0; i < kUnaryOpNames.size(); ++i) {
-    if (name == kUnaryOpNames[i]) {
-      return static_cast<UnaryOpKind>(i);
-    }
-  }
-  JIT_ABORT("Invalid UnaryOpKind '{}'", name);
+  return parseOpName<UnaryOpKind>(name, kUnaryOpNames, "UnaryOpKind");
 }
 
 constexpr std::array<std::string_view, kNumPrimitiveUnaryOpKinds>
@@ -1143,12 +1384,8 @@ std::string_view GetPrimitiveUnaryOpName(PrimitiveUnaryOpKind op) {
 }
 
 PrimitiveUnaryOpKind ParsePrimitiveUnaryOpName(std::string_view name) {
-  for (size_t i = 0; i < kPrimitiveUnaryOpNames.size(); ++i) {
-    if (name == kPrimitiveUnaryOpNames[i]) {
-      return static_cast<PrimitiveUnaryOpKind>(i);
-    }
-  }
-  JIT_ABORT("Invalid PrimitiveUnaryOpKind '{}'", name);
+  return parseOpName<PrimitiveUnaryOpKind>(
+      name, kPrimitiveUnaryOpNames, "PrimitiveUnaryOpKind");
 }
 
 // NB: This needs to be in the order that the values appear in the InPlaceOpKind
@@ -1164,12 +1401,7 @@ std::string_view GetInPlaceOpName(InPlaceOpKind op) {
 }
 
 InPlaceOpKind ParseInPlaceOpName(std::string_view name) {
-  for (size_t i = 0; i < kInPlaceOpNames.size(); ++i) {
-    if (name == kInPlaceOpNames[i]) {
-      return static_cast<InPlaceOpKind>(i);
-    }
-  }
-  JIT_ABORT("Invalid InPlaceOpKind '{}'", name);
+  return parseOpName<InPlaceOpKind>(name, kInPlaceOpNames, "InPlaceOpKind");
 }
 
 // NB: This needs to be in the order that the values appear in the FunctionAttr
@@ -1182,10 +1414,6 @@ static const char* gFunctionFields[] = {
     "func_annotate",
 };
 
-const char* functionFieldName(FunctionAttr field) {
-  return gFunctionFields[static_cast<int>(field)];
-}
-
 TypedArgument::TypedArgument(
     long locals_idx,
     BorrowedRef<PyTypeObject> pytype,
@@ -1193,32 +1421,14 @@ TypedArgument::TypedArgument(
     int exact,
     Type jit_type)
     : locals_idx(locals_idx),
+      pytype(pytype),
       optional(optional),
       exact(exact),
-      jit_type(jit_type) {
-  ThreadedCompileSerialize guard;
-  this->pytype = ThreadedRef<PyTypeObject>::create(pytype);
-  thread_safe_flags = pytype->tp_flags & kThreadSafeFlagsMask;
-}
+      jit_type(jit_type),
+      thread_safe_flags(pytype->tp_flags & kThreadSafeFlagsMask) {}
 
-TypedArgument::~TypedArgument() {
-  ThreadedCompileSerialize guard;
-  pytype.reset();
-}
-
-TypedArgument::TypedArgument(const TypedArgument& other)
-    : locals_idx(other.locals_idx),
-      optional(other.optional),
-      exact(other.exact),
-      jit_type(other.jit_type),
-      thread_safe_flags(other.thread_safe_flags) {
-  ThreadedCompileSerialize guard;
-  pytype = ThreadedRef<PyTypeObject>::create(other.pytype);
-}
-
-TypedArgument& TypedArgument::operator=(const TypedArgument& other) {
-  new (this) TypedArgument{other};
-  return *this;
+const char* functionFieldName(FunctionAttr field) {
+  return gFunctionFields[static_cast<int>(field)];
 }
 
 unsigned long TypedArgument::threadSafeTpFlags() const {
@@ -1231,11 +1441,13 @@ unsigned long TypedArgument::threadSafeTpFlags() const {
 Environment::~Environment() {
   // Serialize as we modify the ref-count of objects which may be widely
   // accessible.
-  ThreadedCompileSerialize guard;
-  references_.clear();
+  if (strong_references_.size()) {
+    ThreadedCompileGILHolder guard;
+    strong_references_.clear();
+  }
 }
 
-Register* Environment::AllocateRegister() {
+Register* Environment::allocateRegister() {
   auto id = next_register_id_++;
   while (registers_.contains(id)) {
     id = next_register_id_++;
@@ -1252,7 +1464,7 @@ Register* Environment::getRegister(int id) {
   return it->second.get();
 }
 
-const Environment::RegisterMap& Environment::GetRegisters() const {
+const Environment::RegisterMap& Environment::getRegisters() const {
   return registers_;
 }
 
@@ -1264,29 +1476,19 @@ Register* Environment::addRegister(std::unique_ptr<Register> reg) {
 }
 
 BorrowedRef<> Environment::addReference(BorrowedRef<> obj) {
-  // Serialize as we modify the ref-count to obj which may be widely accessible.
-  ThreadedCompileSerialize guard;
-  return references_.emplace(ThreadedRef<>::create(obj)).first->get();
+  return references_.emplace(obj).first->get();
 }
 
-BorrowedRef<> Environment::addReference(Ref<> obj) {
-  // ThreadedRef cannot steal from Ref, so have to go through BorrowedRef and
-  // accept the extra increfs and decrefs.
-  return addReference(BorrowedRef<>{obj});
+BorrowedRef<> Environment::addReference(Ref<>&& obj) {
+  return strong_references_.emplace(std::move(obj)).first->get();
 }
 
 const Environment::ReferenceSet& Environment::references() const {
   return references_;
 }
 
-bool usesRuntimeFunc([[maybe_unused]] BorrowedRef<PyCodeObject> code) {
-#if PY_VERSION_HEX < 0x030C0000
-  return PyTuple_GET_SIZE(PyCode_GetFreevars(code)) > 0;
-#else
-  // In 3.12+ we always need the runtime function because we use it to
-  // initialize the _PyInterpreterFrame object.
-  return true;
-#endif
+Environment::StrongReferenceSet&& Environment::stealStrongReferences() {
+  return std::move(strong_references_);
 }
 
 const char* const kFailureTypeMsgs[] = {
@@ -1325,6 +1527,8 @@ std::ostream& operator<<(std::ostream& os, OperandType op) {
       return os << "(Dict, chkdict)";
     case Constraint::kMatchAllAsCInt:
       return os << "CInt";
+    case Constraint::kMatchAllAsCIntOrCBool:
+      return os << "(CInt, CBool)";
     case Constraint::kMatchAllAsPrimitive:
       return os << "Primitive";
   }
@@ -1332,10 +1536,10 @@ std::ostream& operator<<(std::ostream& os, OperandType op) {
 }
 
 const FrameState* get_frame_state(const Instr& instr) {
-  if (instr.IsSnapshot()) {
+  if (instr.isSnapshot()) {
     return static_cast<const Snapshot&>(instr).frameState();
   }
-  if (instr.IsBeginInlinedFunction()) {
+  if (instr.isBeginInlinedFunction()) {
     return static_cast<const BeginInlinedFunction&>(instr).callerFrameState();
   }
   if (auto db = instr.asDeoptBase()) {
@@ -1349,4 +1553,4 @@ FrameState* get_frame_state(Instr& instr) {
       get_frame_state(const_cast<const Instr&>(instr)));
 }
 
-} // namespace jit::hir
+} // namespace cinderx::jit::hir

@@ -17,72 +17,6 @@
 extern "C" {
 #endif
 
-// The following PyCodeObject functions were added in 3.11.
-#if PY_VERSION_HEX < 0x030B0000
-
-static inline PyObject* PyCode_GetCode(PyCodeObject* code) {
-  return code->co_code;
-}
-
-static inline PyObject* PyCode_GetVarnames(PyCodeObject* code) {
-  return code->co_varnames;
-}
-
-static inline PyObject* PyCode_GetCellvars(PyCodeObject* code) {
-  return code->co_cellvars;
-}
-
-static inline PyObject* PyCode_GetFreevars(PyCodeObject* code) {
-  return code->co_freevars;
-}
-
-static inline PyCodeObject* PyUnstable_Code_New(
-    int argcount,
-    int kwonlyargcount,
-    int nlocals,
-    int stacksize,
-    int flags,
-    PyObject* code,
-    PyObject* consts,
-    PyObject* names,
-    PyObject* varnames,
-    PyObject* freevars,
-    PyObject* cellvars,
-    PyObject* filename,
-    PyObject* name,
-    PyObject* Py_UNUSED(qualname),
-    int firstlineno,
-    PyObject* linetable,
-    PyObject* Py_UNUSED(exceptiontable)) {
-  return PyCode_New(
-      argcount,
-      kwonlyargcount,
-      nlocals,
-      stacksize,
-      flags,
-      code,
-      consts,
-      names,
-      varnames,
-      freevars,
-      cellvars,
-      filename,
-      name,
-      firstlineno,
-      linetable);
-}
-
-#endif
-
-#if PY_VERSION_HEX < 0x030C0000
-
-// Renamed in 3.12.
-#define PyUnstable_Eval_RequestCodeExtraIndex _PyEval_RequestCodeExtraIndex
-#define PyUnstable_Code_GetExtra _PyCode_GetExtra
-#define PyUnstable_Code_SetExtra _PyCode_SetExtra
-
-#endif
-
 // Gets the qualified name of the code object or "<null>" if it's not set.
 const char* codeName(PyCodeObject* code);
 
@@ -115,9 +49,6 @@ int loadAttrIndex(int oparg);
 // Get the name index from a LOAD_GLOBAL's oparg.
 int loadGlobalIndex(int oparg);
 
-// Before 3.12, Cinder relies on Shadowcode's call count tracking.
-#define USE_CODE_EXTRA (PY_VERSION_HEX >= 0x030C0000)
-
 // Initialize and finalize the index of the extra data Cinder attaches onto code
 // objects.
 void initCodeExtraIndex();
@@ -127,6 +58,15 @@ void finiCodeExtraIndex();
 // this data if this is the first access. Returns nullptr on failure with no
 // Python error set.
 CodeExtra* codeExtra(PyCodeObject* code);
+
+// Get the extra data object associated with a code object, without allocating
+// it if it doesn't exist yet.  Unlike codeExtra() this is safe to call without
+// the GIL.  Returns nullptr if there is no data.
+CodeExtra* codeExtraIfPresent(PyCodeObject* code);
+
+// Get the number of times a code object has been called by the interpreter.
+// Calls to JIT-compiled code objects are currently uncounted.
+size_t codeCallCount(PyCodeObject* code);
 
 // Count the various frame variables that a code object will use.
 int numLocals(PyCodeObject* code);
@@ -140,7 +80,7 @@ int numLocalsplus(PyCodeObject* code);
 uint8_t Cix_GetOriginalOpcode(
     _PyCoLineInstrumentationData* line_data,
     int index);
-#elif PY_VERSION_HEX >= 0x030C0000
+#else
 static inline uint8_t Cix_GetOriginalOpcode(
     _PyCoLineInstrumentationData* line_data,
     int index) {
@@ -155,7 +95,7 @@ static inline uint8_t Cix_GetOriginalOpcode(
 
 #include <string>
 
-namespace jit {
+namespace cinderx {
 
 std::string codeFullname(
     BorrowedRef<PyObject> module,
@@ -163,20 +103,21 @@ std::string codeFullname(
 std::string funcFullname(BorrowedRef<PyFunctionObject> func);
 
 // Given a code object and an index into f_localsplus, compute which of
-// code->co_varnames, code->cellvars, or code->freevars contains the name of
-// the variable. Return that tuple and adjust idx as needed.
+// code->co_varnames, code->cellvars, or code->freevars contains the name of the
+// variable. Return a new reference to that tuple and adjust idx as needed.
 PyObject* getVarnameTuple(BorrowedRef<PyCodeObject> code, int* idx);
 
 // Similar to getVarnameTuple, but return the name itself rather than the
 // containing tuple.
 PyObject* getVarname(BorrowedRef<PyCodeObject> code, int idx);
 
+// Return a crc32 checksum of the bytecode for the given code object.
 uint32_t hashBytecode(BorrowedRef<PyCodeObject> code);
 
 // Return the qualname of the given code object, falling back to its name or
 // "<unknown>" if not set.
 std::string codeQualname(BorrowedRef<PyCodeObject> code);
 
-} // namespace jit
+} // namespace cinderx
 
 #endif

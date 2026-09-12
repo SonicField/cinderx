@@ -4,10 +4,6 @@
 
 #include "cinderx/python.h"
 
-#include "cinderx/Jit/frame_shadow.h"
-
-#if PY_VERSION_HEX >= 0x030C0000
-
 #include "internal/pycore_frame.h"
 
 #if PY_VERSION_HEX >= 0x030E0000
@@ -19,9 +15,7 @@
 #include "cinderx/Jit/frame_header.h"
 #include "cinderx/module_state.h"
 
-namespace jit {
-
-RuntimeFrameState runtimeFrameStateFromThreadState(PyThreadState* tstate);
+namespace cinderx::jit {
 
 // A singleton reifier object that was set _PyInterpreterFrame's f_funcobj
 // to. The Python runtime will call this object when it needs a complete
@@ -59,23 +53,20 @@ BorrowedRef<PyFunctionObject> jitFrameGetFunction(_PyInterpreterFrame* frame);
 // Sets the PyFunctionObject to be stashed away in an interpreter frame.
 void jitFrameSetFunction(_PyInterpreterFrame* frame, PyFunctionObject* func);
 
-// Checks if the interpreter frame is an inline frame w/ runtime frame state
-bool hasRtfsFunction(_PyInterpreterFrame* frame);
-
-// Get the RuntimeFrameState from a _PyInterpreterFrame, hasRtfsFunction must be
-// true.
-RuntimeFrameState* jitFrameGetRtfs(_PyInterpreterFrame* frame);
+// Checks if the interpreter frame is an inlined JIT frame (tagged with
+// JIT_FRAME_INLINED in the FrameHeader).
+bool isInlinedFrame(_PyInterpreterFrame* frame);
 
 FrameHeader* jitFrameGetHeader(_PyInterpreterFrame* frame);
 
 // Like _PyFrame_ClearExceptCode but will handle partially initialized
 // JIT frames and only clean up the necessary state.
-void jitFrameClearExceptCode(_PyInterpreterFrame* frame);
+void jitFrameClearExceptCode(
+    _PyInterpreterFrame* frame,
+    FrameHeader* generator_header = nullptr);
 
-// Initializes a JIT interpreter frame. Equivalent to _PyFrame_Initialize if we
-// don't have ENABLE_LIGHTWEIGHT_FRAMES. If we do have ENABLE_LIGHTWEIGHT_FRAMES
-// then this will only initialize the subset of the fields which are
-// required.
+// Initializes a JIT interpreter frame. Equivalent to _PyFrame_Initialize
+// accounting for version differences.
 void jitFrameInit(
     PyThreadState* tstate,
     _PyInterpreterFrame* frame,
@@ -83,15 +74,21 @@ void jitFrameInit(
     PyCodeObject* code,
     int null_locals_from,
     _frameowner owner,
-    _PyInterpreterFrame* previous,
-    PyObject* reifier);
-
-// Gets the frame size (in number of words) that's required for the JIT
-// to initialize a frame object.
-size_t jitFrameGetSize(PyCodeObject* code);
+    _PyInterpreterFrame* previous);
 
 Ref<> makeFrameReifier(BorrowedRef<PyCodeObject> code);
 
-} // namespace jit
+// Walk all thread stacks and patch JIT frame return addresses to their
+// per-callsite deopt exit stubs. Skips the topmost JIT frame on the current
+// thread (the instrumentation-activation call). Used when instrumentation is
+// enabled to cause frames to deopt on return.
+// Only works with lightweight frames; does nothing when normal Python frames
+// are used.
+void deoptAllJitFramesOnStack();
 
+#if defined(META_PYTHON) && defined(Py_GIL_DISABLED)
+void registerJitGCDeferredRefVisitor(PyInterpreterState* interp);
+void clearJitGCDeferredRefVisitor(PyInterpreterState* interp);
 #endif
+
+} // namespace cinderx::jit

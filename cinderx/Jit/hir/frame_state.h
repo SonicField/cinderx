@@ -7,7 +7,7 @@
 #include "cinderx/Jit/hir/register.h"
 #include "cinderx/Jit/stack.h"
 
-namespace jit::hir {
+namespace cinderx::jit::hir {
 
 // An entry in the CPython block stack
 struct ExecutionBlock {
@@ -23,10 +23,6 @@ struct ExecutionBlock {
   bool operator==(const ExecutionBlock& other) const {
     return (opcode == other.opcode) && (handler_off == other.handler_off) &&
         (stack_level == other.stack_level);
-  }
-
-  bool operator!=(const ExecutionBlock& other) const {
-    return !(*this == other);
   }
 
   bool isTryBlock() const {
@@ -61,7 +57,6 @@ struct FrameState {
   FrameState& operator=(const FrameState& other) = default;
 
   bool operator==(const FrameState& other) const = default;
-  bool operator!=(const FrameState& other) const = default;
 
   // If the function is inlined into another function, the depth at which it
   // is inlined (nested function calls may be inlined). Starts at 1. If the
@@ -99,7 +94,7 @@ struct FrameState {
   }
 
   // The currently executing instruction.
-  BCOffset cur_instr_offs{-static_cast<ssize_t>(sizeof(_Py_CODEUNIT))};
+  BCOffset cur_instr_offs{-static_cast<intptr_t>(sizeof(_Py_CODEUNIT))};
 
   // Combination of local variables, cell variables (used by closures of inner
   // functions), and free variables (our closure). Locals are at the start and
@@ -123,4 +118,4 @@ struct FrameState {
   FrameState* parent{nullptr};
 };
 
-} // namespace jit::hir
+} // namespace cinderx::jit::hir

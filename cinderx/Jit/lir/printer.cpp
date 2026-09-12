@@ -11,7 +11,7 @@
 
 #include <iomanip>
 
-namespace jit::lir {
+namespace cinderx::jit::lir {
 
 Printer::Printer() {
   hir_printer_.setFullSnapshots(true);
@@ -20,7 +20,7 @@ Printer::Printer() {
 
 void Printer::print(std::ostream& out, const Function& func) {
   out << "Function:\n";
-  for (auto& block : func.basicblocks()) {
+  for (auto& block : func.basicBlocks()) {
     print(out, *block);
     out << '\n';
   }
@@ -59,7 +59,7 @@ void Printer::print(std::ostream& out, const BasicBlock& block) {
     if (getConfig().log.lir_origin && instr->origin() != prev_instr) {
       if (instr->origin()) {
         out << '\n';
-        hir_printer_.Print(out, *instr->origin());
+        hir_printer_.print(out, *instr->origin());
         out << '\n';
       }
       prev_instr = instr->origin();
@@ -71,27 +71,29 @@ void Printer::print(std::ostream& out, const BasicBlock& block) {
 
 void Printer::print(std::ostream& out, const Instruction& instr) {
   auto output_opnd = instr.output();
-  if (output_opnd->type() == OperandBase::kNone) {
+  if (output_opnd->type() == Operand::kNone) {
     fmt::print(out, "{:>16}   ", "");
   } else {
     std::stringstream ss;
     print(ss, *output_opnd);
     out << std::setw(16) << ss.str() << " = ";
   }
-  out << InstrProperty::getProperties(&instr).name;
+  out << instr.opname();
   const char* sep = " ";
-  if (instr.opcode() == Instruction::kPhi) {
-    auto num_inputs = instr.getNumInputs();
-    for (size_t i = 0; i < num_inputs; i += 2) {
-      out << sep << "(";
-      print(out, *(instr.getInput(i)));
-      sep = ", ";
-      out << sep;
-      print(out, *(instr.getInput(i + 1)));
+  if (instr.opcode() == Opcode::kPhi) {
+    for (size_t i = 0; i < instr.numPhiInputs(); ++i) {
+      out << sep << "(BB%" << instr.phiPredecessor(i)->id() << ", ";
+      const Operand* input = instr.phiInput(i);
+      if (input == nullptr) {
+        out << "<unset>";
+      } else {
+        print(out, *input);
+      }
       out << ")";
+      sep = ", ";
     }
   } else {
-    instr.foreachInputOperand([&sep, &out, this](const OperandBase* operand) {
+    instr.foreachInputOperand([&sep, &out, this](const Operand* operand) {
       out << sep;
       print(out, *operand);
       sep = ", ";
@@ -99,37 +101,35 @@ void Printer::print(std::ostream& out, const Instruction& instr) {
   }
 }
 
-void Printer::print(std::ostream& out, const OperandBase& operand) {
+void Printer::print(std::ostream& out, const Operand& operand) {
   if (operand.isLinked()) {
-    auto linked_opnd =
-        static_cast<const LinkedOperand&>(operand).getLinkedOperand();
-    print(out, *linked_opnd);
+    print(out, *operand.getLinkedOperand());
     return;
   }
 
   switch (operand.type()) {
-    case OperandBase::kVreg:
+    case Operand::kVreg:
       out << "%" << operand.instr()->id();
       break;
-    case OperandBase::kReg:
+    case Operand::kReg:
       out << PhyLocation(operand.getPhyRegister());
       break;
-    case OperandBase::kStack:
+    case Operand::kStack:
       out << PhyLocation(operand.getStackSlot());
       break;
-    case OperandBase::kMem:
+    case Operand::kMem:
       out << "[" << std::hex << operand.getMemoryAddress() << "]" << std::dec;
       break;
-    case OperandBase::kInd:
+    case Operand::kInd:
       out << *operand.getMemoryIndirect();
       break;
-    case OperandBase::kImm:
+    case Operand::kImm:
       fmt::print(out, "{0}({0:#x})", operand.getConstant());
       break;
-    case OperandBase::kLabel:
+    case Operand::kLabel:
       out << "BB%" << operand.getBasicBlock()->id();
       break;
-    case OperandBase::kNone:
+    case Operand::kNone:
       out << "<!!!None!!!>";
       break;
   }
@@ -146,7 +146,7 @@ void Printer::print(std::ostream& out, const MemoryIndirect& ind) {
   if (index_reg != nullptr) {
     fmt::print(out, " + {}", *index_reg);
 
-    int multiplier = ind.getMultipiler();
+    int multiplier = ind.getMultiplier();
     if (multiplier > 0) {
       fmt::print(out, " * {}", 1 << multiplier);
     }
@@ -164,4 +164,4 @@ void Printer::print(std::ostream& out, const MemoryIndirect& ind) {
   fmt::print(out, "]");
 }
 
-} // namespace jit::lir
+} // namespace cinderx::jit::lir

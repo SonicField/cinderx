@@ -8,23 +8,71 @@ import subprocess
 import sys
 import unittest
 
-import cinderx
-
-cinderx.init()
-
 import cinderx.jit
-from cinderx.test_support import ENCODING, passIf, skip_unless_jit, subprocess_env
+from cinderx.test_support import (
+    ENCODING,
+    has_meta_lazy_imports,
+    passIf,
+    passUnless,
+    skip_if_ft,
+    skip_unless_jit,
+    subprocess_env,
+)
 
 SKIP_315: bool = sys.version_info >= (3, 15)
+META_LAZY_IMPORTS: bool = has_meta_lazy_imports()
 
 
 class PreloadTests(unittest.TestCase):
     SCRIPT_FILE: str = os.path.join(
         os.path.dirname(__file__), "cinder_preload_helper_main.py"
     )
+    RECURSIVE_SCRIPT_FILE: str = os.path.join(
+        os.path.dirname(__file__), "cinder_recursive_preload_helper_main.py"
+    )
+    MP_SCRIPT_FILE: str = os.path.join(
+        os.path.dirname(__file__), "cinder_mp_preload_helper_main.py"
+    )
 
     @skip_unless_jit("Runs a subprocess with the JIT enabled")
-    @passIf(SKIP_315, "no lazy imports on 3.15 T243514540")
+    @passUnless(META_LAZY_IMPORTS, "Uses -L to enable Meta Python Lazy Imports")
+    @skip_if_ft("Batch multi-threaded compile not supported with free threading")
+    def test_func_destroyed_during_preload_multiprocessing(self) -> None:
+        """
+        Repro for T266490160 / D101755188 in a multiprocessing setup.
+
+        Forked workers inherit any unit_deleted_during_preload callback the
+        parent left installed, then trigger their own compilations whose
+        preload runs JIT-compiled code that destroys functions.  If the
+        unit-deleted callbacks are referencing invalid memory, they will
+        crash.
+        """
+
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-X",
+                "jit-all",
+                "-X",
+                "jit-batch-compile-workers=2",
+                "-L",
+                self.MP_SCRIPT_FILE,
+            ],
+            cwd=os.path.dirname(__file__),
+            capture_output=True,
+            encoding=ENCODING,
+            env={
+                **subprocess_env(),
+                "DISABLE_LAZY_IMPORTS": "1",
+                "CINDERX_JIT_BACKGROUND_COMPILE": "0",
+            },
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("ok ", proc.stdout, proc.stdout)
+
+    @skip_unless_jit("Runs a subprocess with the JIT enabled")
+    @passUnless(META_LAZY_IMPORTS, "Uses -L to enable Meta Python Lazy Imports")
+    @skip_if_ft("Batch multi-threaded compile not supported with free threading")
     def test_func_destroyed_during_preload(self) -> None:
         proc = subprocess.run(
             [
@@ -42,7 +90,14 @@ class PreloadTests(unittest.TestCase):
             cwd=os.path.dirname(__file__),
             stdout=subprocess.PIPE,
             encoding=ENCODING,
-            env=subprocess_env(),
+            # DISABLE_LAZY_IMPORTS prevents the safer_lazy_imports startup
+            # function from overriding -L with selective lazy imports, which
+            # would make the helper modules' imports eager and break this test.
+            env={
+                **subprocess_env(),
+                "DISABLE_LAZY_IMPORTS": "1",
+                "CINDERX_JIT_BACKGROUND_COMPILE": "0",
+            },
         )
         self.assertEqual(proc.returncode, 0)
         expected_stdout = """resolving a_func
@@ -56,6 +111,9 @@ hello from b_func!
 """
         self.assertEqual(proc.stdout, expected_stdout)
 
+    @passIf(
+        sys.platform == "win32", "asyncio is failing to load in subprocess on Windows"
+    )
     def test_preload_error(self) -> None:
         # don't include jit/no-jit in this matrix, decide it based on whether
         # overall test run is jit or no-jit; this avoids the confusion of jit
@@ -63,12 +121,8 @@ hello from b_func!
         for recursive, batch, lazyimports in itertools.product(
             [True, False],
             [True, False] if cinderx.jit.is_enabled() else [False],
-            [True, False],
+            [True, False] if META_LAZY_IMPORTS else [False],
         ):
-            if sys.version_info >= (3, 15) and lazyimports:
-                # T243514540: lazy imports isn't available on 3.15
-                continue
-
             root = os.path.join(
                 os.path.dirname(__file__),
                 "data/preload_error_recursive" if recursive else "data/preload_error",
@@ -104,18 +158,17 @@ hello from b_func!
                 self.assertEqual(proc.returncode, 1, proc.stderr)
                 self.assertIn(b"RuntimeError: boom\n", proc.stderr)
 
+    @passIf(
+        sys.platform == "win32", "asyncio is failing to load in subprocess on Windows"
+    )
     def test_error_preloading_inlined(self) -> None:
         root = os.path.join(os.path.dirname(__file__), "data/error_preloading_inlined")
         jitlist = os.path.join(root, "jitlist.txt")
         main = os.path.join(root, "main.py")
         for lazy_imports, jit in itertools.product(
-            [True, False],
+            [True, False] if META_LAZY_IMPORTS else [False],
             [True, False] if cinderx.jit.is_enabled() else [False],
         ):
-            if sys.version_info >= (3, 15) and lazy_imports:
-                # T243514540: lazy imports isn't available on 3.15
-                continue
-
             with self.subTest(lazy_imports=lazy_imports, jit=jit):
                 cmd = [sys.executable]
                 if jit:

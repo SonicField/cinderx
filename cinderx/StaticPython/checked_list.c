@@ -16,6 +16,7 @@
 #include "cinderx/StaticPython/generic_type.h"
 #include "cinderx/StaticPython/typed_method_def.h"
 #include "cinderx/UpstreamBorrow/borrowed.h"
+#include "cinderx/module_c_state.h"
 
 static inline int Ci_List_CheckIncludingChecked(PyObject* op) {
   return PyList_Check(op) || Ci_CheckedList_Check(op);
@@ -166,8 +167,6 @@ static inline int valid_index(Py_ssize_t i, Py_ssize_t limit) {
   */
   return (size_t)i < (size_t)limit;
 }
-
-static PyObject* indexerr = NULL;
 
 static int ins1(PyListObject* self, Py_ssize_t where, PyObject* v) {
   Py_ssize_t i, n = Py_SIZE(self);
@@ -320,13 +319,16 @@ static int list_contains(PyListObject* a, PyObject* el) {
 
 static PyObject* list_item(PyListObject* a, Py_ssize_t i) {
   if (!valid_index(i, Py_SIZE(a))) {
-    if (indexerr == NULL) {
-      indexerr = PyUnicode_FromString("list index out of range");
-      if (indexerr == NULL) {
+    PyObject* err = Ci_GetIndexErr();
+    if (err == NULL) {
+      err = PyUnicode_FromString("list index out of range");
+      if (err == NULL) {
         return NULL;
       }
+      Ci_SetIndexErr((PyUnicodeObject*)err);
+      Py_DECREF(err);
     }
-    PyErr_SetObject(PyExc_IndexError, indexerr);
+    PyErr_SetObject(PyExc_IndexError, err);
     return NULL;
   }
   Py_INCREF(a->ob_item[i]);
@@ -1900,36 +1902,6 @@ static int unsafe_latin_compare(PyObject* v, PyObject* w, MergeState* ms) {
 /* Bounded int compare: compare any two longs that fit in a single machine word.
  */
 
-#if PY_VERSION_HEX < 0x030C0000
-
-static int unsafe_long_compare(PyObject* v, PyObject* w, MergeState* ms) {
-  PyLongObject *vl, *wl;
-  sdigit v0, w0;
-  int res;
-
-  /* Modified from Objects/longobject.c:long_compare, assuming: */
-  assert(Py_IS_TYPE(v, &PyLong_Type));
-  assert(Py_IS_TYPE(w, &PyLong_Type));
-  assert(Py_ABS(Py_SIZE(v)) <= 1);
-  assert(Py_ABS(Py_SIZE(w)) <= 1);
-
-  vl = (PyLongObject*)v;
-  wl = (PyLongObject*)w;
-
-  v0 = Py_SIZE(vl) == 0 ? 0 : (sdigit)vl->ob_digit[0];
-  w0 = Py_SIZE(wl) == 0 ? 0 : (sdigit)wl->ob_digit[0];
-  if (Py_SIZE(vl) < 0)
-    v0 = -v0;
-  if (Py_SIZE(wl) < 0)
-    w0 = -w0;
-
-  res = v0 < w0;
-  assert(res == PyObject_RichCompareBool(v, w, Py_LT));
-  return res;
-}
-
-#else
-
 static int unsafe_long_compare(PyObject* v, PyObject* w, MergeState* ms) {
   PyLongObject *vl, *wl;
   intptr_t v0, w0;
@@ -1951,12 +1923,6 @@ static int unsafe_long_compare(PyObject* v, PyObject* w, MergeState* ms) {
   assert(res == PyObject_RichCompareBool(v, w, Py_LT));
   return res;
 }
-
-#endif
-
-#if PY_VERSION_HEX < 0x030C0000
-#define PyUnstable_Long_IsCompact(x) (Py_ABS(Py_SIZE(key)) <= 1)
-#endif
 
 /* Float compare: compare any two floats. */
 static int unsafe_float_compare(PyObject* v, PyObject* w, MergeState* ms) {
@@ -2693,36 +2659,24 @@ static PyMethodDef listiter_methods[] = {
     {NULL, NULL} /* sentinel */
 };
 
-PyTypeObject Ci_CheckedListIter_Type = {
-    PyVarObject_HEAD_INIT(NULL, 0) "list_iterator", /* tp_name */
-    sizeof(listiterobject), /* tp_basicsize */
-    0, /* tp_itemsize */
-    /* methods */
-    (destructor)listiter_dealloc, /* tp_dealloc */
-    0, /* tp_vectorcall_offset */
-    0, /* tp_getattr */
-    0, /* tp_setattr */
-    0, /* tp_as_async */
-    0, /* tp_repr */
-    0, /* tp_as_number */
-    0, /* tp_as_sequence */
-    0, /* tp_as_mapping */
-    0, /* tp_hash */
-    0, /* tp_call */
-    0, /* tp_str */
-    PyObject_GenericGetAttr, /* tp_getattro */
-    0, /* tp_setattro */
-    0, /* tp_as_buffer */
-    Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC, /* tp_flags */
-    0, /* tp_doc */
-    (traverseproc)listiter_traverse, /* tp_traverse */
-    0, /* tp_clear */
-    0, /* tp_richcompare */
-    0, /* tp_weaklistoffset */
-    PyObject_SelfIter, /* tp_iter */
-    (iternextfunc)listiter_next, /* tp_iternext */
-    listiter_methods, /* tp_methods */
-    0, /* tp_members */
+PyTypeObject* Ci_CheckedListIter_Type;
+
+static PyType_Slot Ci_CheckedListIter_Slots[] = {
+    {Py_tp_dealloc, (void*)listiter_dealloc},
+    {Py_tp_getattro, (void*)PyObject_GenericGetAttr},
+    {Py_tp_traverse, (void*)listiter_traverse},
+    {Py_tp_iter, (void*)PyObject_SelfIter},
+    {Py_tp_iternext, (void*)listiter_next},
+    {Py_tp_methods, (void*)listiter_methods},
+    {0, NULL},
+};
+
+PyType_Spec Ci_CheckedListIter_Spec = {
+    .name = "_static.list_iterator",
+    .basicsize = sizeof(listiterobject),
+    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC |
+        Py_TPFLAGS_DISALLOW_INSTANTIATION | Py_TPFLAGS_IMMUTABLETYPE,
+    .slots = Ci_CheckedListIter_Slots,
 };
 
 static PyObject* list_iter(PyObject* seq) {
@@ -2732,7 +2686,7 @@ static PyObject* list_iter(PyObject* seq) {
     PyErr_BadInternalCall();
     return NULL;
   }
-  it = PyObject_GC_New(listiterobject, &Ci_CheckedListIter_Type);
+  it = PyObject_GC_New(listiterobject, Ci_CheckedListIter_Type);
   if (it == NULL) {
     return NULL;
   }
@@ -2744,9 +2698,11 @@ static PyObject* list_iter(PyObject* seq) {
 }
 
 static void listiter_dealloc(listiterobject* it) {
+  PyTypeObject* type = Py_TYPE(it);
   _PyObject_GC_UNTRACK(it);
   Py_XDECREF(it->it_seq);
   PyObject_GC_Del(it);
+  Py_DECREF(type);
 }
 
 static int listiter_traverse(listiterobject* it, visitproc visit, void* arg) {
@@ -2837,36 +2793,24 @@ static PyMethodDef listreviter_methods[] = {
     {NULL, NULL} /* sentinel */
 };
 
-PyTypeObject Ci_CheckedListRevIter_Type = {
-    PyVarObject_HEAD_INIT(NULL, 0) "list_reverseiterator", /* tp_name */
-    sizeof(listreviterobject), /* tp_basicsize */
-    0, /* tp_itemsize */
-    /* methods */
-    (destructor)listreviter_dealloc, /* tp_dealloc */
-    0, /* tp_vectorcall_offset */
-    0, /* tp_getattr */
-    0, /* tp_setattr */
-    0, /* tp_as_async */
-    0, /* tp_repr */
-    0, /* tp_as_number */
-    0, /* tp_as_sequence */
-    0, /* tp_as_mapping */
-    0, /* tp_hash */
-    0, /* tp_call */
-    0, /* tp_str */
-    PyObject_GenericGetAttr, /* tp_getattro */
-    0, /* tp_setattro */
-    0, /* tp_as_buffer */
-    Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC, /* tp_flags */
-    0, /* tp_doc */
-    (traverseproc)listreviter_traverse, /* tp_traverse */
-    0, /* tp_clear */
-    0, /* tp_richcompare */
-    0, /* tp_weaklistoffset */
-    PyObject_SelfIter, /* tp_iter */
-    (iternextfunc)listreviter_next, /* tp_iternext */
-    listreviter_methods, /* tp_methods */
-    0,
+PyTypeObject* Ci_CheckedListRevIter_Type;
+
+static PyType_Slot Ci_CheckedListRevIter_Slots[] = {
+    {Py_tp_dealloc, (void*)listreviter_dealloc},
+    {Py_tp_getattro, (void*)PyObject_GenericGetAttr},
+    {Py_tp_traverse, (void*)listreviter_traverse},
+    {Py_tp_iter, (void*)PyObject_SelfIter},
+    {Py_tp_iternext, (void*)listreviter_next},
+    {Py_tp_methods, (void*)listreviter_methods},
+    {0, NULL},
+};
+
+PyType_Spec Ci_CheckedListRevIter_Spec = {
+    .name = "_static.list_reverseiterator",
+    .basicsize = sizeof(listreviterobject),
+    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC |
+        Py_TPFLAGS_DISALLOW_INSTANTIATION | Py_TPFLAGS_IMMUTABLETYPE,
+    .slots = Ci_CheckedListRevIter_Slots,
 };
 
 /*[clinic input]
@@ -2880,7 +2824,7 @@ static PyObject* list___reversed___impl(PyListObject* self)
 {
   listreviterobject* it;
 
-  it = PyObject_GC_New(listreviterobject, &Ci_CheckedListRevIter_Type);
+  it = PyObject_GC_New(listreviterobject, Ci_CheckedListRevIter_Type);
   if (it == NULL) {
     return NULL;
   }
@@ -2893,9 +2837,11 @@ static PyObject* list___reversed___impl(PyListObject* self)
 }
 
 static void listreviter_dealloc(listreviterobject* it) {
+  PyTypeObject* type = Py_TYPE(it);
   PyObject_GC_UnTrack(it);
   Py_XDECREF(it->it_seq);
   PyObject_GC_Del(it);
+  Py_DECREF(type);
 }
 
 static int
@@ -3273,11 +3219,6 @@ static int chklist_append(PyListObject* self, PyObject* value) {
   return 0;
 }
 
-#if PY_VERSION_HEX < 0x030C0000
-
-Ci_Py_TYPED_SIGNATURE(chklist_append, Ci_Py_SIG_ERROR, &Ci_Py_Sig_T0, NULL);
-
-#else
 static PyObject* chklist_append_wrapper(PyListObject* self, PyObject* value) {
   if (_PyClassLoader_CheckOneArg(
           (PyObject*)self, value, "append", 0, &Ci_Py_Sig_T0) < 0) {
@@ -3288,16 +3229,12 @@ static PyObject* chklist_append_wrapper(PyListObject* self, PyObject* value) {
   }
   Py_RETURN_NONE;
 }
-#endif
 
 const Ci_Py_SigElement* const insert_sig[] = {
     &Ci_Py_Sig_SSIZET,
     &Ci_Py_Sig_T0,
     NULL};
 
-#if PY_VERSION_HEX < 0x030C0000
-Ci_PyTypedMethodDef chklist_insert_def = {ins1, insert_sig, Ci_Py_SIG_ERROR};
-#else
 static PyObject* list_insert_wrapper(
     PyListObject* self,
     PyObject* const* args,
@@ -3332,7 +3269,6 @@ static PyObject* list_insert_wrapper(
 exit:
   return NULL;
 }
-#endif
 
 static PyObject* chklist_alloc(PyTypeObject* type, Py_ssize_t nitems) {
   struct _Ci_list_state* state = get_list_state();
@@ -3402,10 +3338,6 @@ chklist_slice(PyListObject* self, Py_ssize_t ilow, Py_ssize_t ihigh) {
 static inline PyObject* chklist_copy(PyListObject* self) {
   return chklist_slice(self, 0, Py_SIZE(self));
 }
-
-#if PY_VERSION_HEX < 0x030C0000
-Ci_Py_TYPED_SIGNATURE(chklist_copy, Ci_Py_SIG_OBJECT, NULL);
-#endif
 
 static inline int chklist_checkitem(PyListObject* list, PyObject* value) {
   if (!_PyClassLoader_CheckParamType((PyObject*)list, value, 0)) {
@@ -3552,23 +3484,6 @@ error:
   return -1;
 }
 
-#if PY_VERSION_HEX < 0x030C0000
-
-static PyObject* chklist_pop(PyListObject* self, PyObject* index) {
-  Py_ssize_t index_ssize = -1;
-  if (PyLong_Check(index)) {
-    index_ssize = PyLong_AsLong(index);
-    if (PyErr_Occurred()) {
-      return NULL;
-    }
-  }
-  return list_pop_impl(self, index_ssize);
-}
-
-Ci_Py_TYPED_SIGNATURE(chklist_extend, Ci_Py_SIG_ERROR, &Ci_Py_Sig_Object, NULL);
-
-#else
-
 static PyObject*
 chklist_pop(PyListObject* self, PyObject* const* args, Py_ssize_t nargs) {
   if (!_PyArg_CheckPositional("pop", nargs, 0, 1)) {
@@ -3603,8 +3518,6 @@ static PyObject* chklist_extend_wrapper(
   Py_RETURN_NONE;
 }
 
-#endif
-
 static const Ci_Py_SigElement* const getitem_sig[] = {&Ci_Py_Sig_Object, NULL};
 Ci_PyTypedMethodDef chklist_getitem_def = {
     list_subscript,
@@ -3620,50 +3533,18 @@ Ci_PyTypedMethodDef chklist_setitem_def = {
     setitem_sig,
     Ci_Py_SIG_ERROR};
 
-#if PY_VERSION_HEX < 0x030C0000
-static const Ci_Py_SigElement* const pop_sig[] = {&Ci_Py_Sig_Object_Opt, NULL};
-Ci_PyTypedMethodDef chklist_pop_def = {
-    chklist_pop,
-    pop_sig,
-    Ci_Py_SIG_TYPE_PARAM_IDX(0)};
-#endif
-
 static PyMethodDef chklist_methods[] = {
-#if PY_VERSION_HEX < 0x030C0000
-    {"__getitem__",
-     (PyCFunction)&chklist_getitem_def,
-     Ci_METH_TYPED | METH_COEXIST,
-     "x.__getitem__(y) <==> x[y]"},
-    {"__setitem__",
-     (PyCFunction)&chklist_setitem_def,
-     Ci_METH_TYPED | METH_COEXIST,
-     "Set self[index_or_slice] to value."},
-#else
     {"__getitem__",
      (PyCFunction)&list_subscript,
      METH_O | METH_COEXIST,
      "x.__getitem__(y) <==> x[y]"},
-#endif
     // TASK(T96351329): We should implement a custom reverse iterator for
     // checked lists.
-    LIST___REVERSED___METHODDEF LIST___SIZEOF___METHODDEF LIST_CLEAR_METHODDEF
-#if PY_VERSION_HEX < 0x030C0000
-    {"copy", (PyCFunction)&chklist_copy_def, Ci_METH_TYPED, list_copy__doc__},
-    {"append",
-     (PyCFunction)&chklist_append_def,
-     Ci_METH_TYPED,
-     list_append__doc__},
-    {"insert",
-     (PyCFunction)&chklist_insert_def,
-     Ci_METH_TYPED,
-     list_insert__doc__},
-    {"extend",
-     (PyCFunction)&chklist_extend_def,
-     Ci_METH_TYPED,
-     list_extend__doc__},
-    {"pop", (PyCFunction)&chklist_pop_def, Ci_METH_TYPED, list_pop__doc__},
-#else
-    {"copy", (PyCFunction)&chklist_copy, METH_NOARGS, list_copy__doc__},
+    LIST___REVERSED___METHODDEF LIST___SIZEOF___METHODDEF LIST_CLEAR_METHODDEF{
+        "copy",
+        (PyCFunction)&chklist_copy,
+        METH_NOARGS,
+        list_copy__doc__},
     {"append",
      (PyCFunction)&chklist_append_wrapper,
      METH_O,
@@ -3677,7 +3558,6 @@ static PyMethodDef chklist_methods[] = {
      METH_O,
      list_extend__doc__},
     {"pop", (PyCFunction)&chklist_pop, METH_FASTCALL, list_pop__doc__},
-#endif
     LIST_REMOVE_METHODDEF LIST_INDEX_METHODDEF LIST_COUNT_METHODDEF
         LIST_REVERSE_METHODDEF LIST_SORT_METHODDEF{
             "__class_getitem__",
@@ -3710,7 +3590,7 @@ chklist_ass_subscript(PyListObject* self, PyObject* item, PyObject* value) {
   return list_ass_subscript(self, item, value);
 }
 
-inline PyObject* Ci_CheckedList_GetItem(PyObject* op, Py_ssize_t i) {
+PyObject* Ci_CheckedList_GetItem(PyObject* op, Py_ssize_t i) {
   return list_item((PyListObject*)op, i);
 }
 

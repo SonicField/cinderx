@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import functools
 import random
-from asyncio import iscoroutinefunction
+from inspect import iscoroutinefunction
 from types import UnionType as typesUnion
 
 # pyre-ignore[21]: No _GenericAlias, _tp_cache
@@ -17,6 +17,7 @@ from typing import (
     Literal,
     Protocol,
     Type,
+    TYPE_CHECKING,
     TypeVar,
     Union,
 )
@@ -234,12 +235,6 @@ except ImportError:
         pass
 
 
-try:
-    import cinder
-except ImportError:
-    cinder = None
-
-
 pydict = dict
 PyDict = Dict
 
@@ -284,7 +279,10 @@ class int32(int):
 @set_type_final
 @type_code(TYPED_INT64)
 class int64(int):
-    pass
+    if TYPE_CHECKING:
+
+        def __add__(self, other) -> int64:
+            return int64(0)
 
 
 @set_type_final
@@ -413,7 +411,7 @@ def _replace_types(
     if existing_inst is not None:
         return existing_inst
 
-    # Check if we have a full instantation, and verify the constraints
+    # Check if we have a full instantiation, and verify the constraints
     new_dict = dict(gen_type.__dict__)
     has_params = False
     for sub in subs:
@@ -450,9 +448,6 @@ def _replace_types(
     res = type(f"{gen_type.__origin__.__name__}[{param_names}]", bases, new_dict)
     res.__origin__ = gen_type
 
-    if cinder is not None:
-        cinder.freeze_type(res)
-
     gen_type.__origin__.__insts__[subs] = res
     return res
 
@@ -464,7 +459,7 @@ def _runtime_impl(f):
 
 
 class StaticGeneric:
-    """Base type used to mark static-Generic classes.  Instantations of these
+    """Base type used to mark static-Generic classes.  Instantiations of these
     classes share different generic types and the generic type arguments can
     be accessed via __args___"""
 

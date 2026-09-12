@@ -11,37 +11,17 @@
 #include "cinderx/Jit/hir/preload.h"
 
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
-namespace jit::hir {
+namespace cinderx::jit::hir {
 
 class BasicBlock;
 class Environment;
 class Function;
 class Register;
-
-// Helper class for managing temporary variables
-class TempAllocator {
- public:
-  explicit TempAllocator(Environment* env) : env_(env) {}
-
-  // Allocate a temp register that may be used for the stack. It should not be a
-  // register that will be treated specially in the FrameState (e.g. tracked as
-  // containing a local or cell.)
-  Register* AllocateStack();
-
-  // Get the i-th stack temporary or allocate one
-  Register* GetOrAllocateStack(std::size_t idx);
-
-  // Allocate a temp register that will not be used for a stack value.
-  Register* AllocateNonStack();
-
- private:
-  Environment* env_;
-  std::vector<Register*> cache_;
-};
 
 // We expect that on exit from a basic block the stack only contains temporaries
 // in increasing order (called the canonical form). For example,
@@ -53,21 +33,34 @@ class TempAllocator {
 // It may be the case that temporaries are re-ordered, duplicated, or the stack
 // contains locals. This class is responsible for inserting the necessary
 // register moves such that the stack is in canonical form.
+//
+// It owns the per-function bank of canonical stack registers (one per
+// operand-stack depth). A single instance is reused for the whole function so
+// that stack depth i always lands in the same register at every block exit.
 class BlockCanonicalizer {
  public:
-  BlockCanonicalizer() : processing_(), done_(), copies_(), moved_() {}
+  explicit BlockCanonicalizer(Environment* env) : env_(env) {}
 
-  void Run(BasicBlock* block, TempAllocator& temps, OperandStack& stack);
+  BlockCanonicalizer(const BlockCanonicalizer&) = delete;
+  BlockCanonicalizer& operator=(const BlockCanonicalizer&) = delete;
+
+  void run(BasicBlock* block, OperandStack& stack);
+
+  // Get the register reserved for operand-stack depth idx, allocating it if it
+  // does not yet exist. These canonical stack registers are used only to put
+  // the operand stack in canonical form at block boundaries; they are never
+  // handed out as general temporaries and so stay disjoint from locals/cells
+  // and intermediates.
+  Register* getOrAllocateCanonicalStack(std::size_t idx);
 
  private:
-  DISALLOW_COPY_AND_ASSIGN(BlockCanonicalizer);
-
-  void InsertCopies(
+  void insertCopies(
       Register* reg,
-      TempAllocator& temps,
       Instr& terminator,
       std::vector<Register*>& alloced);
 
+  Environment* env_;
+  std::vector<Register*> canonical_stack_;
   std::unordered_set<Register*> processing_;
   std::unordered_set<Register*> done_;
   std::unordered_map<Register*, std::vector<Register*>> copies_;
@@ -97,6 +90,9 @@ class HIRBuilder {
   explicit HIRBuilder(const Preloader& preloader)
       : code_(preloader.code()), preloader_(preloader) {}
 
+  HIRBuilder(const HIRBuilder&) = delete;
+  HIRBuilder& operator=(const HIRBuilder&) = delete;
+
   // Translate the bytecode for code_ into HIR, in the context of the preloaded
   // globals and classloader lookups from preloader_.
   //
@@ -115,8 +111,6 @@ class HIRBuilder {
   InlineResult inlineHIR(Function* caller, FrameState* caller_frame_state);
 
  private:
-  DISALLOW_COPY_AND_ASSIGN(HIRBuilder);
-
   // Used by buildHIR and inlineHIR.
   // irfunc is the function being compiled or the caller function.
   // frame_state should be nullptr if irfunc matches the preloader (not
@@ -135,19 +129,15 @@ class HIRBuilder {
   void emitBinaryOp(
       TranslationContext& tc,
       const jit::BytecodeInstruction& bc_instr);
-  void emitUnaryNot(TranslationContext& tc);
   void emitUnaryOp(
       TranslationContext& tc,
       const jit::BytecodeInstruction& bc_instr);
   void emitAnyCall(
-      CFG& cfg,
       TranslationContext& tc,
-      jit::BytecodeInstructionBlock::Iterator& bc_it,
-      const jit::BytecodeInstructionBlock& bc_instrs);
+      jit::BytecodeInstructionBlock::Iterator& bc_it);
   void emitCallEx(
       TranslationContext& tc,
-      const jit::BytecodeInstruction& bc_instr,
-      CallFlags flags);
+      const jit::BytecodeInstruction& bc_instr);
   void emitCallInstrinsic(
       TranslationContext& tc,
       const jit::BytecodeInstruction& bc_instr);
@@ -161,13 +151,18 @@ class HIRBuilder {
   void emitCompareOp(
       TranslationContext& tc,
       const jit::BytecodeInstruction& bc_instr);
-  void emitToBool(TranslationContext& tc);
-  void emitCopyDictWithoutKeys(TranslationContext& tc);
-  void emitGetLen(TranslationContext& tc);
-  void emitJumpIf(
+  void emitToBool(
       TranslationContext& tc,
       const jit::BytecodeInstruction& bc_instr);
+  void emitCopyDictWithoutKeys(TranslationContext& tc);
+  void emitGetLen(TranslationContext& tc);
+#if PY_VERSION_HEX < 0x03100000
+  // Removed in 3.16 (gh-145855); see builder.cpp.
   void emitDeleteAttr(
+      TranslationContext& tc,
+      const jit::BytecodeInstruction& bc_instr);
+#endif
+  void emitJumpIf(
       TranslationContext& tc,
       const jit::BytecodeInstruction& bc_instr);
   void emitLoadAttr(
@@ -189,7 +184,7 @@ class HIRBuilder {
   void emitStoreDeref(
       TranslationContext& tc,
       const jit::BytecodeInstruction& bc_instr);
-  void emitLoadAssertionError(TranslationContext& tc, Environment& env);
+  void emitLoadAssertionError(TranslationContext& tc);
   void emitLoadClass(
       TranslationContext& tc,
       const jit::BytecodeInstruction& bc_instr);
@@ -265,11 +260,10 @@ class HIRBuilder {
       CFG& cfg,
       TranslationContext& tc,
       const jit::BytecodeInstruction& bc_instr);
-  bool emitInvokeFunction(
+  void emitInvokeFunction(
       TranslationContext& tc,
-      const jit::BytecodeInstruction& bc_instr,
-      CallFlags flags);
-  bool emitInvokeNative(
+      const jit::BytecodeInstruction& bc_instr);
+  void emitInvokeNative(
       TranslationContext& tc,
       const jit::BytecodeInstruction& bc_instr);
   void emitGetIter(TranslationContext& tc);
@@ -286,16 +280,14 @@ class HIRBuilder {
       const jit::BytecodeInstruction& bc_instr);
   void emitInvokeMethodVectorCall(
       TranslationContext& tc,
-      bool is_awaited,
       std::vector<Register*>& arg_regs,
       const InvokeTarget& target);
   void emitLoadMethodStatic(
       TranslationContext& tc,
       const jit::BytecodeInstruction& bc_instr);
-  bool emitInvokeMethod(
+  void emitInvokeMethod(
       TranslationContext& tc,
-      const jit::BytecodeInstruction& bc_instr,
-      bool is_awaited);
+      const jit::BytecodeInstruction& bc_instr);
   void emitLoadField(
       TranslationContext& tc,
       const jit::BytecodeInstruction& bc_instr);
@@ -371,7 +363,6 @@ class HIRBuilder {
   void emitGetAwaitable(
       CFG& cfg,
       TranslationContext& tc,
-      const BytecodeInstructionBlock& bc_instrs,
       BytecodeInstruction bc_instr);
   void emitUnpackEx(
       TranslationContext& tc,
@@ -384,20 +375,17 @@ class HIRBuilder {
       TranslationContext& tc,
       const jit::BytecodeInstruction& bc_instr);
   void emitAsyncForHeaderYieldFrom(
+      CFG& cfg,
       TranslationContext& tc,
       const jit::BytecodeInstruction& bc_instr);
   void emitEndAsyncFor(TranslationContext& tc);
+  void emitReturn(TranslationContext& tc, Register* value, Type type);
   void emitGetAIter(TranslationContext& tc);
   void emitGetANext(TranslationContext& tc);
   Register* emitSetupWithCommon(
       TranslationContext& tc,
-#if PY_VERSION_HEX < 0x030C0000
-      _Py_Identifier* enter_id,
-      _Py_Identifier* exit_id,
-#else
       PyObject* enter_id,
       PyObject* exit_id,
-#endif
       bool is_async);
   void emitBeforeWith(
       TranslationContext& tc,
@@ -408,7 +396,11 @@ class HIRBuilder {
   void emitSetupWith(
       TranslationContext& tc,
       const jit::BytecodeInstruction& bc_instr);
-  void emitYieldFrom(TranslationContext& tc, Register* out);
+  void emitYieldFrom(
+      CFG& cfg,
+      TranslationContext& tc,
+      Register* out,
+      bool handle_stop_async_iteration = false);
   void emitDispatchEagerCoroResult(
       CFG& cfg,
       TranslationContext& tc,
@@ -495,8 +487,9 @@ class HIRBuilder {
       BasicBlock* succ,
       const FrameState& frame);
   void addInitialYield(TranslationContext& tc);
+  void addTagIfDeferredArgs(TranslationContext& tc, int num_args);
   void addLoadArgs(TranslationContext& tc, int num_args);
-  void addInitializeCells(TranslationContext& tc);
+  void addPrimitiveLocalInits(TranslationContext& tc, int num_args);
   void allocateLocalsplus(Environment* env, FrameState& state);
   void moveOverwrittenStackRegisters(TranslationContext& tc, Register* dst);
   bool tryEmitDirectMethodCall(
@@ -504,10 +497,7 @@ class HIRBuilder {
       TranslationContext& tc,
       long nargs);
   bool isStaticRand(const InvokeTarget& target);
-  bool tryEmitStaticRandCall(
-      const InvokeTarget& target,
-      TranslationContext& tc,
-      long nargs);
+  bool tryEmitStaticRandCall(TranslationContext& tc, long nargs);
   struct BlockMap {
     std::unordered_map<BCOffset, BasicBlock*> blocks;
     std::unordered_map<BasicBlock*, BytecodeInstructionBlock> bc_blocks;
@@ -544,13 +534,19 @@ class HIRBuilder {
   // Check that a code object can be compiled into HIR.
   void checkTranslate();
 
-  void advancePastYieldInstr(TranslationContext& tc);
+  // Allocate a fresh temporary register from the function's Environment.
+  Register* allocateTemp();
 
   BorrowedRef<PyCodeObject> code_;
   BlockMap block_map_;
   const Preloader& preloader_;
 
-  TempAllocator temps_{nullptr};
+  // The function's register Environment, set in buildHIRImpl.
+  Environment* env_{nullptr};
+
+  // Reused for the whole function so the canonical stack layout is preserved
+  // across all blocks. Constructed in buildHIRImpl once env_ is known.
+  std::optional<BlockCanonicalizer> block_canonicalizer_;
 
   // Tracks the function for compilations that require it.
   Register* func_{nullptr};
@@ -559,6 +555,15 @@ class HIRBuilder {
   Register* kwnames_{nullptr};
 
   OperandStack static_method_stack_;
+
+  // True if the function's bytecode contains only opcodes that cannot invoke
+  // user Python code and has no backward jumps (loops). Stricter than the
+  // common "leaf function" definition (no calls) — this also requires no
+  // complex opcodes. Used to skip RunPeriodicTasks at RESUME since the
+  // function returns quickly and the caller will check periodic tasks.
+  bool is_simple_leaf_function_{false};
+
+  static bool isSimpleLeafFunction(BorrowedRef<PyCodeObject> code);
 };
 
-} // namespace jit::hir
+} // namespace cinderx::jit::hir

@@ -2,30 +2,62 @@
 
 # pyre-unsafe
 
+import importlib
 import sys
 import unittest
 from textwrap import dedent
+from unittest.mock import patch
 
 import cinderx
 import cinderx.jit
 import cinderx.test_support as cinder_support
-from cinderx.test_support import passIf, passUnless
+from cinderx.test_support import (
+    CinderXTestCase,
+    passIf,
+    passUnless,
+    skip_if_ft,
+    skip_if_prefork,
+    skip_module_if_oss,
+)
+
+skip_module_if_oss()
 
 from .common import failUnlessHasOpcodes
 
 if cinderx.is_initialized():
     from .test_compiler.test_strict.test_loader import base_sandbox, sandbox
 
-AT_LEAST_312: bool = sys.version_info[:2] >= (3, 12)
-
 
 def nothing():
     return 0
 
 
+class Caller:
+    """A callable that is not a descriptor (no __get__), used to exercise
+    class-variable caching in LoadMethodCache."""
+
+    def __init__(self, value):
+        self.value = value
+
+    def __call__(self):
+        return self.value
+
+
 @cinder_support.failUnlessJITCompiled
 def get_meaning_of_life(obj):
     return obj.meaning_of_life()
+
+
+@cinder_support.failUnlessJITCompiled
+def call_static_with_arg(obj):
+    return obj.compute(10)
+
+
+@cinder_support.failUnlessJITCompiled
+def call_fromkeys(obj):
+    # `fromkeys` resolves to a classmethod_descriptor (a C-level classmethod)
+    # when accessed via an instance.
+    return obj.fromkeys([1, 2])
 
 
 class LoadMethodCacheTests(unittest.TestCase):
@@ -202,8 +234,613 @@ class LoadMethodCacheTests(unittest.TestCase):
         self.assertEqual(self._index_long(), 6)
 
 
+class LoadMethodStaticMethodTests(unittest.TestCase):
+    """LoadMethodCache should support staticmethod descriptors found on the
+    type. A staticmethod is unwrapped to its underlying callable, cached, and
+    returned as a plain attribute -- the receiver is not bound as self.
+    """
+
+    def test_static_method_on_type(self):
+        class Oracle:
+            @staticmethod
+            def meaning_of_life():
+                return 42
+
+        obj = Oracle()
+        # Uncached, then cached. The receiver is not bound as self; if it were,
+        # calling a zero-arg staticmethod would raise TypeError.
+        self.assertEqual(get_meaning_of_life(obj), 42)
+        self.assertEqual(get_meaning_of_life(obj), 42)
+        for _ in range(100):
+            self.assertEqual(get_meaning_of_life(obj), 42)
+
+    def test_static_method_not_bound(self):
+        class Oracle:
+            @staticmethod
+            def compute(x):
+                return x * 2
+
+        obj = Oracle()
+        # The argument is passed through directly; the receiver is not prepended
+        # as self (otherwise compute would get two arguments).
+        self.assertEqual(call_static_with_arg(obj), 20)
+        self.assertEqual(call_static_with_arg(obj), 20)
+
+    def test_static_method_inherited(self):
+        class Base:
+            @staticmethod
+            def meaning_of_life():
+                return 42
+
+        class Derived(Base):
+            pass
+
+        obj = Derived()
+        self.assertEqual(get_meaning_of_life(obj), 42)
+        self.assertEqual(get_meaning_of_life(obj), 42)
+
+    def test_static_method_type_modified(self):
+        class Oracle:
+            @staticmethod
+            def meaning_of_life():
+                return 42
+
+        obj = Oracle()
+        # Cache the staticmethod.
+        self.assertEqual(get_meaning_of_life(obj), 42)
+        self.assertEqual(get_meaning_of_life(obj), 42)
+
+        # Replace with a different staticmethod; the cache must be invalidated.
+        Oracle.meaning_of_life = staticmethod(lambda: 0)
+        self.assertEqual(get_meaning_of_life(obj), 0)
+
+    def test_static_method_base_modified(self):
+        class Base:
+            @staticmethod
+            def meaning_of_life():
+                return 42
+
+        class Derived(Base):
+            pass
+
+        obj = Derived()
+        self.assertEqual(get_meaning_of_life(obj), 42)
+        self.assertEqual(get_meaning_of_life(obj), 42)
+
+        # Mutating the base should propagate to Derived and invalidate the cache.
+        Base.meaning_of_life = staticmethod(lambda: 0)
+        self.assertEqual(get_meaning_of_life(obj), 0)
+
+    def test_static_method_replaced_with_instance_method(self):
+        class Oracle:
+            @staticmethod
+            def meaning_of_life():
+                return 42
+
+        obj = Oracle()
+        self.assertEqual(get_meaning_of_life(obj), 42)
+        self.assertEqual(get_meaning_of_life(obj), 42)
+
+        # Replace the staticmethod with a regular (bound) method. The cache must
+        # switch from an unbound to a bound result.
+        Oracle.meaning_of_life = lambda self: 0
+        self.assertEqual(get_meaning_of_life(obj), 0)
+
+    def test_static_method_shadowed_by_instance(self):
+        class Oracle:
+            @staticmethod
+            def meaning_of_life():
+                return 42
+
+        obj = Oracle()
+        # Cache the staticmethod first.
+        self.assertEqual(get_meaning_of_life(obj), 42)
+        self.assertEqual(get_meaning_of_life(obj), 42)
+
+        # A staticmethod is a non-data descriptor, so an instance attribute
+        # shadows it.
+        obj.meaning_of_life = nothing
+        self.assertEqual(get_meaning_of_life(obj), 0)
+
+    def test_static_method_with_getattr_defined(self):
+        """A staticmethod present on the type is returned directly, not routed
+        through __getattr__, even when the type defines __getattr__."""
+
+        class Oracle:
+            @staticmethod
+            def meaning_of_life():
+                return 42
+
+            def __getattr__(self, name):
+                raise AttributeError(name)
+
+        obj = Oracle()
+        self.assertEqual(get_meaning_of_life(obj), 42)
+        self.assertEqual(get_meaning_of_life(obj), 42)
+        for _ in range(100):
+            self.assertEqual(get_meaning_of_life(obj), 42)
+
+
+class LoadMethodClassVarTests(unittest.TestCase):
+    """LoadMethodCache should cache class variables (non-descriptor attributes)
+    found on the type, returning them as plain attributes (no self binding).
+    """
+
+    def test_class_var_callable(self):
+        class Oracle:
+            meaning_of_life = Caller(42)
+
+        obj = Oracle()
+        self.assertEqual(get_meaning_of_life(obj), 42)
+        self.assertEqual(get_meaning_of_life(obj), 42)
+        for _ in range(100):
+            self.assertEqual(get_meaning_of_life(obj), 42)
+
+    def test_class_var_inherited(self):
+        class Base:
+            meaning_of_life = Caller(42)
+
+        class Derived(Base):
+            pass
+
+        obj = Derived()
+        self.assertEqual(get_meaning_of_life(obj), 42)
+        self.assertEqual(get_meaning_of_life(obj), 42)
+
+    def test_class_var_modified(self):
+        class Oracle:
+            meaning_of_life = Caller(42)
+
+        obj = Oracle()
+        self.assertEqual(get_meaning_of_life(obj), 42)
+        self.assertEqual(get_meaning_of_life(obj), 42)
+
+        # Replace the class var; the cache must be invalidated.
+        Oracle.meaning_of_life = Caller(0)
+        self.assertEqual(get_meaning_of_life(obj), 0)
+
+    def test_class_var_shadowed_by_instance(self):
+        class Oracle:
+            meaning_of_life = Caller(42)
+
+        obj = Oracle()
+        self.assertEqual(get_meaning_of_life(obj), 42)
+        self.assertEqual(get_meaning_of_life(obj), 42)
+
+        # A class variable can be shadowed by an instance attribute.
+        obj.meaning_of_life = nothing
+        self.assertEqual(get_meaning_of_life(obj), 0)
+
+
+class LoadMethodClassMethodTests(unittest.TestCase):
+    """LoadMethodCache should cache class methods found on the type. Both a
+    Python-level classmethod and a C-level classmethod_descriptor are unwrapped
+    to their underlying callable, cached, and bound to the receiver's type (not
+    the receiver itself) when called.
+    """
+
+    def test_class_method_on_type(self):
+        class Oracle:
+            @classmethod
+            def meaning_of_life(cls):
+                return 42
+
+        obj = Oracle()
+        # Uncached, then cached.
+        self.assertEqual(get_meaning_of_life(obj), 42)
+        self.assertEqual(get_meaning_of_life(obj), 42)
+        for _ in range(100):
+            self.assertEqual(get_meaning_of_life(obj), 42)
+
+    def test_class_method_binds_to_type(self):
+        class Oracle:
+            @classmethod
+            def meaning_of_life(cls):
+                return cls.__name__
+
+        obj = Oracle()
+        # cls is bound to the receiver's type, not the receiver.
+        self.assertEqual(get_meaning_of_life(obj), "Oracle")
+        self.assertEqual(get_meaning_of_life(obj), "Oracle")
+
+    def test_class_method_binds_to_most_derived_type(self):
+        class Base:
+            @classmethod
+            def meaning_of_life(cls):
+                return cls.__name__
+
+        class Derived(Base):
+            pass
+
+        # An inherited classmethod binds to the most-derived type of the
+        # receiver. The two receiver types get independent cache entries.
+        self.assertEqual(get_meaning_of_life(Base()), "Base")
+        self.assertEqual(get_meaning_of_life(Derived()), "Derived")
+        self.assertEqual(get_meaning_of_life(Base()), "Base")
+        self.assertEqual(get_meaning_of_life(Derived()), "Derived")
+
+    def test_class_method_passes_args_after_cls(self):
+        class Oracle:
+            @classmethod
+            def compute(cls, x):
+                return x * 2
+
+        obj = Oracle()
+        # The explicit argument follows the implicit cls.
+        self.assertEqual(call_static_with_arg(obj), 20)
+        self.assertEqual(call_static_with_arg(obj), 20)
+
+    def test_class_method_type_modified(self):
+        class Oracle:
+            @classmethod
+            def meaning_of_life(cls):
+                return 42
+
+        obj = Oracle()
+        self.assertEqual(get_meaning_of_life(obj), 42)
+        self.assertEqual(get_meaning_of_life(obj), 42)
+
+        # Replace with a different classmethod; the cache must be invalidated.
+        Oracle.meaning_of_life = classmethod(lambda cls: 0)
+        self.assertEqual(get_meaning_of_life(obj), 0)
+
+    def test_class_method_base_modified(self):
+        class Base:
+            @classmethod
+            def meaning_of_life(cls):
+                return 42
+
+        class Derived(Base):
+            pass
+
+        obj = Derived()
+        self.assertEqual(get_meaning_of_life(obj), 42)
+        self.assertEqual(get_meaning_of_life(obj), 42)
+
+        # Mutating the base should propagate to Derived and invalidate the cache.
+        Base.meaning_of_life = classmethod(lambda cls: 0)
+        self.assertEqual(get_meaning_of_life(obj), 0)
+
+    def test_class_method_shadowed_by_instance(self):
+        class Oracle:
+            @classmethod
+            def meaning_of_life(cls):
+                return 42
+
+        obj = Oracle()
+        # Cache the classmethod first.
+        self.assertEqual(get_meaning_of_life(obj), 42)
+        self.assertEqual(get_meaning_of_life(obj), 42)
+
+        # A classmethod is a non-data descriptor, so an instance attribute
+        # shadows it.
+        obj.meaning_of_life = nothing
+        self.assertEqual(get_meaning_of_life(obj), 0)
+
+    def test_class_method_with_getattr_defined(self):
+        """A classmethod present on the type is returned directly, not routed
+        through __getattr__, even when the type defines __getattr__."""
+
+        class Oracle:
+            @classmethod
+            def meaning_of_life(cls):
+                return 42
+
+            def __getattr__(self, name):
+                raise AttributeError(name)
+
+        obj = Oracle()
+        self.assertEqual(get_meaning_of_life(obj), 42)
+        self.assertEqual(get_meaning_of_life(obj), 42)
+        for _ in range(100):
+            self.assertEqual(get_meaning_of_life(obj), 42)
+
+    def test_class_method_wrapping_non_function(self):
+        """A classmethod wrapping a non-function callable is not cached, but is
+        still dispatched correctly through the descriptor."""
+
+        class Callable:
+            def __call__(self, cls):
+                return cls.__name__
+
+        class Oracle:
+            meaning_of_life = classmethod(Callable())
+
+        obj = Oracle()
+        self.assertEqual(get_meaning_of_life(obj), "Oracle")
+        self.assertEqual(get_meaning_of_life(obj), "Oracle")
+        for _ in range(100):
+            self.assertEqual(get_meaning_of_life(obj), "Oracle")
+
+    def test_classmethod_descriptor_on_builtin(self):
+        """A C-level classmethod_descriptor (e.g. dict.fromkeys) accessed via an
+        instance is cached and bound to the type."""
+
+        obj = {}
+        expected = {1: None, 2: None}
+        self.assertEqual(call_fromkeys(obj), expected)
+        self.assertEqual(call_fromkeys(obj), expected)
+        for _ in range(100):
+            self.assertEqual(call_fromkeys(obj), expected)
+
+
+class LoadMethodGetAttrTests(unittest.TestCase):
+    """LoadMethodCache should support types that define __getattr__.
+
+    A method found on the type via normal lookup is cached as usual, even when
+    the type defines __getattr__. When the method is absent from the type, the
+    cache stores a NULL sentinel and dispatches to __getattr__ on each hit. The
+    cache must be invalidated when __getattr__ or the method itself changes.
+    """
+
+    def test_method_cached_with_getattr_defined(self):
+        """A real method is found via type lookup and cached, not routed
+        through __getattr__, even though the type defines __getattr__."""
+
+        class Oracle:
+            def meaning_of_life(self):
+                return 42
+
+            def __getattr__(self, name):
+                raise AttributeError(name)
+
+        obj = Oracle()
+        # Uncached, then cached.
+        self.assertEqual(get_meaning_of_life(obj), 42)
+        self.assertEqual(get_meaning_of_life(obj), 42)
+        # Exercise the cache thoroughly.
+        for _ in range(100):
+            self.assertEqual(get_meaning_of_life(obj), 42)
+
+    def test_missing_method_dispatches_to_getattr(self):
+        """When the method is absent from the type, __getattr__ supplies it.
+        The NULL sentinel is cached and hits keep dispatching to __getattr__."""
+
+        class Oracle:
+            def __getattr__(self, name):
+                if name == "meaning_of_life":
+                    return lambda: 42
+                raise AttributeError(name)
+
+        obj = Oracle()
+        # Uncached, then cached (NULL sentinel + __getattr__ dispatch).
+        self.assertEqual(get_meaning_of_life(obj), 42)
+        self.assertEqual(get_meaning_of_life(obj), 42)
+        for _ in range(100):
+            self.assertEqual(get_meaning_of_life(obj), 42)
+
+    def test_getattr_error_propagates(self):
+        """If __getattr__ raises for a missing method, the error propagates
+        on both the uncached and cached paths."""
+
+        class Oracle:
+            def __getattr__(self, name):
+                raise AttributeError(name)
+
+        obj = Oracle()
+        with self.assertRaises(AttributeError):
+            get_meaning_of_life(obj)
+        # Cached NULL sentinel: __getattr__ is still invoked and still raises.
+        with self.assertRaises(AttributeError):
+            get_meaning_of_life(obj)
+
+    def test_add_getattr_after_cache_populated(self):
+        """Adding __getattr__ after a missing-method lookup was cached should
+        invalidate the cache so the new __getattr__ services the miss."""
+
+        class Oracle:
+            pass
+
+        obj = Oracle()
+        # Populate the cache with a genuine miss (no __getattr__ yet).
+        with self.assertRaises(AttributeError):
+            get_meaning_of_life(obj)
+
+        Oracle.__getattr__ = lambda self, name: (lambda: 0)
+        self.assertEqual(get_meaning_of_life(obj), 0)
+
+    def test_remove_getattr_invalidates_null_cache(self):
+        """Removing __getattr__ after the NULL sentinel was cached should
+        invalidate the cache so the missing method raises again."""
+
+        class Oracle:
+            def __getattr__(self, name):
+                return lambda: 7
+
+        obj = Oracle()
+        # Populate the NULL sentinel via __getattr__.
+        self.assertEqual(get_meaning_of_life(obj), 7)
+        self.assertEqual(get_meaning_of_life(obj), 7)
+
+        del Oracle.__getattr__
+        with self.assertRaises(AttributeError):
+            get_meaning_of_life(obj)
+
+    def test_define_method_after_getattr_cache_populated(self):
+        """Defining the real method after the NULL sentinel was cached should
+        invalidate the cache so the method is used instead of __getattr__."""
+
+        class Oracle:
+            def __getattr__(self, name):
+                return lambda: -1
+
+        obj = Oracle()
+        # Cache the NULL sentinel -> __getattr__.
+        self.assertEqual(get_meaning_of_life(obj), -1)
+        self.assertEqual(get_meaning_of_life(obj), -1)
+
+        Oracle.meaning_of_life = lambda self: 42
+        self.assertEqual(get_meaning_of_life(obj), 42)
+
+
+class LoadMethodGetAttributeTests(unittest.TestCase):
+    """LoadMethodCache should support types with a custom __getattribute__.
+
+    Such types can't be replicated by the cache's generic-lookup logic, so the
+    cache stores a NULL sentinel and dispatches each hit through the type's own
+    lookup (PyObject_GetAttr). This covers types with a user-defined
+    __getattribute__ as well as class objects whose metaclass uses
+    type.__getattribute__ (MRO search). The cache must be invalidated when
+    __getattribute__ is added or removed.
+    """
+
+    def test_custom_getattribute_supplies_method(self):
+        """A custom __getattribute__ that synthesizes the method is invoked on
+        both the uncached and cached paths."""
+
+        class Oracle:
+            def __getattribute__(self, name):
+                if name == "meaning_of_life":
+                    return lambda: 42
+                return object.__getattribute__(self, name)
+
+        obj = Oracle()
+        # Uncached, then cached (NULL sentinel + __getattribute__ dispatch).
+        self.assertEqual(get_meaning_of_life(obj), 42)
+        self.assertEqual(get_meaning_of_life(obj), 42)
+        for _ in range(100):
+            self.assertEqual(get_meaning_of_life(obj), 42)
+
+    def test_custom_getattribute_finds_real_method(self):
+        """A real method is still reached when the custom __getattribute__
+        delegates to object.__getattribute__, proving dispatch goes through the
+        custom hook rather than the cache's own lookup."""
+
+        seen = []
+
+        class Oracle:
+            def meaning_of_life(self):
+                return 42
+
+            def __getattribute__(self, name):
+                seen.append(name)
+                return object.__getattribute__(self, name)
+
+        obj = Oracle()
+        self.assertEqual(get_meaning_of_life(obj), 42)
+        self.assertEqual(get_meaning_of_life(obj), 42)
+        for _ in range(100):
+            self.assertEqual(get_meaning_of_life(obj), 42)
+        # The custom __getattribute__ was invoked on every lookup, including
+        # the cached ones.
+        self.assertIn("meaning_of_life", seen)
+        self.assertEqual(len(seen), 102)
+
+    def test_getattribute_error_propagates(self):
+        """If __getattribute__ raises for the method, the error propagates on
+        both the uncached and cached paths."""
+
+        class Oracle:
+            def __getattribute__(self, name):
+                raise AttributeError(name)
+
+        obj = Oracle()
+        with self.assertRaises(AttributeError):
+            get_meaning_of_life(obj)
+        # Cached NULL sentinel: __getattribute__ is still invoked and raises.
+        with self.assertRaises(AttributeError):
+            get_meaning_of_life(obj)
+
+    def test_metaclass_instance_classmethod(self):
+        """Calling a classmethod on a class object goes through the metaclass's
+        type.__getattribute__ (MRO search), which the NULL sentinel handles via
+        PyObject_GetAttr."""
+
+        class Meta(type):
+            pass
+
+        class Oracle(metaclass=Meta):
+            @classmethod
+            def meaning_of_life(cls):
+                return 42
+
+        # Py_TYPE(Oracle) is Meta, whose tp_getattro is type_getattro.
+        self.assertEqual(get_meaning_of_life(Oracle), 42)
+        self.assertEqual(get_meaning_of_life(Oracle), 42)
+        for _ in range(100):
+            self.assertEqual(get_meaning_of_life(Oracle), 42)
+
+    def test_metaclass_getattr_inherited_method(self):
+        """When the metaclass defines __getattr__, an inherited classmethod
+        must still be found via MRO (type.__getattribute__), NOT routed through
+        the metaclass __getattr__ -- even after the NULL sentinel is cached."""
+
+        class Meta(type):
+            def __getattr__(cls, name):
+                raise AttributeError(name)
+
+        class Base(metaclass=Meta):
+            @classmethod
+            def meaning_of_life(cls):
+                return 42
+
+        class Child(Base):
+            pass
+
+        self.assertEqual(get_meaning_of_life(Child), 42)
+        self.assertEqual(get_meaning_of_life(Child), 42)
+        for _ in range(100):
+            self.assertEqual(get_meaning_of_life(Child), 42)
+
+    def test_metaclass_getattr_missing_method(self):
+        """A method missing from the class MRO falls through to the metaclass
+        __getattr__, on both the uncached and cached paths."""
+
+        class Meta(type):
+            def __getattr__(cls, name):
+                if name == "meaning_of_life":
+                    return lambda: 7
+                raise AttributeError(name)
+
+        class Oracle(metaclass=Meta):
+            pass
+
+        self.assertEqual(get_meaning_of_life(Oracle), 7)
+        self.assertEqual(get_meaning_of_life(Oracle), 7)
+        for _ in range(100):
+            self.assertEqual(get_meaning_of_life(Oracle), 7)
+
+    def test_add_getattribute_invalidates_method_cache(self):
+        """Adding a custom __getattribute__ after a method was cached should
+        invalidate the cache so dispatch goes through __getattribute__."""
+
+        class Oracle:
+            def meaning_of_life(self):
+                return 42
+
+        obj = Oracle()
+        # Cache the real method via the generic lookup.
+        self.assertEqual(get_meaning_of_life(obj), 42)
+        self.assertEqual(get_meaning_of_life(obj), 42)
+
+        Oracle.__getattribute__ = lambda self, name: (lambda: 0)
+        self.assertEqual(get_meaning_of_life(obj), 0)
+
+    def test_remove_getattribute_invalidates_method_cache(self):
+        """Removing a custom __getattribute__ after the NULL sentinel was
+        cached should invalidate the cache so the real method is found."""
+
+        class Oracle:
+            def meaning_of_life(self):
+                return 42
+
+            def __getattribute__(self, name):
+                if name == "meaning_of_life":
+                    return lambda: 0
+                return object.__getattribute__(self, name)
+
+        obj = Oracle()
+        # Cache the NULL sentinel + custom __getattribute__ dispatch.
+        self.assertEqual(get_meaning_of_life(obj), 0)
+        self.assertEqual(get_meaning_of_life(obj), 0)
+
+        del Oracle.__getattribute__
+        self.assertEqual(get_meaning_of_life(obj), 42)
+
+
 @passUnless(cinderx.jit.is_enabled(), "Test uses the JIT")
-class LoadModuleMethodCacheTests(unittest.TestCase):
+class LoadModuleMethodCacheTests(CinderXTestCase):
+    @skip_if_ft("T250369692: LoadModuleAttrCached not supported with free-threading")
     def test_load_method_from_module(self):
         with cinder_support.temp_sys_path() as tmp:
             (tmp / "tmp_a.py").write_text(
@@ -228,19 +865,13 @@ class LoadModuleMethodCacheTests(unittest.TestCase):
                 encoding="utf8",
             )
 
-            # pyre-ignore[21]: Dynamically generated as part of this test.
             import tmp_b
 
-            cinderx.jit.force_compile(tmp_b.test)
+            self.assertHIROpcodes(tmp_b.test, present=["LoadModuleAttrCached"])
 
             self.assertEqual(tmp_b.test(), 3)
             self.assertTrue(cinderx.jit.is_jit_compiled(tmp_b.test))
-            self.assertIn(
-                "LoadModuleAttrCached" if AT_LEAST_312 else "LoadModuleMethodCached",
-                cinderx.jit.get_function_hir_opcode_counts(tmp_b.test),
-            )
 
-            # pyre-ignore[21]: Dynamically generated as part of this test.
             import tmp_a
 
             tmp_a.get_a = lambda: 10
@@ -249,6 +880,7 @@ class LoadModuleMethodCacheTests(unittest.TestCase):
             with self.assertRaises(AttributeError):
                 tmp_b.test()
 
+    @skip_if_ft("T250369692: LoadModuleAttrCached not supported with free-threading")
     @passUnless(
         cinderx.is_initialized(),
         "Strict Module test code doesn't exist outside of CinderX",
@@ -271,15 +903,219 @@ class LoadModuleMethodCacheTests(unittest.TestCase):
         """
         strict_sandbox.write_file("tmp_b.py", code_str)
         tmp_b = strict_sandbox.strict_import("tmp_b")
-        cinderx.jit.force_compile(tmp_b.test)
-        self.assertTrue(cinderx.jit.is_jit_compiled(tmp_b.test))
-        self.assertIn(
-            "LoadModuleAttrCached" if AT_LEAST_312 else "LoadModuleMethodCached",
-            cinderx.jit.get_function_hir_opcode_counts(tmp_b.test),
-        )
+        self.assertHIROpcodes(tmp_b.test, present=["LoadModuleAttrCached"])
         # prime the cache
         self.assertEqual(tmp_b.test(), 3)
         self.assertEqual(tmp_b.test(), 3)
+
+
+LEAF_SOURCE = """
+    class Klass:
+        pass
+
+    attr = Klass
+    """
+
+
+@passUnless(cinderx.jit.is_enabled(), "Test uses the JIT")
+@skip_if_ft("T250369692: LoadModuleAttrCached not supported with free-threading")
+@skip_if_prefork("the compiled function shows up as a leak due to immortalization")
+class ModuleAttrPinTests(unittest.TestCase):
+    """The JIT resolves a module attribute at compile time and pins it with a
+    GuardIs when the value is a module or a type.  Rebinding such an attribute
+    has to deopt and re-execute the LOAD_ATTR in the interpreter, which only
+    works if the deopt's FrameState still holds the module receiver on the
+    operand stack.  Before T284563326 was fixed the receiver was missing, so
+    the interpreter read the stack slot underneath it: a segfault with nothing
+    below, a wrong receiver otherwise.
+    """
+
+    def _import(self, tmp, name, source):
+        (tmp / f"{name}.py").write_text(dedent(source), encoding="utf8")
+        return importlib.import_module(name)
+
+    def _assert_attr_pinned(self, func, num_pins=1):
+        """Without the pin there's no GuardIs on the attribute, and the deopt
+        path these tests are about never runs."""
+        self.assertTrue(cinderx.jit.is_jit_compiled(func))
+        counts = cinderx.jit.get_function_hir_opcode_counts(func)
+        self.assertIsNotNone(counts)
+        self.assertIn("LoadModuleAttrCached", counts)
+        # One GuardIs pins the module global, the rest pin attribute values.
+        self.assertGreaterEqual(counts.get("GuardIs", 0), num_pins + 1)
+
+    def _guard_deopts(self, qualname):
+        deopts = cinderx.jit.get_and_clear_runtime_stats().get("deopt") or []
+        return sum(
+            event["int"]["count"]
+            for event in deopts
+            if event["normal"]["func_qualname"] == qualname
+            and event["normal"]["reason"] == "GuardFailure"
+        )
+
+    def test_rebind_class_valued_attr(self):
+        with cinder_support.temp_sys_path() as tmp:
+            leaf = self._import(tmp, "pin_leaf", LEAF_SOURCE)
+            user = self._import(
+                tmp,
+                "pin_user",
+                """
+                import pin_leaf
+
+                def load():
+                    return pin_leaf.attr
+                """,
+            )
+            cinderx.jit.force_compile(user.load)
+            self._assert_attr_pinned(user.load)
+            self.assertIs(user.load(), leaf.Klass)
+
+            cinderx.jit.get_and_clear_runtime_stats()
+            leaf.attr = 2
+            self.assertEqual(user.load(), 2)
+            self.assertGreaterEqual(self._guard_deopts("load"), 1)
+
+    def test_rebind_class_valued_attr_with_stack_underneath(self):
+        """The receiver isn't at the bottom of the operand stack here, so a
+        deopt that drops it loads the attribute off the wrong object rather
+        than crashing."""
+        with cinder_support.temp_sys_path() as tmp:
+            leaf = self._import(tmp, "pin_leaf", LEAF_SOURCE)
+            user = self._import(
+                tmp,
+                "pin_user",
+                """
+                import pin_leaf
+
+                def load(other):
+                    return [other, pin_leaf.attr]
+                """,
+            )
+            cinderx.jit.force_compile(user.load)
+            self._assert_attr_pinned(user.load)
+            self.assertEqual(user.load("sentinel"), ["sentinel", leaf.Klass])
+
+            cinderx.jit.get_and_clear_runtime_stats()
+            leaf.attr = 2
+            self.assertEqual(user.load("sentinel"), ["sentinel", 2])
+            self.assertGreaterEqual(self._guard_deopts("load"), 1)
+
+    def test_rebind_module_valued_attr(self):
+        with cinder_support.temp_sys_path() as tmp:
+            self._import(tmp, "pin_leaf", LEAF_SOURCE)
+            mid = self._import(tmp, "pin_mid", "import pin_leaf")
+            user = self._import(
+                tmp,
+                "pin_user",
+                """
+                import pin_mid
+
+                def load():
+                    return pin_mid.pin_leaf
+                """,
+            )
+            cinderx.jit.force_compile(user.load)
+            self._assert_attr_pinned(user.load)
+            self.assertIs(user.load(), sys.modules["pin_leaf"])
+
+            cinderx.jit.get_and_clear_runtime_stats()
+            mid.pin_leaf = "rebound"
+            self.assertEqual(user.load(), "rebound")
+            self.assertGreaterEqual(self._guard_deopts("load"), 1)
+
+    def test_rebind_leaf_of_module_chain(self):
+        with cinder_support.temp_sys_path() as tmp:
+            leaf = self._import(tmp, "pin_leaf", LEAF_SOURCE)
+            self._import(tmp, "pin_mid", "import pin_leaf")
+            user = self._import(
+                tmp,
+                "pin_user",
+                """
+                import pin_mid
+
+                def load():
+                    return pin_mid.pin_leaf.Klass
+                """,
+            )
+            cinderx.jit.force_compile(user.load)
+            # Both levels of the chain are pinned: the submodule and the class.
+            self._assert_attr_pinned(user.load, num_pins=2)
+            self.assertIs(user.load(), leaf.Klass)
+
+            cinderx.jit.get_and_clear_runtime_stats()
+            leaf.Klass = "rebound"
+            self.assertEqual(user.load(), "rebound")
+            self.assertGreaterEqual(self._guard_deopts("load"), 1)
+
+    def test_rebind_intermediate_module_of_chain(self):
+        with cinder_support.temp_sys_path() as tmp:
+            leaf = self._import(tmp, "pin_leaf", LEAF_SOURCE)
+            mid = self._import(tmp, "pin_mid", "import pin_leaf")
+            other = self._import(tmp, "pin_other", "Klass = 'other-klass'")
+            user = self._import(
+                tmp,
+                "pin_user",
+                """
+                import pin_mid
+
+                def load():
+                    return pin_mid.pin_leaf.Klass
+                """,
+            )
+            cinderx.jit.force_compile(user.load)
+            self._assert_attr_pinned(user.load, num_pins=2)
+            self.assertIs(user.load(), leaf.Klass)
+
+            # Deopts on the first of the two loads, so the interpreter has to
+            # re-execute both of them.
+            cinderx.jit.get_and_clear_runtime_stats()
+            mid.pin_leaf = other
+            self.assertEqual(user.load(), "other-klass")
+            self.assertGreaterEqual(self._guard_deopts("load"), 1)
+
+    def test_mock_patch_class_valued_attr(self):
+        """`mock.patch` of a class-valued module attribute, the idiom that
+        made test_webbrowser crash."""
+        with cinder_support.temp_sys_path() as tmp:
+            leaf = self._import(tmp, "pin_leaf", LEAF_SOURCE)
+            user = self._import(
+                tmp,
+                "pin_user",
+                """
+                import pin_leaf
+
+                def load():
+                    return pin_leaf.attr
+                """,
+            )
+            cinderx.jit.force_compile(user.load)
+            self._assert_attr_pinned(user.load)
+            self.assertIs(user.load(), leaf.Klass)
+
+            with patch.object(leaf, "attr") as mock_attr:
+                self.assertIs(user.load(), mock_attr)
+            self.assertIs(user.load(), leaf.Klass)
+
+    def test_delete_class_valued_attr(self):
+        with cinder_support.temp_sys_path() as tmp:
+            leaf = self._import(tmp, "pin_leaf", LEAF_SOURCE)
+            user = self._import(
+                tmp,
+                "pin_user",
+                """
+                import pin_leaf
+
+                def load():
+                    return pin_leaf.attr
+                """,
+            )
+            cinderx.jit.force_compile(user.load)
+            self._assert_attr_pinned(user.load)
+            self.assertIs(user.load(), leaf.Klass)
+
+            del leaf.attr
+            with self.assertRaises(AttributeError):
+                user.load()
 
 
 @cinder_support.failUnlessJITCompiled
@@ -361,6 +1197,27 @@ class LoadAttrCacheTests(unittest.TestCase):
         self.assertEqual(get_foo(obj3), 400)
         self.assertEqual(get_foo(obj4), 600)
 
+    @passUnless(
+        sys.version_info >= (3, 15),
+        "_Py_AFTER_ITEMS slots are supported starting in Python 3.15",
+    )
+    def test_tuple_subclass_slot_after_items(self):
+        class SlotTuple(tuple):
+            __slots__ = ("foo",)
+
+        @cinder_support.failUnlessJITCompiled
+        @failUnlessHasOpcodes("LOAD_ATTR")
+        def get_attr(o):
+            return o.foo
+
+        obj = SlotTuple(("tuple item",))
+        obj.foo = "slot value"
+
+        # Uncached
+        self.assertEqual(get_attr(obj), "slot value")
+        # Cached
+        self.assertEqual(get_attr(obj), "slot value")
+
     def test_descr_type_mutated(self):
         class Descr:
             def __get__(self, obj, ty):
@@ -416,8 +1273,92 @@ class LoadAttrCacheTests(unittest.TestCase):
         C.__dict__["foo"].__class__ = Descr
         self.assertEqual(get_attr(c), "get")
 
+    def test_shared_descr_type_across_cache_entries(self):
+        """Two types share the same descriptor type in the same cache.
+
+        When one type changes and its cache entry is reset, the descriptor
+        type watch must survive for the remaining entry. Otherwise mutating
+        the descriptor type (e.g. removing __set__) won't invalidate the
+        surviving entry.
+        """
+
+        class Descr:
+            def __get__(self, obj, ty):
+                return "descr"
+
+            def __set__(self, obj, val):
+                raise RuntimeError("unimplemented")
+
+        class T1:
+            foo = Descr()
+
+        class T2:
+            foo = Descr()
+
+        @cinder_support.failUnlessJITCompiled
+        def get_attr(o):
+            return o.foo
+
+        t1 = T1()
+        t2 = T2()
+
+        # Prime and cache both entries (same descriptor type Descr).
+        self.assertEqual(get_attr(t1), "descr")
+        self.assertEqual(get_attr(t1), "descr")
+        self.assertEqual(get_attr(t2), "descr")
+        self.assertEqual(get_attr(t2), "descr")
+
+        # Both t1 and t2 have instance dict entries shadowed by
+        # the data descriptor.
+        t1.__dict__["foo"] = "t1 attr"
+        t2.__dict__["foo"] = "t2 attr"
+        self.assertEqual(get_attr(t1), "descr")
+        self.assertEqual(get_attr(t2), "descr")
+
+        # Invalidate T1's cache entry by mutating T1. This must NOT
+        # unwatch Descr from the descriptor watcher since T2's entry
+        # still depends on it.
+        T1.bar = 1
+
+        # Now mutate the descriptor type: removing __set__ makes Descr
+        # no longer a data descriptor. T2's entry must be invalidated
+        # so the instance attribute is returned instead.
+        del Descr.__set__
+        self.assertEqual(get_attr(t2), "t2 attr")
+
+    def test_non_data_descr_becomes_data_descr(self):
+        """When __set__ is added to a non-data descriptor type, it becomes a
+        data descriptor and should take priority over instance dict entries."""
+
+        class NonDataDescr:
+            def __get__(self, obj, ty):
+                return "from_descr"
+
+        class C:
+            foo = NonDataDescr()
+
+        @cinder_support.failUnlessJITCompiled
+        def get_attr(o):
+            return o.foo
+
+        c = C()
+        # Non-data descriptor: instance dict takes priority
+        c.__dict__["foo"] = "from_dict"
+        self.assertEqual(get_attr(c), "from_dict")
+        self.assertEqual(get_attr(c), "from_dict")
+
+        # Add __set__ to make it a data descriptor: descriptor now takes
+        # priority over instance dict
+        NonDataDescr.__set__ = lambda self, obj, val: None
+        self.assertEqual(get_attr(c), "from_descr")
+        self.assertEqual(get_attr(c), "from_descr")
+
+        # Remove __set__ again: back to non-data descriptor
+        del NonDataDescr.__set__
+        self.assertEqual(get_attr(c), "from_dict")
+
     @passIf(
-        cinderx.jit.is_enabled() and AT_LEAST_312,
+        cinderx.jit.is_enabled(),
         "T214641462: Not clear why this is failing, but it is",
     )
     def test_type_destroyed(self):
@@ -458,6 +1399,129 @@ class LoadAttrCacheTests(unittest.TestCase):
 
         d = D()
         self.assertEqual(get_attr(d), "in D")
+
+    def test_property_raises_attr_error_with_getattr_fallback(self):
+        """When a property raises AttributeError on a type with __getattr__,
+        __getattr__ should be invoked as a fallback, matching CPython's
+        _Py_slot_tp_getattr_hook behavior."""
+
+        class C:
+            @property
+            def foo(self):
+                raise AttributeError("nope")
+
+            def __getattr__(self, name):
+                return f"fallback:{name}"
+
+        @cinder_support.failUnlessJITCompiled
+        def get_attr(o):
+            return o.foo
+
+        c = C()
+        # Uncached
+        self.assertEqual(get_attr(c), "fallback:foo")
+        # Cached
+        self.assertEqual(get_attr(c), "fallback:foo")
+
+    def test_data_descriptor_raises_attr_error_with_getattr_fallback(self):
+        """When a data descriptor's __get__ raises AttributeError on a type
+        with __getattr__, __getattr__ should be invoked as a fallback."""
+
+        class RaisingDescr:
+            def __get__(self, obj, cls):
+                raise AttributeError("custom descr error")
+
+            def __set__(self, obj, val):
+                pass
+
+        class C:
+            x = RaisingDescr()
+
+            def __getattr__(self, name):
+                return f"fallback:{name}"
+
+        @cinder_support.failUnlessJITCompiled
+        def get_attr(o):
+            return o.x
+
+        c = C()
+        # Uncached
+        self.assertEqual(get_attr(c), "fallback:x")
+        # Cached
+        self.assertEqual(get_attr(c), "fallback:x")
+
+    def test_non_data_descriptor_raises_attr_error_with_getattr_fallback(self):
+        """When a non-data descriptor's __get__ raises AttributeError on a type
+        with __getattr__, __getattr__ should be invoked as a fallback."""
+
+        class RaisingDescr:
+            def __get__(self, obj, cls):
+                raise AttributeError("non-data descr error")
+
+        class C:
+            x = RaisingDescr()
+
+            def __getattr__(self, name):
+                return f"fallback:{name}"
+
+        @cinder_support.failUnlessJITCompiled
+        def get_attr(o):
+            return o.x
+
+        c = C()
+        # Uncached
+        self.assertEqual(get_attr(c), "fallback:x")
+        # Cached
+        self.assertEqual(get_attr(c), "fallback:x")
+
+    def test_property_no_error_with_getattr(self):
+        """When a property succeeds on a type with __getattr__, the property
+        value should be returned normally (not __getattr__)."""
+
+        class C:
+            @property
+            def foo(self):
+                return "from_property"
+
+            def __getattr__(self, name):
+                return f"fallback:{name}"
+
+        @cinder_support.failUnlessJITCompiled
+        def get_attr(o):
+            return o.foo
+
+        c = C()
+        # Uncached
+        self.assertEqual(get_attr(c), "from_property")
+        # Cached
+        self.assertEqual(get_attr(c), "from_property")
+
+    def test_instance_dict_miss_with_getattr_fallback(self):
+        """When an attribute is not in the instance dict on a type with
+        __getattr__, __getattr__ should be invoked."""
+
+        class C:
+            def __init__(self):
+                self.existing = 42
+
+            def __getattr__(self, name):
+                return f"fallback:{name}"
+
+        @cinder_support.failUnlessJITCompiled
+        def get_existing(o):
+            return o.existing
+
+        @cinder_support.failUnlessJITCompiled
+        def get_missing(o):
+            return o.missing
+
+        c = C()
+        # Instance dict hit should work normally
+        self.assertEqual(get_existing(c), 42)
+        self.assertEqual(get_existing(c), 42)
+        # Instance dict miss should fall through to __getattr__
+        self.assertEqual(get_missing(c), "fallback:missing")
+        self.assertEqual(get_missing(c), "fallback:missing")
 
 
 @cinder_support.failUnlessJITCompiled
@@ -572,3 +1636,433 @@ class StoreAttrCacheTests(unittest.TestCase):
 
         set_foo(obj, 400)
         self.assertEqual(obj1.foo, 300)
+
+
+class MetaclassGetAttrCacheTests(unittest.TestCase):
+    """Tests for inline cache behavior with metaclass __getattr__.
+
+    Regression tests for a bug where the JIT inline cache for LOAD_ATTR
+    incorrectly cached a __getattr__ dispatch for class objects whose metaclass
+    defines __getattr__, skipping MRO lookup for inherited class attributes.
+
+    The correct behavior is:
+    1. Inherited attributes should be found via MRO (type_getattro), NOT via
+       metaclass __getattr__.
+    2. Truly missing attributes should call metaclass __getattr__.
+    """
+
+    def test_metaclass_getattr_inherited_attr(self):
+        """Inherited class attributes must be found via MRO, not metaclass
+        __getattr__, even after the IC is populated."""
+
+        class MyMeta(type):
+            def __getattr__(cls, item):
+                raise AttributeError(item)
+
+        class Base(metaclass=MyMeta):
+            inherited_attr = False
+
+        class Child(Base):
+            pass
+
+        @cinder_support.failUnlessJITCompiled
+        def get_inherited(cls):
+            return cls.inherited_attr
+
+        # Uncached - should find via MRO
+        self.assertFalse(get_inherited(Child))
+        # Cached - should still find via MRO, not call MyMeta.__getattr__
+        self.assertFalse(get_inherited(Child))
+        # Run enough iterations to thoroughly exercise the IC
+        for _ in range(100):
+            self.assertFalse(get_inherited(Child))
+
+    def test_metaclass_getattr_missing_attr(self):
+        """Truly missing attributes should call metaclass __getattr__."""
+
+        class MyMeta(type):
+            def __getattr__(cls, item):
+                return f"meta_fallback:{item}"
+
+        class Base(metaclass=MyMeta):
+            existing = True
+
+        class Child(Base):
+            pass
+
+        @cinder_support.failUnlessJITCompiled
+        def get_missing(cls):
+            return cls.nonexistent
+
+        # Should call MyMeta.__getattr__
+        self.assertEqual(get_missing(Child), "meta_fallback:nonexistent")
+        self.assertEqual(get_missing(Child), "meta_fallback:nonexistent")
+        for _ in range(100):
+            self.assertEqual(get_missing(Child), "meta_fallback:nonexistent")
+
+    def test_metaclass_getattr_pydantic_pattern(self):
+        """Reproduces the Pydantic pattern that triggered the production
+        outage: metaclass with __getattr__ + inherited boolean class attribute.
+
+        This mimics Pydantic's ModelMetaclass and BaseModel pattern where
+        __pydantic_root_model__ is defined on BaseModel and inherited by
+        child models."""
+
+        class ModelMeta(type):
+            def __getattr__(cls, item):
+                raise AttributeError(item)
+
+        class BaseModel(metaclass=ModelMeta):
+            __pydantic_root_model__ = False
+
+        class UserModel(BaseModel):
+            pass
+
+        class RootModel(BaseModel):
+            __pydantic_root_model__ = True
+
+        @cinder_support.failUnlessJITCompiled
+        def is_root_model(cls):
+            return cls.__pydantic_root_model__
+
+        # UserModel inherits __pydantic_root_model__ = False from BaseModel
+        self.assertFalse(is_root_model(UserModel))
+        self.assertFalse(is_root_model(UserModel))
+
+        # RootModel overrides it to True
+        self.assertTrue(is_root_model(RootModel))
+        self.assertTrue(is_root_model(RootModel))
+
+        # After IC is populated for one type, the other should still work
+        for _ in range(100):
+            self.assertFalse(is_root_model(UserModel))
+            self.assertTrue(is_root_model(RootModel))
+
+    def test_metaclass_getattr_mixed_access(self):
+        """Test that the IC correctly handles a mix of inherited and missing
+        attributes when a metaclass defines __getattr__."""
+
+        class MyMeta(type):
+            def __getattr__(cls, item):
+                return f"meta:{item}"
+
+        class Base(metaclass=MyMeta):
+            class_attr = 42
+
+        class Child(Base):
+            own_attr = 100
+
+        @cinder_support.failUnlessJITCompiled
+        def get_class_attr(cls):
+            return cls.class_attr
+
+        @cinder_support.failUnlessJITCompiled
+        def get_own_attr(cls):
+            return cls.own_attr
+
+        @cinder_support.failUnlessJITCompiled
+        def get_missing_attr(cls):
+            return cls.totally_missing
+
+        # Inherited attribute via MRO
+        for _ in range(100):
+            self.assertEqual(get_class_attr(Child), 42)
+
+        # Own attribute
+        for _ in range(100):
+            self.assertEqual(get_own_attr(Child), 100)
+
+        # Missing attribute -> metaclass __getattr__
+        for _ in range(100):
+            self.assertEqual(get_missing_attr(Child), "meta:totally_missing")
+
+    def test_metaclass_getattr_does_not_affect_instances(self):
+        """Metaclass __getattr__ should not interfere with instance attribute
+        access on instances of the class."""
+
+        class MyMeta(type):
+            def __getattr__(cls, item):
+                return f"meta:{item}"
+
+        class MyClass(metaclass=MyMeta):
+            class_val = "from_class"
+
+            def __init__(self):
+                self.inst_val = "from_instance"
+
+        @cinder_support.failUnlessJITCompiled
+        def get_inst_val(obj):
+            return obj.inst_val
+
+        @cinder_support.failUnlessJITCompiled
+        def get_class_val(obj):
+            return obj.class_val
+
+        obj = MyClass()
+        # Instance attribute lookup should work normally
+        for _ in range(100):
+            self.assertEqual(get_inst_val(obj), "from_instance")
+            self.assertEqual(get_class_val(obj), "from_class")
+
+
+class GetAttrMutationTests(unittest.TestCase):
+    """Tests that the IC correctly handles mutations to __getattr__ after
+    the cache has been populated.
+
+    The type watcher system should invalidate IC entries when __getattr__
+    is added or removed, ensuring correct behavior even after mutation.
+    """
+
+    def test_add_getattr_after_ic_populated(self):
+        """Adding __getattr__ to a class after the IC has cached attribute
+        lookups should not break anything. The IC should be invalidated and
+        subsequent lookups should use __getattr__ for missing attributes."""
+
+        class C:
+            def __init__(self):
+                self.x = 42
+
+        @cinder_support.failUnlessJITCompiled
+        def get_x(o):
+            return o.x
+
+        @cinder_support.failUnlessJITCompiled
+        def get_missing(o):
+            return o.missing
+
+        c = C()
+        # Populate IC
+        self.assertEqual(get_x(c), 42)
+        self.assertEqual(get_x(c), 42)
+        # Missing attr raises AttributeError
+        with self.assertRaises(AttributeError):
+            get_missing(c)
+
+        # Now add __getattr__ to the class
+        C.__getattr__ = lambda self, name: f"fallback:{name}"
+
+        # Existing attribute should still work
+        self.assertEqual(get_x(c), 42)
+        # Missing attribute should now use __getattr__
+        self.assertEqual(get_missing(c), "fallback:missing")
+
+    def test_remove_getattr_after_ic_populated(self):
+        """Removing __getattr__ from a class after the IC has cached lookups
+        that used __getattr__ should invalidate the cache. Subsequent lookups
+        for missing attributes should raise AttributeError."""
+
+        class C:
+            def __init__(self):
+                self.x = 42
+
+            def __getattr__(self, name):
+                return f"fallback:{name}"
+
+        @cinder_support.failUnlessJITCompiled
+        def get_x(o):
+            return o.x
+
+        @cinder_support.failUnlessJITCompiled
+        def get_missing(o):
+            return o.missing
+
+        c = C()
+        # Populate IC with __getattr__ active
+        self.assertEqual(get_x(c), 42)
+        self.assertEqual(get_x(c), 42)
+        self.assertEqual(get_missing(c), "fallback:missing")
+        self.assertEqual(get_missing(c), "fallback:missing")
+
+        # Remove __getattr__
+        del C.__getattr__
+
+        # Existing attribute should still work
+        self.assertEqual(get_x(c), 42)
+        # Missing attribute should now raise
+        with self.assertRaises(AttributeError):
+            get_missing(c)
+
+    def test_replace_getattr_after_ic_populated(self):
+        """Replacing __getattr__ with a different implementation after the IC
+        has cached should use the new implementation."""
+
+        class C:
+            def __init__(self):
+                self.x = 42
+
+            def __getattr__(self, name):
+                return f"old:{name}"
+
+        @cinder_support.failUnlessJITCompiled
+        def get_missing(o):
+            return o.missing
+
+        c = C()
+        # Populate IC
+        self.assertEqual(get_missing(c), "old:missing")
+        self.assertEqual(get_missing(c), "old:missing")
+
+        # Replace __getattr__
+        C.__getattr__ = lambda self, name: f"new:{name}"
+
+        self.assertEqual(get_missing(c), "new:missing")
+
+    def test_add_getattr_to_base_after_ic_populated(self):
+        """Adding __getattr__ to a base class after the IC has cached lookups
+        on a derived class should invalidate the cache."""
+
+        class Base:
+            pass
+
+        class Derived(Base):
+            def __init__(self):
+                self.x = 42
+
+        @cinder_support.failUnlessJITCompiled
+        def get_x(o):
+            return o.x
+
+        @cinder_support.failUnlessJITCompiled
+        def get_missing(o):
+            return o.missing
+
+        d = Derived()
+        # Populate IC
+        self.assertEqual(get_x(d), 42)
+        self.assertEqual(get_x(d), 42)
+        with self.assertRaises(AttributeError):
+            get_missing(d)
+
+        # Add __getattr__ on the base class
+        Base.__getattr__ = lambda self, name: f"base_fallback:{name}"
+
+        # Existing attribute should still work
+        self.assertEqual(get_x(d), 42)
+        # Missing attribute should now use Base.__getattr__
+        self.assertEqual(get_missing(d), "base_fallback:missing")
+
+    def test_add_getattr_with_data_descriptor(self):
+        """Adding __getattr__ to a class that has a data descriptor cached
+        in the IC should work correctly. If the descriptor raises
+        AttributeError, __getattr__ should be used as fallback."""
+
+        class RaisingDescr:
+            def __get__(self, obj, cls):
+                raise AttributeError("descr error")
+
+            def __set__(self, obj, val):
+                pass
+
+        class C:
+            x = RaisingDescr()
+
+        @cinder_support.failUnlessJITCompiled
+        def get_x(o):
+            return o.x
+
+        c = C()
+        # Without __getattr__, descriptor error propagates
+        with self.assertRaises(AttributeError):
+            get_x(c)
+
+        # Add __getattr__
+        C.__getattr__ = lambda self, name: f"fallback:{name}"
+
+        # Now the descriptor error should be caught and __getattr__ called
+        self.assertEqual(get_x(c), "fallback:x")
+        self.assertEqual(get_x(c), "fallback:x")
+
+    def test_remove_getattr_with_data_descriptor(self):
+        """Removing __getattr__ from a class that has a data descriptor that
+        raises AttributeError. After removal, the error should propagate."""
+
+        class RaisingDescr:
+            def __get__(self, obj, cls):
+                raise AttributeError("descr error")
+
+            def __set__(self, obj, val):
+                pass
+
+        class C:
+            x = RaisingDescr()
+
+            def __getattr__(self, name):
+                return f"fallback:{name}"
+
+        @cinder_support.failUnlessJITCompiled
+        def get_x(o):
+            return o.x
+
+        c = C()
+        # With __getattr__, descriptor error is caught
+        self.assertEqual(get_x(c), "fallback:x")
+        self.assertEqual(get_x(c), "fallback:x")
+
+        # Remove __getattr__
+        del C.__getattr__
+
+        # Now the descriptor error should propagate
+        with self.assertRaises(AttributeError):
+            get_x(c)
+
+    def test_add_getattr_with_instance_dict_miss(self):
+        """Adding __getattr__ after the IC has cached split dict lookups
+        where the attribute may not be in the instance dict."""
+
+        class C:
+            pass
+
+        @cinder_support.failUnlessJITCompiled
+        def get_foo(o):
+            return o.foo
+
+        c = C()
+        # Populate IC - attribute is missing, raises
+        with self.assertRaises(AttributeError):
+            get_foo(c)
+
+        # Add the attribute to the instance
+        c.foo = 100
+        self.assertEqual(get_foo(c), 100)
+
+        # Remove instance attribute and add __getattr__
+        del c.foo
+        C.__getattr__ = lambda self, name: f"dynamic:{name}"
+
+        self.assertEqual(get_foo(c), "dynamic:foo")
+
+    def test_add_getattribute_invalidates_getattr_ic(self):
+        """Adding a custom __getattribute__ to a class that has __getattr__
+        cached in the IC should invalidate the cache. The hookUsesGenericGetAttr
+        check at fill time should reject re-caching with the custom
+        __getattribute__."""
+
+        class C:
+            def __init__(self):
+                self.x = 42
+
+            def __getattr__(self, name):
+                return f"fallback:{name}"
+
+        @cinder_support.failUnlessJITCompiled
+        def get_x(o):
+            return o.x
+
+        @cinder_support.failUnlessJITCompiled
+        def get_missing(o):
+            return o.missing
+
+        c = C()
+        # Populate IC
+        self.assertEqual(get_x(c), 42)
+        self.assertEqual(get_missing(c), "fallback:missing")
+
+        # Add custom __getattribute__ - this changes the semantics
+        def custom_getattribute(self, name):
+            return f"custom:{name}"
+
+        C.__getattribute__ = custom_getattribute
+
+        # Now all attribute access should go through custom __getattribute__
+        self.assertEqual(get_x(c), "custom:x")
+        self.assertEqual(get_missing(c), "custom:missing")

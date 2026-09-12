@@ -61,7 +61,6 @@ class NestedScope:
     def declare_variables(self, node: Assign, module: ModuleTable) -> None:
         pass
 
-    # pyre-ignore[11]: Annotation `ast.TypeAlias` is not defined as a type
     def declare_type_alias(self, node: ast.TypeAlias) -> None:
         pass
 
@@ -109,7 +108,6 @@ class DeclarationVisitor(GenericVisitor[None]):
     def visitAssign(self, node: Assign) -> None:
         self.parent_scope().declare_variables(node, self.module)
 
-    # pyre-ignore[11]: Annotation `ast.TypeAlias` is not defined as a type
     def visitTypeAlias(self, node: ast.TypeAlias) -> None:
         self.parent_scope().declare_type_alias(node)
 
@@ -139,7 +137,7 @@ class DeclarationVisitor(GenericVisitor[None]):
             klass = klasses[0]
 
         for base in bases:
-            if base is self.type_env.named_tuple:
+            if base is self.type_env.named_tuple or base is self.type_env.tuple:
                 # In named tuples, the fields are actually elements
                 # of the tuple, so we can't do any advanced binding against it.
                 klass = self.type_env.dynamic
@@ -162,6 +160,14 @@ class DeclarationVisitor(GenericVisitor[None]):
                     f"Class `{klass.instance.name}` cannot subclass a Final class: `{base.instance.name}`",
                     node,
                 )
+
+        # Classes with custom metaclasses may reject the __final_method_names__
+        # attribute or conflict with slot generation.  Treat them as dynamic, same as
+        # NamedTuple/Protocol/TypedDict.
+        for kw in node.keywords:
+            if kw.arg == "metaclass":
+                klass = self.type_env.dynamic
+                break
 
         # we can't statically load classes nested inside functions
         if not isinstance(parent_scope, (ModuleTable, Class)):
@@ -261,9 +267,13 @@ class DeclarationVisitor(GenericVisitor[None]):
                 )
 
     def visitImportFrom(self, node: ImportFrom) -> None:
-        mod_name = node.module
-        if not mod_name or node.level:
-            raise NotImplementedError("relative imports aren't supported")
+        if node.level:
+            mod_name = self._resolve_relative_import(node)
+        else:
+            mod_name = node.module
+        if not mod_name:
+            self.syntax_error("empty module name in import", node)
+            return
         for name in node.names:
             child_name = name.asname or name.name
             self.module.declare_import(

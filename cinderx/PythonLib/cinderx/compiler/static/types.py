@@ -142,7 +142,8 @@ from .effects import NarrowingEffect, NO_EFFECT, TypeState
 from .visitor import GenericVisitor
 
 if TYPE_CHECKING:
-    from . import PyFlowGraphStatic310, StaticCodeGenBase
+    from ..pyassem import PyFlowGraph
+    from . import StaticCodeGenBase
     from .compiler import Compiler
     from .declaration_visitor import DeclarationVisitor
     from .module_table import ModuleTable
@@ -447,7 +448,6 @@ class TypeEnvironment:
 
         # This exception is added as a builtin by implementations of Lazy Imports.
         self.import_cycle_error: Class | None = None
-        # pyre-ignore[16]: Pyre assumes it knows the exact shape of the builtins module.
         if import_cycle_error := getattr(builtins, "ImportCycleError", None):
             self.import_cycle_error = self._builtin_exception_class(import_cycle_error)
 
@@ -1235,6 +1235,7 @@ def resolve_instance_attr_by_name(
 class Object(Value, Generic[TClass]):
     """Represents an instance of a type at compile time"""
 
+    # pyrefly: ignore [bad-override]
     klass: TClass
 
     @property
@@ -1552,7 +1553,13 @@ class Class(Object["Class"]):
             except AttributeError:
                 continue
 
-            if isinstance(obj, (MethodDescriptorType, WrapperDescriptorType)):
+            if isinstance(obj, MethodDescriptorType) or (
+                isinstance(obj, WrapperDescriptorType)
+                and (
+                    getattr(obj, "__typed_signature__", None) is not None
+                    or obj in ALT_SIGS
+                )
+            ):
                 result[k] = reflect_method_desc(obj, self, self.type_env)
             elif isinstance(obj, BuiltinFunctionType):
                 result[k] = reflect_builtin_function(obj, self, self.type_env)
@@ -1611,7 +1618,6 @@ class Class(Object["Class"]):
     def declare_variables(self, node: Assign, module: ModuleTable) -> None:
         pass
 
-    # pyre-ignore[11]: Annotation `ast.TypeAlias` is not defined as a type.
     def declare_type_alias(self, node: ast.TypeAlias) -> None:
         pass
 
@@ -2132,6 +2138,7 @@ class Variance(Enum):
 
 
 class GenericClass(Class):
+    # pyrefly: ignore [bad-override]
     type_name: GenericTypeName
     is_variadic = False
 
@@ -2426,6 +2433,7 @@ class CType(Class):
 
 
 class DynamicClass(Class):
+    # pyrefly: ignore [bad-override]
     instance: DynamicInstance
 
     def __init__(self, type_env: TypeEnvironment) -> None:
@@ -2688,6 +2696,7 @@ class ArgMapping:
         descr_override: TypeDescr | None = None,
         has_generic_params: bool = False,
     ) -> None:
+        # pyrefly: ignore [invalid-type-var]
         self.callable = callable
         self.call = call
         self.visitor = visitor
@@ -2802,6 +2811,7 @@ class ArgMapping:
             # an emitter which makes sure we never try and do code gen for this
             self.emitters.append(UnreachableArg())
         else:
+            # pyrefly: ignore [bad-argument-type]
             const = ast.Constant(param.default_val)
             copy_location(const, self.call)
             visitor.visit(const, param.type_ref.resolved(False).instance)
@@ -3819,6 +3829,7 @@ NON_VIRTUAL_METHODS = {"__init__", "__new__", "__init_subclass__"}
 
 
 class Function(Callable[Class], FunctionContainer):
+    # pyrefly: ignore [bad-override]
     args: list[Parameter]
 
     def __init__(
@@ -3908,7 +3919,6 @@ class Function(Callable[Class], FunctionContainer):
     def declare_variables(self, node: Assign, module: ModuleTable) -> None:
         pass
 
-    # pyre-ignore[11]: Annotation `ast.TypeAlias` is not defined as a type.
     def declare_type_alias(self, node: ast.TypeAlias) -> None:
         pass
 
@@ -3990,6 +4000,7 @@ class Function(Callable[Class], FunctionContainer):
         new_node = AstOptimizer().visit(new_node)
         assert isinstance(new_node, ast.expr)
 
+        # pyrefly: ignore [bad-argument-type]
         inlined_call = InlinedCall(new_node, arg_replacements, spills)
         visitor.visit(new_node)
         visitor.set_node_data(node, Optional[InlinedCall], inlined_call)
@@ -4852,6 +4863,7 @@ class InlineFunctionDecorator(Class):
     ) -> Function | DecoratedMethod:
         real_fn = fn.real_function if isinstance(fn, DecoratedMethod) else fn
         if not isinstance(real_fn.node.body[0], ast.Return):
+            # pyrefly: ignore [no-matching-overload]
             raise TypedSyntaxError(
                 "@inline only supported on functions with simple return", real_fn.node
             )
@@ -5043,6 +5055,7 @@ class NativeDecorator(Callable[Class]):
                 lib_arg_node,
             )
 
+        # pyrefly: ignore [bad-assignment]
         self.lib_name = value
         visitor.set_type(node, self)
         return NO_EFFECT
@@ -5156,6 +5169,15 @@ class IdentityDecorator(Class):
         visitor: DeclarationVisitor,
     ) -> Class:
         return klass
+
+
+class OverrideDecorator(IdentityDecorator):
+    def resolve_decorate_function(
+        self, fn: Function | DecoratedMethod, decorator: expr
+    ) -> Function | DecoratedMethod | None:
+        if isinstance(fn, DecoratedMethod):
+            return fn
+        return None
 
 
 class OverloadDecorator(Class):
@@ -5272,6 +5294,22 @@ class DataclassDecorator(Callable[Class]):
                 False,
                 ParamStyle.KWONLY,
             ),
+            Parameter(
+                "kw_only",
+                7,
+                ResolvedTypeRef(type_env.bool),
+                True,
+                False,
+                ParamStyle.KWONLY,
+            ),
+            Parameter(
+                "slots",
+                8,
+                ResolvedTypeRef(type_env.bool),
+                True,
+                True,  # Technically the CPython default is False, but for Static Python it's True.
+                ParamStyle.KWONLY,
+            ),
         ]
         super().__init__(
             type_env.function,
@@ -5321,6 +5359,8 @@ class DataclassDecorator(Callable[Class]):
             "order": False,
             "unsafe_hash": False,
             "frozen": False,
+            "kw_only": False,
+            "slots": True,
         }
 
         for kw in decorator.keywords:
@@ -5582,6 +5622,8 @@ class Dataclass(Class):
         order: bool = False,
         unsafe_hash: bool = False,
         frozen: bool = False,
+        kw_only: bool = False,
+        slots: bool = True,
     ) -> None:
         super().__init__(
             type_name=klass.type_name,
@@ -5602,6 +5644,7 @@ class Dataclass(Class):
         self.order = order
         self.unsafe_hash = unsafe_hash
         self.frozen = frozen
+        self.kw_only = kw_only
 
         self.fields: dict[str, DataclassField] = {}
 
@@ -5611,6 +5654,11 @@ class Dataclass(Class):
 
         # Fields where field.kind is FIELD
         self.true_fields: dict[str, DataclassField] = {}
+
+        if not slots:
+            raise TypedSyntaxError(
+                f"Dataclass {self.qualname} sets slots=False but Static Python defaults to and only supports slots=True"
+            )
 
         if order:
             if not eq:
@@ -5824,6 +5872,7 @@ class Dataclass(Class):
                     default = ast.Name("_HAS_DEFAULT_FACTORY", ast.Load())
                 else:
                     default = None
+
                 init_params.append(
                     Parameter(
                         name,
@@ -5831,7 +5880,7 @@ class Dataclass(Class):
                         field.unwrapped_ref,
                         has_default,
                         default,
-                        ParamStyle.NORMAL,
+                        ParamStyle.KWONLY if self.kw_only else ParamStyle.NORMAL,
                     )
                 )
 
@@ -5880,12 +5929,8 @@ class Dataclass(Class):
         args: tuple[str, ...],
         check_args: tuple[object, ...],
         return_type_descr: TypeDescr,
-    ) -> PyFlowGraphStatic310:
-        # pyre-fixme[6]: Should be passing in ModuleScope as 2nd argument but passing in
-        # ModuleTable instead.
-        #
-        # TODO(T220664156): This is very likely a bug.
-        scope = FunctionScope(func, code_gen.cur_mod, code_gen.scope.klass)
+    ) -> PyFlowGraph:
+        scope = FunctionScope(func, code_gen.scope.module, code_gen.scope.klass)
         scope.parent = code_gen.scope
 
         graph = code_gen.flow_graph(
@@ -5898,12 +5943,12 @@ class Dataclass(Class):
         )
         graph.setFlag(CI_CO_STATICALLY_COMPILED)
         graph.extra_consts.append((check_args, return_type_descr))
-        return cast("PyFlowGraphStatic310", graph)
+        return cast("PyFlowGraph", graph)
 
     def emit_method(
         self,
         code_gen: StaticCodeGenBase,
-        graph: PyFlowGraphStatic310,
+        graph: PyFlowGraph,
         oparg: int,
     ) -> None:
         code_gen.emit_make_function(
@@ -6658,6 +6703,7 @@ class BuiltinMethod(Callable[Class]):
 
 def get_default_value(default: expr) -> object:
     if not isinstance(default, Constant):
+        # pyrefly: ignore [bad-assignment]
         default = AstOptimizer().visit(default)
 
     if isinstance(default, ast.Constant):
@@ -6727,6 +6773,7 @@ class Slot(Object[TClassInv]):
                 f"Final attribute not initialized: {self.container_type.instance.name}:{self.slot_name}"
             )
 
+    # pyrefly: ignore [bad-override]
     def resolve_descr_get(
         self,
         node: ast.Attribute,
@@ -7530,6 +7577,7 @@ def reflect_method_desc(
 ) -> BuiltinMethodDescriptor:
     sig = getattr(obj, "__typed_signature__", None) or ALT_SIGS.get(obj, None)
     if sig is not None:
+        # pyrefly: ignore [bad-argument-type]
         signature, return_type = parse_typed_signature(sig, klass, type_env)
 
         method = BuiltinMethodDescriptor(
@@ -7553,6 +7601,7 @@ def reflect_builtin_function(
 ) -> BuiltinFunction:
     sig = getattr(obj, "__typed_signature__", None) or ALT_SIGS.get(obj, None)
     if sig is not None:
+        # pyrefly: ignore [bad-argument-type]
         signature, return_type = parse_typed_signature(sig, None, type_env)
         method = BuiltinFunction(
             obj.__name__,
@@ -8449,6 +8498,7 @@ class UnionTypeName(GenericTypeName):
 
 
 class UnionType(GenericClass):
+    # pyrefly: ignore [bad-override]
     type_name: UnionTypeName
     # Union is a variadic generic, so we don't give the unbound Union any
     # GenericParameters, and we allow it to accept any number of type args.
@@ -8709,6 +8759,7 @@ class OptionalType(UnionType):
 class OptionalInstance(UnionInstance):
     """Only exists for typing purposes (so we know .klass is OptionalType)."""
 
+    # pyrefly: ignore [bad-override]
     klass: OptionalType
 
 
@@ -8956,6 +9007,17 @@ class CheckedDict(GenericClass):
 
         return NO_EFFECT
 
+    def make_generic_type(
+        self,
+        index: tuple[Class, ...],
+    ) -> Class:
+        for tp in index:
+            if isinstance(tp, CType):
+                raise TypedSyntaxError(
+                    f"Invalid {self.gen_name.qualname} element type: {tp.instance.name}"
+                )
+        return super().make_generic_type(index)
+
 
 class CheckedDictInstance(Object[CheckedDict]):
     def bind_subscr(
@@ -9069,6 +9131,17 @@ class CheckedList(GenericClass):
             ],
             ResolvedTypeRef(self),
         )
+
+    def make_generic_type(
+        self,
+        index: tuple[Class, ...],
+    ) -> Class:
+        for tp in index:
+            if isinstance(tp, CType):
+                raise TypedSyntaxError(
+                    f"Invalid {self.gen_name.qualname} element type: {tp.instance.name}"
+                )
+        return super().make_generic_type(index)
 
 
 class CheckedListInstance(Object[CheckedList]):
@@ -9284,6 +9357,7 @@ class CInstance(Value, Generic[TClass]):
 class CIntInstance(CInstance["CIntType"]):
     def __init__(self, klass: CIntType, constant: int, size: int, signed: bool) -> None:
         super().__init__(klass)
+        # pyrefly: ignore [bad-override]
         self.klass: CIntType = klass
         self.constant = constant
         self.size = size
@@ -9524,6 +9598,7 @@ class CIntInstance(CInstance["CIntType"]):
                         node,
                     )
         if type_ctx is None:
+            # pyrefly: ignore [bad-assignment]
             type_ctx = self.validate_mixed_math(visitor.get_type(node.right))
             if type_ctx is None:
                 visitor.syntax_error(
@@ -9532,6 +9607,7 @@ class CIntInstance(CInstance["CIntType"]):
                     ),
                     node,
                 )
+                # pyrefly: ignore [bad-assignment]
                 type_ctx = visitor.type_env.DYNAMIC
             else:
                 visitor.set_node_data(node, BinOpCommonType, BinOpCommonType(type_ctx))
@@ -9546,6 +9622,7 @@ class CIntInstance(CInstance["CIntType"]):
         if isinstance(node.op, ast.Pow):
             visitor.set_type(node, self.klass.type_env.double.instance)
         else:
+            # pyrefly: ignore [bad-argument-type]
             visitor.set_type(node, type_ctx)
         return True
 
@@ -9599,6 +9676,7 @@ class CIntInstance(CInstance["CIntType"]):
 
 
 class CIntType(CType):
+    # pyrefly: ignore [bad-override]
     instance: CIntInstance
 
     def __init__(
@@ -9831,6 +9909,7 @@ class CDoubleInstance(CInstance["CDoubleType"]):
         visitor.set_type(node, self)
 
     def emit_constant(self, node: ast.Constant, code_gen: StaticCodeGenBase) -> None:
+        # pyrefly: ignore [bad-argument-type]
         code_gen.emit("PRIMITIVE_LOAD_CONST", (float(node.value), self.as_oparg()))
 
     def emit_box(self, code_gen: StaticCodeGenBase) -> None:

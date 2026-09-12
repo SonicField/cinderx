@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from .compiler import Compiler
 
 
-# When set to True, allow type alises of the form
+# When set to True, allow type aliases of the form
 #   A = Foo
 # as well as the explicit 3.12+
 #   type A = Foo
@@ -181,6 +181,7 @@ class AnnotationVisitor(ReferenceVisitor):
         if sval is None:
             return self.type_env.none
         elif isinstance(sval, str):
+            # pyrefly: ignore [no-matching-overload]
             n = ast.parse(node.value, "", "eval").body
             return self.visit(n)
 
@@ -370,7 +371,6 @@ class ModuleTable:
 
     def maybe_set_type_alias(
         self,
-        # pyre-ignore[11]: Annotation `ast.TypeAlias` is not defined as a type
         node: ast.Assign | ast.TypeAlias,
         name: str,
         *,
@@ -394,7 +394,6 @@ class ModuleTable:
                 raise TypedSyntaxError(f"RHS of type alias {name} is not a type: {rhs}")
             self.implicit_decl_names.add(name)
 
-    # pyre-ignore[11]: Annotation `ast.TypeAlias` is not defined as a type
     def declare_type_alias(self, node: ast.TypeAlias) -> None:
         self.maybe_set_type_alias(node, node.name.id, require_type=True)
 
@@ -611,7 +610,6 @@ class ModuleTable:
             and len(targets) == 1
             and isinstance(targets[0], ast.Name)
         ):
-            # pyre-ignore[16]: `ast.expr` has no attribute `id`
             return self.maybe_set_type_alias(node, targets[0].id)
 
         for target in targets:

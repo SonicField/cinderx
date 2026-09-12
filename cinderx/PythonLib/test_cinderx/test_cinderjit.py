@@ -1,27 +1,20 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
 import asyncio
+import copy
 import faulthandler
 import gc
 import subprocess
 import sys
 import tempfile
 import textwrap
-import traceback
 import unittest
 import weakref
-from pathlib import Path
-from typing import Callable
-
-AT_LEAST_312 = sys.version_info[:2] >= (3, 12)
-
-if not AT_LEAST_312:
-    # pyre-ignore[21]: Pyre doesn't know about this module.
-    import _testcindercapi
+from typing import Any, Callable, cast, TYPE_CHECKING
 
 import cinderx.jit
 import cinderx.test_support as cinder_support
-from cinderx.compiler.consts import CO_FUTURE_BARRY_AS_BDFL, CO_SUPPRESS_JIT
+from cinderx.compiler.consts import CO_SUPPRESS_JIT
 from cinderx.jit import (
     compile_after_n_calls,
     force_compile,
@@ -33,65 +26,34 @@ from cinderx.jit import (
 from cinderx.test_support import (
     compiles_after_one_call,
     ENCODING,
+    is_jit_compiled_after_call,
+    is_oss,
     passIf,
     passUnless,
     run_in_subprocess,
+    skip_if_ft,
+    skip_if_prefork,
+    skip_test_if_oss,
     skip_unless_jit,
     subprocess_env,
 )
 
 from .common import failUnlessHasOpcodes, with_globals
-from .test_compiler.test_static.common import StaticTestBase
+
+if TYPE_CHECKING:
+    from .test_compiler.test_static.common import StaticTestBase
+elif not is_oss():
+    from .test_compiler.test_static.common import StaticTestBase
+else:
+    StaticTestBase = unittest.TestCase
 
 
-class TestException(Exception):
+class ExampleException(Exception):
     pass
 
 
 def firstlineno(func):
     return func.__code__.co_firstlineno
-
-
-@cinder_support.failUnlessJITCompiled
-def get_stack():
-    z = 1 + 1  # noqa: F841
-    stack = traceback.extract_stack()
-    return stack
-
-
-@cinder_support.failUnlessJITCompiled
-def get_stack_twice():
-    stacks = []
-    stacks.append(get_stack())
-    stacks.append(get_stack())
-    return stacks
-
-
-@cinder_support.failUnlessJITCompiled
-def get_stack2():
-    z = 2 + 2  # noqa: F841
-    stack = traceback.extract_stack()
-    return stack
-
-
-@cinder_support.failUnlessJITCompiled
-def get_stack_siblings():
-    return [get_stack(), get_stack2()]
-
-
-@cinder_support.failUnlessJITCompiled
-def get_stack_multi():
-    stacks = []
-    stacks.append(traceback.extract_stack())
-    z = 1 + 1  # noqa: F841
-    stacks.append(traceback.extract_stack())
-    return stacks
-
-
-@cinder_support.failUnlessJITCompiled
-def call_get_stack_multi():
-    x = 1 + 1  # noqa: F841
-    return get_stack_multi()
 
 
 @cinder_support.failUnlessJITCompiled
@@ -117,33 +79,29 @@ def func():
     return a + b + c
 
 
-@cinder_support.failUnlessJITCompiled
-def func_with_defaults_that_will_change(x=1, y=2):
-    return x + y
+def compiled_code_func():
+    pass
 
 
-@cinder_support.failUnlessJITCompiled
-def change_defaults():
-    func_with_defaults_that_will_change.__defaults__ = (4, 5)
+def compiled_code_func_with_nested():
+    def nested():
+        return 42
+
+    return nested
 
 
-@cinder_support.failUnlessJITCompiled
-def func_that_change_defaults():
-    change_defaults()
-    return func_with_defaults_that_will_change()
+def compiled_code_func_with_nested_global():
+    def nested():
+        return NESTED_GLOBAL  # noqa: F821
+
+    return nested
 
 
-class InlinedFunctionTests(unittest.TestCase):
-    @jit_suppress
-    @passIf(
-        not cinderx.jit.is_hir_inliner_enabled(),
-        "meaningless without HIR inliner enabled",
-    )
-    def test_deopt_when_func_defaults_change(self) -> None:
-        self.assertEqual(
-            cinderx.jit.get_num_inlined_functions(func_that_change_defaults), 2
-        )
-        self.assertEqual(func_that_change_defaults(), 9)
+def compiled_code_func_with_nested_builtin():
+    def nested():
+        return len(())
+
+    return nested
 
 
 class InlineCacheStatsTests(unittest.TestCase):
@@ -152,6 +110,7 @@ class InlineCacheStatsTests(unittest.TestCase):
         not cinderx.jit.is_inline_cache_stats_collection_enabled(),
         "meaningless without inline cache stats collection enabled",
     )
+    @skip_if_ft("T250369692: Inline caches disabled with free-threading")
     def test_load_method_cache_stats(self) -> None:
         # Clear inline cache stats of any collected data from importing
         # builtin modules
@@ -212,81 +171,6 @@ class InlineCacheStatsTests(unittest.TestCase):
         )
 
 
-class InlinedFunctionLineNumberTests(unittest.TestCase):
-    @jit_suppress
-    @passIf(
-        not cinderx.jit.is_hir_inliner_enabled(),
-        "meaningless without HIR inliner enabled",
-    )
-    def test_line_numbers_with_sibling_inlined_functions(self) -> None:
-        """Verify that line numbers are correct when function calls are inlined in the same
-        expression"""
-        # Calls to get_stack and get_stack2 should be inlined
-        self.assertEqual(cinderx.jit.get_num_inlined_functions(get_stack_siblings), 2)
-        stacks = get_stack_siblings()
-        # Call to get_stack
-        self.assertEqual(stacks[0][-1].lineno, firstlineno(get_stack) + 3)
-        self.assertEqual(stacks[0][-2].lineno, firstlineno(get_stack_siblings) + 2)
-        # Call to get_stack2
-        self.assertEqual(stacks[1][-1].lineno, firstlineno(get_stack2) + 3)
-        self.assertEqual(stacks[1][-2].lineno, firstlineno(get_stack_siblings) + 2)
-
-    @jit_suppress
-    @passIf(
-        not cinderx.jit.is_hir_inliner_enabled(),
-        "meaningless without HIR inliner enabled",
-    )
-    def test_line_numbers_at_multiple_points_in_inlined_functions(self) -> None:
-        """Verify that line numbers are are correct at different points in an inlined
-        function"""
-        # Call to get_stack_multi should be inlined
-        self.assertEqual(cinderx.jit.get_num_inlined_functions(call_get_stack_multi), 1)
-        stacks = call_get_stack_multi()
-        self.assertEqual(stacks[0][-1].lineno, firstlineno(get_stack_multi) + 3)
-        self.assertEqual(stacks[0][-2].lineno, firstlineno(call_get_stack_multi) + 3)
-        self.assertEqual(stacks[1][-1].lineno, firstlineno(get_stack_multi) + 5)
-        self.assertEqual(stacks[1][-2].lineno, firstlineno(call_get_stack_multi) + 3)
-
-    @jit_suppress
-    @passIf(
-        not cinderx.jit.is_hir_inliner_enabled(),
-        "meaningless without HIR inliner enabled",
-    )
-    def test_inline_function_stats(self) -> None:
-        self.assertEqual(cinderx.jit.get_num_inlined_functions(func), 2)
-        stats = cinderx.jit.get_inlined_functions_stats(func)
-        self.assertEqual(stats.get("num_inlined_functions"), 2)
-        failure_stats = stats.get("failure_stats") or {}
-        assert isinstance(failure_stats, dict)
-        self.assertNotEqual(failure_stats, {})
-        has_varargs = failure_stats.get("HasVarargs") or set()
-        assert isinstance(has_varargs, set)
-        self.assertNotEqual(has_varargs, {})
-        self.assertEqual(len(has_varargs), 1, repr(has_varargs))
-        self.assertIn(
-            "test_cinderx.test_cinderjit:func_with_varargs", next(iter(has_varargs))
-        )
-
-    @jit_suppress
-    @passIf(
-        not cinderx.jit.is_hir_inliner_enabled(),
-        "meaningless without HIR inliner enabled",
-    )
-    def test_line_numbers_with_multiple_inlined_calls(self) -> None:
-        """Verify that line numbers are correct for inlined calls that appear
-        in different statements
-        """
-        # Call to get_stack should be inlined twice
-        self.assertEqual(cinderx.jit.get_num_inlined_functions(get_stack_twice), 2)
-        stacks = get_stack_twice()
-        # First call to double
-        self.assertEqual(stacks[0][-1].lineno, firstlineno(get_stack) + 3)
-        self.assertEqual(stacks[0][-2].lineno, firstlineno(get_stack_twice) + 3)
-        # Second call to double
-        self.assertEqual(stacks[1][-1].lineno, firstlineno(get_stack) + 3)
-        self.assertEqual(stacks[1][-2].lineno, firstlineno(get_stack_twice) + 4)
-
-
 class FaulthandlerTracebackTests(unittest.TestCase):
     @cinder_support.failUnlessJITCompiled
     def f1(self, fd):
@@ -311,9 +195,13 @@ class FaulthandlerTracebackTests(unittest.TestCase):
             f.seek(0)
             output = f.read().decode("ascii")
             lines = output.split("\n")
-            self.assertGreaterEqual(len(lines), len(expected) + 1)
-            # Ignore first line, which is 'Current thread: ...'
-            self.assertEqual(lines[1:4], expected)
+            # dump_traceback() dumps every thread, and other threads (e.g. the
+            # JIT's background compile worker) can come first, so look for this
+            # thread's section rather than assuming it's at the top.
+            header = next(
+                i for i, line in enumerate(lines) if line.startswith("Current thread")
+            )
+            self.assertEqual(lines[header + 1 : header + 1 + len(expected)], expected)
 
 
 def _simpleFunc(a, b):
@@ -542,7 +430,6 @@ class SetNonDataDescrAttrTests(unittest.TestCase):
         def setter(self, obj, val):
             self.invoked = True
 
-        # pyre-ignore[16]: Pyre doesn't recognize __set__.
         self.descr.__class__.__set__ = setter
 
         # setter doesn't modify the object, so obj.foo shouldn't change
@@ -610,7 +497,6 @@ class GetSetNonDataDescrAttrTests(unittest.TestCase):
         def setter(self, obj, val):
             pass
 
-        # pyre-ignore[16]: Pyre doesn't recognize __set__.
         self.descr.__class__.__set__ = setter
 
         # cached; __get__ should be invoked as self.descr is now a data descr
@@ -698,11 +584,7 @@ class ClosureTests(unittest.TestCase):
 
         self.assertEqual(
             str(ctx.exception),
-            (
-                "cannot access local variable 'a' where it is not associated with a value"
-                if AT_LEAST_312
-                else "local variable 'a' referenced before assignment"
-            ),
+            "cannot access local variable 'a' where it is not associated with a value",
         )
 
     def test_freevars(self) -> None:
@@ -804,6 +686,7 @@ class TempNameTests(unittest.TestCase):
         self.assertEqual(v0, 5)
 
 
+@skip_test_if_oss("xxclassloader")
 class JITCompileCrasherRegressionTests(StaticTestBase):
     @cinder_support.failUnlessJITCompiled
     def isinstance_optimization(self) -> bool:
@@ -834,12 +717,10 @@ class JITCompileCrasherRegressionTests(StaticTestBase):
             return 1
 
         with self.assertRaises(StopIteration) as exc:
-            # pyre-ignore[1001]: Pyre thinks this is never awaited, doesn't recognize the .send()
             self._sharedAwait(zero, True, one).send(None)
         self.assertEqual(exc.exception.value, 0)
 
         with self.assertRaises(StopIteration) as exc:
-            # pyre-ignore[1001]: Pyre thinks this is never awaited, doesn't recognize the .send()
             self._sharedAwait(zero, False, one).send(None)
         self.assertEqual(exc.exception.value, 1)
 
@@ -859,6 +740,7 @@ class JITCompileCrasherRegressionTests(StaticTestBase):
             self.load_method_on_maybe_defined_value()
 
     @run_in_subprocess
+    @skip_if_ft("T250369696: Static Python not yet supported with free-threading")
     def test_condbranch_codegen(self) -> None:
         codestr = """
             from __static__ import cbool
@@ -873,10 +755,33 @@ class JITCompileCrasherRegressionTests(StaticTestBase):
         """
         with self.in_module(codestr) as mod:
             if hasattr(gc, "immortalize_heap"):
-                # pyre-ignore[16]: Pyre doesn't know about immortalize_heap().
                 gc.immortalize_heap()
             force_compile(mod.Foo.__init__)
             mod.Foo(True)
+
+    @run_in_subprocess
+    @skip_if_ft("T250369696: Static Python not yet supported with free-threading")
+    def test_double_undefined_on_loop_entry(self) -> None:
+        # `step` is never read, so Static Python skips the zero-initializer it
+        # emits for primitives that are read while possibly-undefined (see
+        # test_uninit_for).  Its loop-header Phi then merges a double with the
+        # undefined-local sentinel, which used to leave the Phi in an integer
+        # register while its input stayed in a vector one.
+        codestr = """
+            from __static__ import box, double
+
+            def f(n: int) -> float:
+                total: double = 0.0
+                for _ in range(n):
+                    step: double = 1.5
+                    total += step
+
+                return box(total)
+        """
+        with self.in_module(codestr) as mod:
+            force_compile(mod.f)
+            self.assertEqual(mod.f(0), 0.0)
+            self.assertEqual(mod.f(3), 4.5)
 
     def test_restore_materialized_parent_pyframe_in_gen_throw(self) -> None:
         # This reproduces a bug that causes the top frame in the shadow stack
@@ -963,10 +868,10 @@ class JITCompileCrasherRegressionTests(StaticTestBase):
             asyncio.run(main())
 
         if compiles_after_one_call():
-            self.assertTrue(is_jit_compiled(a))
-            self.assertTrue(is_jit_compiled(b))
-            self.assertTrue(is_jit_compiled(c.__wrapped__))
-            self.assertTrue(is_jit_compiled(d))
+            self.assertTrue(is_jit_compiled_after_call(a))
+            self.assertTrue(is_jit_compiled_after_call(b))
+            self.assertTrue(is_jit_compiled_after_call(c.__wrapped__))
+            self.assertTrue(is_jit_compiled_after_call(d))
 
     def test_delete_fast_return(self) -> None:
         def foo(hmm):
@@ -1058,7 +963,6 @@ class ImportTests(unittest.TestCase):
 
     @cinder_support.failUnlessJITCompiled
     def _fail_to_import_name(self):
-        # pyre-ignore[21]: Intentionally testing non-existent import behavior.
         import non_existent_module  # noqa: F401
 
     def test_import_name_failure(self) -> None:
@@ -1073,7 +977,6 @@ class ImportTests(unittest.TestCase):
 
     @cinder_support.failUnlessJITCompiled
     def _fail_to_import_from(self):
-        # pyre-ignore[21]: Intentionally testing non-existent import behavior.
         from math import non_existent_attr  # noqa: F401
 
     def test_import_from_failure(self) -> None:
@@ -1112,7 +1015,6 @@ class RaiseTests(unittest.TestCase):
         with self.assertRaises(ValueError) as exc:
             self._jitRaiseCause(ValueError(1), cause)
         self.assertIs(exc.exception.__cause__, cause)
-        # pyre-ignore[16]: Ignoring the possible None case here.
         self.assertEqual(f"{exc.exception.__cause__.__traceback__}", cause_tb_str)
 
     def test_reraise(self) -> None:
@@ -1234,6 +1136,23 @@ class UnpackSequenceTests(unittest.TestCase):
         self.assertEqual(self._unpack_arg(C(seq), "d"), 4)
         with self.assertRaisesRegex(ValueError, "not enough values to unpack"):
             self._unpack_arg(C(()), "a")
+
+    def test_unpack_sequence_iterable_refcount(self) -> None:
+        """Verify no reference leak when unpacking a custom iterable."""
+        import sys
+
+        class C:
+            def __init__(self, value):
+                self.value = value
+
+            def __iter__(self):
+                return iter(self.value)
+
+        obj = object()
+        base_refcount = sys.getrefcount(obj)
+        # Unpack via the slow path (custom iterable, not tuple/list).
+        self._unpack_arg(C((obj, 2, 3, 4)), "a")
+        self.assertEqual(sys.getrefcount(obj), base_refcount)
 
     def test_unpack_ex_with_iterable(self) -> None:
         class C:
@@ -1374,6 +1293,7 @@ class DictSubscrTests(unittest.TestCase):
         d = {}
         d[c] = 1
         with self.assertRaises(RuntimeError):
+            # pyrefly: ignore [bad-index]
             d[333]
 
     def test_unicode_custom_class(self) -> None:
@@ -1391,6 +1311,7 @@ class DictSubscrTests(unittest.TestCase):
         d = {}
         d[c] = 1
         with self.assertRaises(RuntimeError):
+            # pyrefly: ignore [bad-index]
             d["x"]
 
 
@@ -1453,6 +1374,26 @@ class KeywordOnlyArgTests(unittest.TestCase):
         self.assertEqual(self.f4(2, y=10, z=30, a=40, b=50), {"a": 40, "b": 50})
 
 
+class PositionalDefaultsWithKeywordCallTest(unittest.TestCase):
+    """Test that positional args with defaults are filled correctly
+    when the function is called with keyword arguments."""
+
+    @cinder_support.failUnlessJITCompiled
+    def f(self, a, b=2, c=3):
+        return (a, b, c)
+
+    def test_skip_default_with_kwarg(self) -> None:
+        self.assertEqual(self.f(1, b=20), (1, 20, 3))
+        self.assertEqual(self.f(1, c=30), (1, 2, 30))
+
+    def test_override_defaults_with_kwargs(self) -> None:
+        self.assertEqual(self.f(1, b=20, c=30), (1, 20, 30))
+
+    def test_missing_required_arg_with_kwargs(self) -> None:
+        with self.assertRaises(TypeError):
+            self.f(b=20, c=30)
+
+
 class ClassA:
     z = 100
     x = 41
@@ -1481,6 +1422,7 @@ class ClassB(ClassA):
         return super().cls_g(a=a)
 
     @property
+    # pyrefly: ignore [bad-override]
     def x(self):
         return super().x + 1
 
@@ -1510,9 +1452,11 @@ class SuperAccessTest(unittest.TestCase):
         self.assertEqual(ClassB().x_2arg, 42)
 
 
+@skip_test_if_oss("xxclassloader")
 class RegressionTests(StaticTestBase):
     # Detects an issue in the backend where the Store instruction generated 32-
     # bit memory writes for 64-bit constants.
+    @skip_if_ft("T250369696: Static Python not yet supported with free-threading")
     def test_store_of_64bit_immediates(self) -> None:
         codestr = """
             from __static__ import int64, box
@@ -1530,9 +1474,10 @@ class RegressionTests(StaticTestBase):
             self.assertTrue(testfunc())
 
             if compiles_after_one_call():
-                self.assertTrue(is_jit_compiled(testfunc))
+                self.assertTrue(is_jit_compiled_after_call(testfunc))
 
 
+@skip_test_if_oss("xxclassloader")
 @skip_unless_jit("Requires cinderjit module")
 class CinderJitModuleTests(StaticTestBase):
     def test_bad_disable(self) -> None:
@@ -1545,7 +1490,6 @@ class CinderJitModuleTests(StaticTestBase):
         def x():
             pass
 
-        # pyre-ignore[16]: Pyre doesn't know about __code__.
         self.assertEqual(x.__code__.co_flags & CO_SUPPRESS_JIT, CO_SUPPRESS_JIT)
 
     def test_jit_suppress_static(self) -> None:
@@ -1568,7 +1512,7 @@ class CinderJitModuleTests(StaticTestBase):
             self.assertFalse(is_jit_compiled(f))
 
             if compiles_after_one_call():
-                self.assertTrue(is_jit_compiled(g))
+                self.assertTrue(is_jit_compiled_after_call(g))
 
     @passIf(
         not cinderx.jit.is_hir_inliner_enabled(),
@@ -1593,208 +1537,17 @@ class CinderJitModuleTests(StaticTestBase):
             self.assertFalse(is_jit_compiled(f))
 
             if compiles_after_one_call():
-                self.assertTrue(is_jit_compiled(g))
+                self.assertTrue(is_jit_compiled_after_call(g))
                 self.assertEqual(cinderx.jit.get_num_inlined_functions(g), 1)
-
-    def test_max_code_size_slow(self) -> None:
-        # TODO(T240152676): Improve stability of this test
-        call_limit = cinderx.jit.get_compile_after_n_calls()
-        if call_limit is None or call_limit > 10000:
-            # Expecting the JIT to be compiling a bunch of code automatically
-            return
-
-        code = textwrap.dedent(
-            """
-            import cinderx.jit
-            for i in range(2000):
-                exec(f'''
-            def junk{i}(j):
-                j = j + 1
-                s = f'dogs {i} ' + str(j)
-                if s == '23':
-                    j += 2
-                return j*2+{i}
-            ''')
-            x = 0
-            for i in range(2000):
-                exec(f'x *= junk{i}(i)')
-            max_bytes = cinderx.jit.get_allocator_stats()["max_bytes"]
-            used_bytes = cinderx.jit.get_allocator_stats()["used_bytes"]
-            print(f'max_size: {max_bytes}')
-            print(f'used_size: {used_bytes}')
-        """
-        )
-        with tempfile.TemporaryDirectory() as tmp:
-            dirpath = Path(tmp)
-            codepath = dirpath / "mod.py"
-            codepath.write_text(code)
-
-            def run_test(
-                asserts_func: Callable[[list[str]], None], params: list[str]
-            ) -> None:
-                args = [sys.executable]
-                args.extend(params)
-                args.append("mod.py")
-                proc = subprocess.run(
-                    args,
-                    cwd=tmp,
-                    stdout=subprocess.PIPE,
-                    encoding=ENCODING,
-                    env=subprocess_env(),
-                )
-                self.assertEqual(proc.returncode, 0, proc)
-                actual_stdout = [x.strip() for x in proc.stdout.split("\n")]
-                asserts_func(actual_stdout)
-
-            def zero_asserts(actual_stdout: list[str]) -> None:
-                expected_stdout = "max_size: 0"
-                self.assertEqual(actual_stdout[0], expected_stdout)
-                self.assertIn("used_size", actual_stdout[1])
-                used_size = int(actual_stdout[1].split(" ")[1])
-                self.assertGreater(used_size, 0)
-
-            def onek_asserts(actual_stdout: list[str]) -> None:
-                expected_stdout = "max_size: 1024"
-                self.assertEqual(actual_stdout[0], expected_stdout)
-                self.assertIn("used_size", actual_stdout[1])
-                used_size = int(actual_stdout[1].split(" ")[1])
-                self.assertGreater(used_size, 1024)
-                # This is a bit fragile because it depends on what the initial 'zeroth'
-                # allocation is; we assume < 600K.
-                self.assertLess(used_size, 1024 * 600)
-
-            # Run the zero-assert tests with JitAuto=1000 to test "normal" behavior
-            # where we compile some code but don't have any limits to trip.
-            run_test(zero_asserts, ["-X", "jit-auto=1000", "-X", "jit-max-code-size=0"])
-            run_test(
-                zero_asserts,
-                [
-                    "-X",
-                    "jit-auto=1000",
-                    "-X",
-                    "jit-max-code-size=0",
-                    "-X",
-                    "jit-huge-pages=0",
-                ],
-            )
-            run_test(
-                zero_asserts,
-                [
-                    "-X",
-                    "jit-auto=1000",
-                    "-X",
-                    "jit-max-code-size=0",
-                    "-X",
-                    "jit-multiple-code-sections=1",
-                    "-X",
-                    "jit-hot-code-section-size=1048576",
-                    "-X",
-                    "jit-cold-code-section-size=1048576",
-                ],
-            )
-
-            # Run the onek-assert tests with JitAll so that we quickly trip the limit
-            # and stop compiling.
-            run_test(onek_asserts, ["-X", "jit-all", "-X", "jit-max-code-size=1024"])
-            run_test(
-                onek_asserts,
-                [
-                    "-X",
-                    "jit-all",
-                    "-X",
-                    "jit-max-code-size=1024",
-                    "-X",
-                    "jit-huge-pages=0",
-                ],
-            )
-            run_test(
-                onek_asserts,
-                [
-                    "-X",
-                    "jit-all",
-                    "-X",
-                    "jit-max-code-size=1024",
-                    "-X",
-                    "jit-multiple-code-sections=1",
-                    "-X",
-                    "jit-hot-code-section-size=1048576",
-                    "-X",
-                    "jit-cold-code-section-size=1048576",
-                ],
-            )
-
-    def test_max_code_size_fast(self) -> None:
-        code = textwrap.dedent(
-            """
-            import cinderx.jit
-            max_bytes = cinderx.jit.get_allocator_stats()["max_bytes"]
-            print(f'max_size: {max_bytes}')
-        """
-        )
-        with tempfile.TemporaryDirectory() as tmp:
-            dirpath = Path(tmp)
-            codepath = dirpath / "mod.py"
-            codepath.write_text(code)
-
-            def run_proc(size: str | None = None) -> str:
-                args = [sys.executable]
-                if size:
-                    args.extend(["-X", f"jit-max-code-size={size}"])
-                args.append("mod.py")
-
-                proc = subprocess.run(
-                    args,
-                    cwd=tmp,
-                    stdout=subprocess.PIPE,
-                    encoding=ENCODING,
-                    env=subprocess_env(),
-                )
-                self.assertEqual(proc.returncode, 0, proc)
-                actual_stdout = [x.strip() for x in proc.stdout.split("\n")]
-                return actual_stdout[0]
-
-            self.assertEqual(run_proc(), "max_size: 0")
-            self.assertEqual(run_proc("1234567"), "max_size: 1234567")
-            self.assertEqual(run_proc("1k"), "max_size: 1024")
-            self.assertEqual(run_proc("1K"), "max_size: 1024")
-            self.assertEqual(run_proc("1m"), "max_size: 1048576")
-            self.assertEqual(run_proc("1M"), "max_size: 1048576")
-            self.assertEqual(run_proc("1g"), "max_size: 1073741824")
-            self.assertEqual(run_proc("1G"), "max_size: 1073741824")
-
-            def run_proc(size: str) -> str:
-                args = [
-                    sys.executable,
-                    "-X",
-                    f"jit-max-code-size={size}",
-                    "mod.py",
-                ]
-                proc = subprocess.run(
-                    args,
-                    cwd=tmp,
-                    stderr=subprocess.PIPE,
-                    encoding=ENCODING,
-                    env=subprocess_env(),
-                )
-                self.assertEqual(proc.returncode, -6, proc)
-                return proc.stderr
-
-            self.assertIn(
-                "Invalid unsigned integer in input string: '-1'", run_proc("-1")
-            )
-            self.assertIn(
-                "Invalid unsigned integer in input string: '1.1'", run_proc("1.1")
-            )
-            self.assertIn("Invalid character in input string", run_proc("dogs"))
-            self.assertIn(
-                "Unsigned Integer overflow in input string: '1152921504606846976g'",
-                run_proc("1152921504606846976g"),
-            )
 
 
 class DeleteAttrTests(unittest.TestCase):
     @cinder_support.failUnlessJITCompiled
-    @failUnlessHasOpcodes("DELETE_ATTR")
+    # 3.16 (gh-145855) removed DELETE_ATTR; `del obj.foo` is now
+    # PUSH_NULL; STORE_ATTR (a NULL value performs the delete).
+    @failUnlessHasOpcodes(
+        "STORE_ATTR" if sys.version_info >= (3, 16) else "DELETE_ATTR"
+    )
     def del_foo(self, obj):
         del obj.foo
 
@@ -1805,6 +1558,7 @@ class DeleteAttrTests(unittest.TestCase):
         c = C()
         # pyre-ignore[16]: Intentionally testing dynamically defined attribute.
         c.foo = "bar"
+        # pyrefly: ignore [missing-attribute]
         self.assertEqual(c.foo, "bar")
         self.del_foo(c)
         with self.assertRaises(AttributeError):
@@ -2038,11 +1792,44 @@ class StoreSubscrTests(unittest.TestCase):
     def test_store_subscr_deopts_on_exception(self) -> None:
         class C:
             def __setitem__(self, key, value):
-                raise TestException("hello")
+                raise ExampleException("hello")
 
         obj = C()
-        with self.assertRaisesRegex(TestException, "hello"):
+        with self.assertRaisesRegex(ExampleException, "hello"):
             self.doit(obj, 1, 2)
+
+
+SUBSCR_OP = "BINARY_SUBSCR" if sys.version_info < (3, 14) else "BINARY_OP"
+
+
+class ListSubscrTests(unittest.TestCase):
+    @cinder_support.failUnlessJITCompiled
+    @failUnlessHasOpcodes(SUBSCR_OP)
+    def positive_index(self):
+        lst = [10, 20, 30]
+        return lst[1]
+
+    @cinder_support.failUnlessJITCompiled
+    @failUnlessHasOpcodes(SUBSCR_OP)
+    def negative_index(self):
+        lst = [10, 20, 30]
+        return lst[-1]
+
+    @cinder_support.failUnlessJITCompiled
+    @failUnlessHasOpcodes(SUBSCR_OP)
+    def out_of_bounds(self):
+        lst = [10, 20, 30]
+        return lst[5]
+
+    def test_positive_index(self) -> None:
+        self.assertEqual(self.positive_index(), 20)
+
+    def test_negative_index(self) -> None:
+        self.assertEqual(self.negative_index(), 30)
+
+    def test_out_of_bounds_raises_index_error(self) -> None:
+        with self.assertRaises(IndexError):
+            self.out_of_bounds()
 
 
 FORMAT_OP = "FORMAT_VALUE" if sys.version_info < (3, 14) else "FORMAT_SIMPLE"
@@ -2069,9 +1856,9 @@ class FormatValueTests(unittest.TestCase):
     def test_format_value_calls_str_with_exception(self) -> None:
         class C:
             def __str__(self):
-                raise TestException("no")
+                raise ExampleException("no")
 
-        with self.assertRaisesRegex(TestException, "no"):
+        with self.assertRaisesRegex(ExampleException, "no"):
             self.doit(C())
 
     def test_format_value_calls_repr(self) -> None:
@@ -2084,9 +1871,9 @@ class FormatValueTests(unittest.TestCase):
     def test_format_value_calls_repr_with_exception(self) -> None:
         class C:
             def __repr__(self):
-                raise TestException("no")
+                raise ExampleException("no")
 
-        with self.assertRaisesRegex(TestException, "no"):
+        with self.assertRaisesRegex(ExampleException, "no"):
             self.doit_repr(C())
 
 
@@ -2192,15 +1979,15 @@ class ListToTupleTests(unittest.TestCase):
 class CompareTests(unittest.TestCase):
     class Incomparable:
         def __lt__(self, other):
-            raise TestException("no lt")
+            raise ExampleException("no lt")
 
     class NonIterable:
         def __iter__(self):
-            raise TestException("no iter")
+            raise ExampleException("no iter")
 
     class NonIndexable:
         def __getitem__(self, idx):
-            raise TestException("no getitem")
+            raise ExampleException("no getitem")
 
     @cinder_support.failUnlessJITCompiled
     @failUnlessHasOpcodes("COMPARE_OP")
@@ -2230,21 +2017,21 @@ class CompareTests(unittest.TestCase):
     def test_compare_op(self) -> None:
         self.assertTrue(self.compare_op(3, 4))
         self.assertFalse(self.compare_op(3, 3))
-        with self.assertRaisesRegex(TestException, "no lt"):
+        with self.assertRaisesRegex(ExampleException, "no lt"):
             self.compare_op(self.Incomparable(), 123)
 
     def test_contains_op(self) -> None:
         self.assertTrue(self.compare_in(3, [1, 2, 3]))
         self.assertFalse(self.compare_in(4, [1, 2, 3]))
-        with self.assertRaisesRegex(TestException, "no iter"):
+        with self.assertRaisesRegex(ExampleException, "no iter"):
             self.compare_in(123, self.NonIterable())
-        with self.assertRaisesRegex(TestException, "no getitem"):
+        with self.assertRaisesRegex(ExampleException, "no getitem"):
             self.compare_in(123, self.NonIndexable())
         self.assertTrue(self.compare_not_in(4, [1, 2, 3]))
         self.assertFalse(self.compare_not_in(3, [1, 2, 3]))
-        with self.assertRaisesRegex(TestException, "no iter"):
+        with self.assertRaisesRegex(ExampleException, "no iter"):
             self.compare_not_in(123, self.NonIterable())
-        with self.assertRaisesRegex(TestException, "no getitem"):
+        with self.assertRaisesRegex(ExampleException, "no getitem"):
             self.compare_not_in(123, self.NonIndexable())
 
     def test_is_op(self) -> None:
@@ -2411,23 +2198,6 @@ class CopyDictWithoutKeysTest(unittest.TestCase):
             self.match_keys_and_rest(obj)
 
 
-def builtins_getter():
-    return _testcindercapi._pyeval_get_builtins()
-
-
-@passIf(AT_LEAST_312, "T214641462: _testcindercapi is only in 3.10.cinder")
-class GetBuiltinsTests(unittest.TestCase):
-    def test_get_builtins(self) -> None:
-        new_builtins = {}
-        new_globals = {
-            "_testcindercapi": _testcindercapi,
-            "__builtins__": new_builtins,
-        }
-        func = with_globals(new_globals)(builtins_getter)
-        force_compile(func)
-        self.assertIs(func(), new_builtins)
-
-
 def globals_getter():
     return globals()
 
@@ -2438,63 +2208,6 @@ class GetGlobalsTests(unittest.TestCase):
         func = with_globals(new_globals)(globals_getter)
         force_compile(func)
         self.assertIs(func(), new_globals)
-
-
-@passIf(AT_LEAST_312, "T214641462: _testcindercapi is only in 3.10.cinder")
-class MergeCompilerFlagTests(unittest.TestCase):
-    def make_func(self, src, compile_flags=0):
-        code = compile(src, "<string>", "exec", compile_flags)
-        glbls = {"_testcindercapi": _testcindercapi}
-        exec(code, glbls)
-        return glbls["func"]
-
-    def run_test(self, callee_src):
-        # By default, compile/PyEval_MergeCompilerFlags inherits the compiler
-        # flags from the code object of the calling function. We want to ensure
-        # that this works even if the function calling compile has no
-        # associated Python frame (i.e. it's jitted and we're running in
-        # shadow-frame mode).  We arrange a scenario like the following, where
-        # callee has a compiler flag that caller does not.
-        #
-        #   caller (doesn't have CO_FUTURE_BARRY_AS_BDFL)
-        #     |
-        #     +--- callee (has CO_FUTURE_BARRY_AS_BDFL)
-        #            |
-        #            +--- compile
-        flag = CO_FUTURE_BARRY_AS_BDFL
-        caller_src = """
-def func(callee):
-  return callee()
-"""
-        caller = self.make_func(caller_src)
-        # Force the caller to not be jitted so that it always has a Python
-        # frame
-        caller = jit_suppress(caller)
-        self.assertEqual(caller.__code__.co_flags & flag, 0)
-
-        callee = self.make_func(callee_src, CO_FUTURE_BARRY_AS_BDFL)
-        self.assertEqual(callee.__code__.co_flags & flag, flag)
-        force_compile(callee)
-        flags = caller(callee)
-        self.assertEqual(flags & flag, flag)
-
-    def test_merge_compiler_flags(self) -> None:
-        """Test that PyEval_MergeCompilerFlags retrieves the compiler flags of the
-        calling function."""
-        src = """
-def func():
-  return _testcindercapi._pyeval_merge_compiler_flags()
-"""
-        self.run_test(src)
-
-    def test_compile_inherits_compiler_flags(self) -> None:
-        """Test that compile inherits the compiler flags of the calling function."""
-        src = """
-def func():
-  code = compile('1 + 1', '<string>', 'eval')
-  return code.co_flags
-"""
-        self.run_test(src)
 
 
 class LoadMethodEliminationTests(unittest.TestCase):
@@ -2508,7 +2221,9 @@ class LoadMethodEliminationTests(unittest.TestCase):
         self.assertEqual(self.lme_test_func(), "1")
         self.assertEqual(self.lme_test_func(True), "1 flag")
         if compiles_after_one_call():
-            self.assertTrue(is_jit_compiled(LoadMethodEliminationTests.lme_test_func))
+            self.assertTrue(
+                is_jit_compiled_after_call(LoadMethodEliminationTests.lme_test_func)
+            )
 
 
 @passUnless(cinderx.jit.is_enabled(), "Tests functionality on cinderjit module")
@@ -2634,65 +2349,6 @@ class BadArgumentTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             cinderx.jit.lazy_compile(is_jit_compiled)
 
-    def test_set_max_code_size(self) -> None:
-        # Test with valid positive value
-        cinderx.jit.set_max_code_size(100_000_000)
-
-        # Test with zero (unlimited)
-        cinderx.jit.set_max_code_size(0)
-
-        # Test invalid types
-        with self.assertRaises(TypeError):
-            # pyre-ignore[6]: Intentional type error.
-            cinderx.jit.set_max_code_size(None)
-        with self.assertRaises(TypeError):
-            # pyre-ignore[6]: Intentional type error.
-            cinderx.jit.set_max_code_size("100M")
-        with self.assertRaises(TypeError):
-            # pyre-ignore[6]: Intentional type error.
-            cinderx.jit.set_max_code_size(100.5)
-
-        # Test negative value
-        with self.assertRaises(ValueError):
-            cinderx.jit.set_max_code_size(-1)
-        with self.assertRaises(ValueError):
-            cinderx.jit.set_max_code_size(-100)
-
-    def test_max_code_size_prevents_compilation(self) -> None:
-        # Setup: Get current allocator stats and set a very small limit
-        stats = cinderx.jit.get_allocator_stats()
-        if stats is None:
-            self.skipTest("Allocator stats not available")
-
-        # Save original limit to restore later
-        original_limit = cinderx.jit.get_allocator_stats()["max_bytes"]
-
-        try:
-            # Make the limit infinite
-            cinderx.jit.set_max_code_size(0)
-
-            # Create a function that should compile successfully
-            def small_func1():
-                return 42
-
-            force_compile(small_func1)
-            self.assertTrue(is_jit_compiled(small_func1))
-
-            # Set a very small limit to prevent further compilations
-            cinderx.jit.set_max_code_size(5)
-
-            # Create another function that should NOT compile due to limit
-            def small_func2():
-                return 43
-
-            with self.assertRaisesRegex(RuntimeError, "PYJIT_OVER_MAX_CODE_SIZE"):
-                force_compile(small_func2)
-
-            self.assertFalse(is_jit_compiled(small_func2))
-
-        finally:
-            cinderx.jit.set_max_code_size(original_limit)
-
     def test_jit_suppress(self) -> None:
         with self.assertRaises(TypeError):
             # pyre-ignore[6]: Intentional type error.
@@ -2713,6 +2369,165 @@ class BadArgumentTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             jit_unsuppress(is_jit_compiled)
 
+    @passIf(not cinderx.jit.is_enabled(), "only relevant when the JIT is enabled")
+    @skip_if_prefork(
+        "Prefork builds immortalize compiled functions, so the function never deopts"
+    )
+    def test_compiled_code_ref(self):
+        self.assertEqual(compiled_code_func.__dict__, {})
+        cinder_support.failUnlessJITCompiled(compiled_code_func)
+        # The compiled code is held as a logical reference, so compiling must not
+        # give the function a __dict__ or publish anything user-visible in it.
+        self.assertEqual(compiled_code_func.__dict__, {})
+        self.assertIsNotNone(cinderx.jit.get_compiled_function(compiled_code_func))
+        self.assertTrue(cinderx.jit.is_jit_compiled(compiled_code_func))
+        # Dropping the compiled code deopts the function.
+        cinderx.jit.force_uncompile(compiled_code_func)
+        self.assertFalse(cinderx.jit.is_jit_compiled(compiled_code_func))
+        self.assertIsNone(cinderx.jit.get_compiled_function(compiled_code_func))
+
+    @passIf(not cinderx.jit.is_enabled(), "only relevant when the JIT is enabled")
+    @skip_if_prefork(
+        "Prefork builds immortalize compiled functions, so the function never deopts"
+    )
+    def test_nested_compiled_code_ref(self):
+        # CompiledCode should be re-used for nested functions, even if the outer
+        # function is never compiled.  Nothing is published in either function's
+        # __dict__ to make that happen.
+        nested1 = compiled_code_func_with_nested()
+        cinder_support.failUnlessJITCompiled(nested1)
+        self.assertEqual(compiled_code_func_with_nested.__dict__, {})
+        self.assertEqual(nested1.__dict__, {})
+        code1 = id(cinderx.jit.get_compiled_function(nested1))
+        del nested1
+        nested2 = compiled_code_func_with_nested()
+        cinder_support.failUnlessJITCompiled(nested2)
+
+        self.assertEqual(code1, id(cinderx.jit.get_compiled_function(nested2)))
+
+    @passIf(not cinderx.jit.is_enabled(), "only relevant when the JIT is enabled")
+    def test_nested_compiled_code_globals_mismatch(self):
+        globals1 = {"NESTED_GLOBAL": 1}
+        factory1 = with_globals(globals1)(compiled_code_func_with_nested_global)
+        force_compile(factory1)
+        nested1 = factory1()
+        force_compile(nested1)
+        self.assertEqual(nested1(), 1)
+
+        globals2 = {"NESTED_GLOBAL": 2}
+        factory2 = with_globals(globals2)(compiled_code_func_with_nested_global)
+        force_compile(factory2)
+        nested2 = factory2()
+        self.assertEqual(nested2(), 2)
+
+    @passIf(not cinderx.jit.is_enabled(), "only relevant when the JIT is enabled")
+    def test_nested_compiled_code_builtins_mismatch(self):
+        globals_dict = {"__builtins__": {"len": lambda _: 1}}
+        factory1 = with_globals(globals_dict)(compiled_code_func_with_nested_builtin)
+        force_compile(factory1)
+        nested1 = factory1()
+        force_compile(nested1)
+        self.assertEqual(nested1(), 1)
+
+        globals_dict["__builtins__"] = {"len": lambda _: 2}
+        factory2 = with_globals(globals_dict)(compiled_code_func_with_nested_builtin)
+        force_compile(factory2)
+        nested2 = factory2()
+        self.assertEqual(nested2(), 2)
+
+    @passIf(not cinderx.jit.is_enabled(), "only relevant when the JIT is enabled")
+    @skip_if_prefork(
+        "Prefork builds immortalize compiled functions, so the function never deopts"
+    )
+    def test_nested_compiled_code_ref_outer_destroyed(self):
+        d = {}
+        exec(
+            textwrap.dedent("""
+def compiled_code_func_with_nested():
+    def nested():
+        return 42
+
+    return nested
+"""),
+            d,
+            d,
+        )
+
+        # If outer function is destroyed functions essentially become their own
+        # isolated units as no more nested functions can be created
+        nested = d["compiled_code_func_with_nested"]()
+        del d
+        cinder_support.failUnlessJITCompiled(nested)
+        self.assertIsNotNone(cinderx.jit.get_compiled_function(nested))
+
+    @skip_if_prefork(
+        "Prefork builds immortalize compiled functions, so there is no "
+        "CompiledFunction to look up"
+    )
+    def test_compiled_func_leaves_dict_clean_for_pickle_and_copy(self) -> None:
+        # Per-process machine code must not leak into a JIT'd function's __dict__,
+        # where it would be serialized along with the function.  The JIT holds the
+        # CompiledFunction as a logical reference instead, so the dict stays empty
+        # and pickling/copying the function needs no special handling.
+        def local_func(x: int) -> int:
+            return x + 1
+
+        force_compile(local_func)
+        self.assertTrue(cinderx.jit.is_jit_compiled(local_func))
+        self.assertEqual(local_func.__dict__, {})
+
+        compiled = cinderx.jit.get_compiled_function(local_func)
+        self.assertEqual(type(compiled).__name__, "CompiledFunction")
+
+        # The CompiledFunction is still reachable through the debug accessor, and
+        # still reduces to a None placeholder so it can never block a pickle.
+        reconstructor, args = compiled.__reduce__()
+        self.assertEqual(args, ())
+        self.assertIsNone(cast(Any, reconstructor)())
+        self.assertIs(
+            getattr(
+                sys.modules[reconstructor.__module__],
+                cast(Any, reconstructor).__qualname__,
+            ),
+            reconstructor,
+        )
+        self.assertIsNone(copy.deepcopy(compiled))
+
+
+# `_compile` is picked for having a lengthy compile time, which is also what
+# puts it near the JIT's own size limits: free-threaded aarch64 emits enough
+# extra pointer-tagging work to push its LIR past the default
+# jit-max-lir-blocks of 5000.  The limit is only settable at startup, so the
+# check runs in a fresh interpreter with the limit raised rather than being
+# skipped on the configurations that trip it.
+_MAX_LIR_BLOCKS_LIMIT = "jit-max-lir-blocks=100000"
+
+_COMPILE_TIME = """
+import warnings
+
+import cinderx.jit
+
+with warnings.catch_warnings():
+    # sre_compile is deprecated.
+    warnings.filterwarnings("ignore", category=DeprecationWarning)
+    try:
+        from sre_compile import _compile
+    except ImportError:
+        # sre_compile was removed in 3.15, re._compiler is the same func as it
+        # was before.
+        from re._compiler import _compile
+
+cinderx.jit.force_compile(_compile)
+
+# These only hold if the function takes more than 1ms to compile.  Use the
+# output from PYTHONJITDEBUG=1 to see if that is the case.
+assert cinderx.jit.get_compilation_time() > 0, "no compilation time reported"
+assert (
+    cinderx.jit.get_function_compilation_time(_compile) > 0
+), "no per-function compilation time reported"
+print("COMPILE_TIME_OK")
+"""
+
 
 @passUnless(cinderx.jit.is_enabled(), "Testing the cinderjit module itself")
 class CompileTimeTests(unittest.TestCase):
@@ -2721,27 +2536,134 @@ class CompileTimeTests(unittest.TestCase):
     """
 
     def test_compile_time(self) -> None:
-        # This function is known to have a lengthy compile time.
-        try:
-            # pyre-ignore[21]: Pyre doesn't know about this function.
-            from sre_compile import _compile
-        except ImportError:
-            # sre_compile was removed in 3.15, re._compiler is the same func
-            # as it was before.
-            # pyre-ignore[21]: Pyre doesn't know about this function.
-            from re._compiler import _compile
+        proc = subprocess.run(
+            [sys.executable, "-X", _MAX_LIR_BLOCKS_LIMIT, "-c", _COMPILE_TIME],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            encoding=ENCODING,
+            env=subprocess_env(),
+        )
+        self.assertEqual(
+            proc.returncode,
+            0,
+            f"child failed\nstdout={proc.stdout!r}\nstderr={proc.stderr!r}",
+        )
+        self.assertIn("COMPILE_TIME_OK", proc.stdout)
 
-        # It's probably already compiled as part of regular startup, but just in case
-        # let's make sure.
-        #
-        # pyre-ignore[16]: Pyre doesn't know about this function.
-        force_compile(_compile)
 
-        # This will only work if the function takes more than 1ms to compile.  Use the
-        # output from PYTHONJITDEBUG=1 to see if that is the case.
-        self.assertGreater(cinderx.jit.get_compilation_time(), 0)
-        # pyre-ignore[16]: Pyre doesn't know about this function.
-        self.assertGreater(cinderx.jit.get_function_compilation_time(_compile), 0)
+class SimplifyCompileTimeTests(unittest.TestCase):
+    @staticmethod
+    def _make_chain(kind: str, n: int) -> Callable[..., int]:
+        # Distinct args per check so nothing collapses the N isinstance sites.
+        args = ", ".join(f"a{i}" for i in range(n))
+        lines = [f"def f(acc, {args}):"]
+        for i in range(n):
+            cond = f"isinstance(a{i}, str)" if kind == "isinstance" else f"a{i}"
+            lines.append(f"    if {cond}:")
+            lines.append(f"        acc += {i}")
+        lines.append("    return acc")
+        ns: dict[str, object] = {}
+        exec(compile("\n".join(lines), f"<{kind}_{n}>", "exec"), ns, ns)
+        # pyre-ignore[7]: exec-defined function.
+        return ns["f"]
+
+    def test_isinstance_if_chain_compiles_in_linear_time(self) -> None:
+        """
+        Regression test for a quadratic blowup in the HIR Simplify pass: an
+        `if isinstance(x, T):` check made the pass recompute whole-function
+        liveness, and it ran once per such check, so a function with N of
+        them compiled in ~O(N^2).
+
+        Wall-clock thresholds are too fragile here (sanitized/emulated CI hosts
+        run much slower), so we compare the compile time of an isinstance-if
+        chain against a size-matched `if x:` chain: same CFG, but the baseline
+        never triggers the isinstance simplification.  After the fix the two
+        scale together (ratio ~2); before it the isinstance chain was ~15-30x
+        slower, growing with N.
+        """
+
+        n = 128
+        isinstance_fn = self._make_chain("isinstance", n)
+        baseline_fn = self._make_chain("baseline", n)
+
+        force_compile(isinstance_fn)
+        force_compile(baseline_fn)
+
+        isinstance_ms = cinderx.jit.get_function_compilation_time(isinstance_fn)
+        baseline_ms = cinderx.jit.get_function_compilation_time(baseline_fn)
+
+        # The baseline must be large enough for the ratio below to be meaningful.
+        self.assertGreater(baseline_ms, 0, "baseline compile time too small to measure")
+        # Same-size CFGs, so absent the quadratic bug the isinstance chain is
+        # within a small constant factor of the baseline (~2x). Guard well below
+        # the pre-fix ratio (~30x at this size).
+        self.assertLess(
+            isinstance_ms,
+            6 * baseline_ms,
+            f"isinstance-if chain compiled in {isinstance_ms}ms vs {baseline_ms}ms "
+            f"for a size-matched baseline "
+            f"({isinstance_ms / max(baseline_ms, 1):.1f}x); the Simplify pass may "
+            f"have regressed to recomputing liveness per isinstance check.",
+        )
+
+
+@passUnless(cinderx.jit.is_enabled(), "Testing the cinderjit module itself")
+class RenamedNestedCompileTests(unittest.TestCase):
+    @staticmethod
+    def _make_factory() -> Callable[[], Callable[[int], int]]:
+        # A nested function big enough that one compile of it is measurable,
+        # renamed away from its code object the way functools.update_wrapper
+        # does.  Built with exec so every instance shares one code object.
+        lines = [
+            "def factory():",
+            "    def nested(a):",
+            *[f"        a = a + {i}" for i in range(200)],
+            "        return a",
+            "    nested.__qualname__ = 'renamed_nested'",
+            "    nested.__module__ = 'renamed_module'",
+            "    return nested",
+        ]
+        ns: dict[str, object] = {}
+        exec(compile("\n".join(lines), "<renamed_nested>", "exec"), ns, ns)
+        # pyre-ignore[7]: exec-defined function.
+        return ns["factory"]
+
+    def test_renamed_nested_function_is_compiled_once(self) -> None:
+        """
+        The JIT parks a nested function's compile on its code object so the next
+        instance reuses it instead of recompiling.  A nested function that has
+        been renamed has to get that too: functools.singledispatchmethod builds
+        a fresh instance of one on every attribute access and runs
+        update_wrapper over it, so without this every access recompiles and the
+        process spends all its time in the JIT.
+        """
+        factory = self._make_factory()
+
+        before = cinderx.jit.get_compilation_time()
+        force_compile(factory())
+        one_compile_ms = cinderx.jit.get_compilation_time() - before
+        self.assertGreater(
+            one_compile_ms, 0, "nested function compile time too small to measure"
+        )
+
+        # Each of these drops the previous instance, which is what used to take
+        # the compile with it.
+        before = cinderx.jit.get_compilation_time()
+        for _ in range(100):
+            force_compile(factory())
+        hundred_more_ms = cinderx.jit.get_compilation_time() - before
+
+        # Reusing the compile costs nothing, so those 100 instances should add
+        # up to well under a single compile.  The allowance is for compiles of
+        # unrelated functions landing in the window, which free-threaded builds
+        # can do on the background worker.  Before the fix this was ~70x.
+        self.assertLess(
+            hundred_more_ms,
+            5 * one_compile_ms,
+            f"100 further instances of a renamed nested function cost "
+            f"{hundred_more_ms}ms, versus {one_compile_ms}ms for one compile; "
+            f"the JIT is recompiling it once per instance.",
+        )
 
 
 @passUnless(cinderx.jit.is_enabled(), "Testing the cinderjit module itself")
@@ -2754,6 +2676,111 @@ class LocalsBuiltinTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             force_compile(foo)
         self.assertFalse(is_jit_compiled(foo))
+
+
+@passUnless(cinderx.jit.is_enabled(), "Testing the cinderjit module itself")
+class GetCompiledFunctionTests(unittest.TestCase):
+    def test_returns_compile_for_compiled_function(self) -> None:
+        def foo(a: int, b: int) -> int:
+            return a + b
+
+        force_compile(foo)
+        self.assertTrue(is_jit_compiled(foo))
+        try:
+            compiled = cinderx.jit.get_compiled_function(foo)
+            self.assertIsNotNone(compiled)
+            self.assertEqual(type(compiled).__name__, "CompiledFunction")
+            # Handing back the same object every time is what makes this usable
+            # for observing compile reuse.
+            self.assertIs(compiled, cinderx.jit.get_compiled_function(foo))
+            self.assertEqual(foo(3, 4), 7)
+        finally:
+            # The compile is keyed off the code object, which outlives the test,
+            # so evict it to keep repeated runs stable.
+            force_uncompile(foo)
+
+    def test_returns_none_when_not_compiled(self) -> None:
+        def foo(a: int, b: int) -> int:
+            return a + b
+
+        force_compile(foo)
+        self.assertIsNotNone(cinderx.jit.get_compiled_function(foo))
+
+        force_uncompile(foo)
+        self.assertFalse(is_jit_compiled(foo))
+        self.assertIsNone(cinderx.jit.get_compiled_function(foo))
+
+    def test_rejects_non_function(self) -> None:
+        with self.assertRaises(TypeError):
+            # pyre-ignore: Argument `Literal[42]` is not assignable to parameter
+            cinderx.jit.get_compiled_function(42)
+
+
+@passUnless(cinderx.jit.is_enabled(), "Tests JIT compile lifetime")
+@skip_if_prefork(
+    "Prefork builds immortalize compiled functions, so the function never deopts"
+)
+class CodeChangeDeoptTests(unittest.TestCase):
+    """Changing a compiled function's code deopts it.
+
+    A JIT-compiled function owns a reference to its CompiledFunction, taken when
+    it registered and handed back when it deopts.  Changing `__code__` deopts
+    through the one path where the compiled entry point - the marker for which
+    compile that reference is against - is about to stop matching, so these
+    tests pin down that the reference is neither stranded nor dropped twice.
+    """
+
+    @staticmethod
+    def _compile_addition() -> tuple[Callable[[int, int], int], Any]:
+        """Compile an adding function, returning it and its compile."""
+
+        def foo(a: int, b: int) -> int:
+            return a + b
+
+        force_compile(foo)
+        compiled = cinderx.jit.get_compiled_function(foo)
+        assert compiled is not None
+        return foo, compiled
+
+    def test_code_change_hands_the_compile_back(self) -> None:
+        # Suppressed so that changing to it deopts and stops there, rather than
+        # immediately registering `foo` on a compile for the new code.
+        @jit_suppress
+        def multiply(a: int, b: int) -> int:
+            return a * b
+
+        foo, compiled = self._compile_addition()
+        held = sys.getrefcount(compiled)
+
+        foo.__code__ = multiply.__code__
+        self.assertFalse(is_jit_compiled(foo))
+        self.assertEqual(foo(3, 4), 12)
+        self.assertEqual(sys.getrefcount(compiled), held - 1)
+
+        # And there is nothing left over to hand back a second time.
+        del foo
+        gc.collect()
+        self.assertEqual(sys.getrefcount(compiled), held - 1)
+
+    def test_recompiling_after_a_code_change_takes_a_new_compile(self) -> None:
+        def multiply(a: int, b: int) -> int:
+            return a * b
+
+        foo, compiled = self._compile_addition()
+        held = sys.getrefcount(compiled)
+
+        foo.__code__ = multiply.__code__
+        force_compile(foo)
+        self.assertTrue(is_jit_compiled(foo))
+        self.assertEqual(foo(3, 4), 12)
+
+        recompiled = cinderx.jit.get_compiled_function(foo)
+        self.assertIsNotNone(recompiled)
+        self.assertIsNot(recompiled, compiled)
+        # The old compile was given up at the deopt, not carried over to here.
+        self.assertEqual(sys.getrefcount(compiled), held - 1)
+
+        force_uncompile(foo)
 
 
 if __name__ == "__main__":

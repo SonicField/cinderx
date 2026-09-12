@@ -1,5 +1,6 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
+import dis
 import opcode
 import sys
 import types
@@ -7,7 +8,7 @@ import unittest
 from typing import Callable
 
 import cinderx.test_support as cinder_support
-from cinderx.test_support import passUnless
+from cinderx.test_support import passUnless, undo_fail_decorators
 
 
 def one():
@@ -22,9 +23,16 @@ def _reassemble_for_jit(ops, shell_function):
     and fail_if_deopt. The shell function is modified.
     """
     code_list = []
+    cache_op = opcode.opmap["CACHE"]
     for op, arg in ops:
         code_list.append(opcode.opmap[op])
         code_list.append(arg)
+        # Emit the inline-cache (CACHE) code units the runtime expects after
+        # this opcode. The count is version-dependent (e.g. RESUME gained an
+        # inline cache in 3.15), so query it dynamically rather than hardcoding.
+        for _ in range(dis._get_cache_size(op)):
+            code_list.append(cache_op)
+            code_list.append(0)
     co = shell_function.__code__
     new_code = types.CodeType(
         co.co_argcount,
@@ -108,7 +116,7 @@ def build_template():
 
 
 @passUnless(sys.version_info >= (3, 14), "Python 3.14+ only")
-class Python314Bytecodes(unittest.TestCase, cinder_support.AssertBytecodeContainsMixin):
+class Python314Bytecodes(cinder_support.CinderXTestCase):
     def test_LOAD_SMALL_INT(self):
         @cinder_support.fail_if_deopt
         @cinder_support.failUnlessJITCompiled
@@ -382,7 +390,6 @@ class Python314Bytecodes(unittest.TestCase, cinder_support.AssertBytecodeContain
         self.assertBytecodeContains(x, "FORMAT_SIMPLE")
 
     def test_BUILD_INTERPOLATION(self):
-        # pyre-ignore[21]: Could not find a module corresponding to import `string.templatelib`.
         from string.templatelib import Interpolation
 
         t = interpolation()
@@ -405,6 +412,14 @@ class Python314Bytecodes(unittest.TestCase, cinder_support.AssertBytecodeContain
             assert a
 
         x(True)
+
+        # pytest overwrites assert statements and destroys LOAD_COMMON_CONSTANT
+        # bytecodes.
+        inner_x = undo_fail_decorators(x)
+        for inst in dis.get_instructions(inner_x):
+            if inst.opname == "LOAD_GLOBAL" and "pytest" in inst.argval:
+                return
+
         self.assertBytecodeContains(x, "LOAD_COMMON_CONSTANT")
 
     def test_LOAD_SPECIAL(self):

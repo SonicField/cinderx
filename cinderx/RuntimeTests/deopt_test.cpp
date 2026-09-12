@@ -20,22 +20,22 @@
 #include "cinderx/Jit/context.h"
 #include "cinderx/Jit/deopt.h"
 // NOLINTNEXTLINE(facebook-unused-include-check)
+#include "internal/pycore_frame.h"
+
 #include "cinderx/Jit/frame.h"
 #include "cinderx/Jit/hir/builder.h"
 #include "cinderx/Jit/hir/hir.h"
 #include "cinderx/Jit/hir/printer.h"
 #include "cinderx/RuntimeTests/fixtures.h"
 
-#if PY_VERSION_HEX >= 0x030C0000
-#include "internal/pycore_frame.h"
-#endif
-
 #include <algorithm>
+#include <bit>
 
-using namespace jit;
-using namespace jit::hir;
-using namespace jit::codegen;
-using jit::kPointerSize;
+namespace cinderx {
+
+using namespace cinderx::jit;
+using namespace cinderx::jit::hir;
+using namespace cinderx::jit::codegen;
 
 class ReifyFrameTest : public RuntimeTest {};
 
@@ -44,35 +44,13 @@ static inline Ref<> runInInterpreterViaReify(
     const DeoptMetadata& dm,
     const DeoptFrameMetadata& dfm,
     uint64_t regs[NUM_GP_REGS]) {
-#if PY_VERSION_HEX < 0x030C0000
-  PyThreadState* tstate = PyThreadState_Get();
-  PyCodeObject* code =
-      reinterpret_cast<PyCodeObject*>(PyFunction_GetCode(func));
-  auto frame = Ref<PyFrameObject>::steal(
-      PyFrame_New(tstate, code, PyFunction_GetGlobals(func), nullptr));
-
-  reifyFrame(frame, dm, dfm, regs);
-
-  return Ref<>::steal(PyEval_EvalFrame(frame));
-#else
   PyThreadState* tstate = PyThreadState_Get();
   BorrowedRef<PyCodeObject> code = PyFunction_GetCode(func);
   _PyInterpreterFrame* interp_frame =
-      Cix_PyThreadState_PushFrame(tstate, jit::jitFrameGetSize(code));
-  jit::jitFrameInit(
-      tstate,
-      interp_frame,
-      func,
-      code,
-      0,
-      FRAME_OWNED_BY_THREAD,
-      nullptr,
-      makeFrameReifier(code));
-  if (getConfig().frame_mode == FrameMode::kLightweight) {
-    jit::jitFramePopulateFrame(interp_frame);
-    jit::jitFrameRemoveReifier(interp_frame);
-  }
-  reifyFrame(interp_frame, dm, dfm, regs);
+      Cix_PyThreadState_PushFrame(tstate, code->co_framesize);
+  jitFrameInit(
+      tstate, interp_frame, func, code, 0, FRAME_OWNED_BY_THREAD, nullptr);
+  reifyFrame(interp_frame, dm, dfm, MemoryView{regs});
   // If we're at the start of the function, push IP past RESUME instruction
 #if PY_VERSION_HEX >= 0x030E0000
   if (interp_frame->instr_ptr == _PyCode_CODE(code)) {
@@ -89,7 +67,6 @@ static inline Ref<> runInInterpreterViaReify(
   _Py_Instrument(frameCode(interp_frame), tstate->interp);
 #endif
   return Ref<>::steal(PyEval_EvalFrame(frame_obj));
-#endif
 }
 
 TEST_F(ReifyFrameTest, ReifyAtEntry) {
@@ -170,15 +147,15 @@ def test(a, b):
   dfm.localsplus = {0, 1};
   dfm.stack = {0, 1};
   // Resuming at BINARY_OP +
-#if PY_VERSION_HEX >= 0x030E0000
+#if PY_VERSION_HEX >= 0x030F0000
+  // Skip RESUME, LOAD_FAST_BORROW_LOAD_FAST_BORROW
+  dfm.cause_instr_idx = BCOffset{6};
+#elif PY_VERSION_HEX >= 0x030E0000
   // Skip RESUME, LOAD_FAST_BORROW_LOAD_FAST_BORROW
   dfm.cause_instr_idx = BCOffset{4};
-#elif PY_VERSION_HEX >= 0x030C0000
+#else
   // Skip RESUME, LOAD_FAST, LOAD_FAST
   dfm.cause_instr_idx = BCOffset{6};
-#else
-  // Skip LOAD_FAST, LOAD_FAST
-  dfm.cause_instr_idx = BCOffset{4};
 #endif
   dm.frame_meta = {std::move(dfm)};
 
@@ -227,15 +204,15 @@ def test(a, b):
   dfm.localsplus = {0, 1};
   dfm.stack = {0, 1};
   // Resuming at BINARY_OP +
-#if PY_VERSION_HEX >= 0x030E0000
+#if PY_VERSION_HEX >= 0x030F0000
+  // Skip RESUME, LOAD_FAST_BORROW_LOAD_FAST_BORROW
+  dfm.cause_instr_idx = BCOffset{6};
+#elif PY_VERSION_HEX >= 0x030E0000
   // Skip RESUME, LOAD_FAST_BORROW_LOAD_FAST_BORROW
   dfm.cause_instr_idx = BCOffset{4};
-#elif PY_VERSION_HEX >= 0x030C0000
+#else
   // Skip RESUME, LOAD_FAST, LOAD_FAST
   dfm.cause_instr_idx = BCOffset{6};
-#else
-  // Skip LOAD_FAST, LOAD_FAST
-  dfm.cause_instr_idx = BCOffset{4};
 #endif
   dm.frame_meta = {std::move(dfm)};
 
@@ -292,10 +269,10 @@ def test(num):
   DeoptFrameMetadata dfm;
   dfm.localsplus = {0, 1};
   dfm.stack = {0, 2};
-#if PY_VERSION_HEX >= 0x030C0000
-  dfm.cause_instr_idx = BCOffset{10};
+#if PY_VERSION_HEX >= 0x030F0000
+  dfm.cause_instr_idx = BCOffset{12};
 #else
-  dfm.cause_instr_idx = BCOffset{8};
+  dfm.cause_instr_idx = BCOffset{10};
 #endif
   dm.frame_meta = {std::move(dfm)};
 
@@ -306,6 +283,8 @@ def test(num):
   ASSERT_EQ(PyLong_AsLong(result), 120);
 }
 
+#ifdef ENABLE_INTERPRETER_LOOP
+// Reification resumes Static Python bytecode in the CinderX interpreter.
 TEST_F(ReifyFrameTest, ReifyStaticCompareWithBool) {
   const char* src = R"(
 import cinderx
@@ -337,18 +316,19 @@ def test(x, y):
 
     PyCodeObject* code =
         reinterpret_cast<PyCodeObject*>(PyFunction_GetCode(func));
-#if PY_VERSION_HEX <= 0x030C0000
-    const int jump_index = 18;
-    const int pop_instr_offset = 4;
-#elif PY_VERSION_HEX < 0x030E0000
+#if PY_VERSION_HEX < 0x030E0000
     const int jump_index = 32;
     const int pop_instr_offset = 4;
-#else
+#elif PY_VERSION_HEX < 0x030F0000
     const int jump_index = 42;
     const int pop_instr_offset = 2;
+#else
+    const int jump_index = 44;
+    const int pop_instr_offset = 2;
 #endif
+    auto code_bytes = Ref<>::steal(PyCode_GetCode(code));
     ASSERT_EQ(
-        PyBytes_AS_STRING(PyCode_GetCode(code))[jump_index + pop_instr_offset],
+        PyBytes_AS_STRING(code_bytes.get())[jump_index + pop_instr_offset],
         (char)POP_JUMP_IF_ZERO);
 
     DeoptMetadata dm;
@@ -368,6 +348,67 @@ def test(x, y):
     ASSERT_EQ(result, i ? Py_True : Py_False);
   }
 }
+#endif
+
+TEST_F(ReifyFrameTest, ReadOwnedDoubleReinterpretsBits) {
+  uint64_t regs[NUM_GP_REGS] = {};
+
+  const double expected = 3.5;
+  regs[ARGUMENT_REGS[0].loc] = std::bit_cast<uint64_t, double>(expected);
+
+  LiveValue value{
+      PhyLocation{ARGUMENT_REGS[0].loc},
+      RefKind::kUncounted,
+      ValueKind::kDouble,
+      LiveValue::Source::kUnknown};
+
+  MemoryView mem{regs};
+  Ref<> result = mem.readOwned(value);
+
+  ASSERT_NE(result, nullptr);
+  ASSERT_TRUE(PyFloat_CheckExact(result));
+  // A buggy uint64_t -> double conversion would turn the IEEE-754 bit pattern
+  // of 3.5 into a ~4.6e18 float, verify we get the same 3.5 back.
+  ASSERT_EQ(PyFloat_AsDouble(result), expected);
+}
+
+TEST_F(ReifyFrameTest, ReadOwnedBoxesEachPrimitiveOnlyOnce) {
+  uint64_t regs[NUM_GP_REGS] = {};
+  regs[ARGUMENT_REGS[0].loc] = std::bit_cast<uint64_t, double>(3.5);
+  regs[ARGUMENT_REGS[1].loc] = std::bit_cast<uint64_t, double>(3.5);
+
+  LiveValue value{
+      PhyLocation{ARGUMENT_REGS[0].loc},
+      RefKind::kUncounted,
+      ValueKind::kDouble,
+      LiveValue::Source::kUnknown};
+  // A distinct live value that happens to hold the same bits.
+  LiveValue other{
+      PhyLocation{ARGUMENT_REGS[1].loc},
+      RefKind::kUncounted,
+      ValueKind::kDouble,
+      LiveValue::Source::kUnknown};
+
+  MemoryView mem{regs};
+
+  // Frame-state slots backed by one live value held a single object in the
+  // interpreter, so they have to reify to a single object here too.
+  Ref<> first = mem.readOwned(value);
+  Ref<> second = mem.readOwned(value);
+  ASSERT_NE(first, nullptr);
+  EXPECT_EQ(first, second);
+
+  // Distinct live values stay distinct, equal bits or not.
+  Ref<> unrelated = mem.readOwned(other);
+  ASSERT_NE(unrelated, nullptr);
+  EXPECT_NE(first, unrelated);
+  EXPECT_EQ(PyFloat_AsDouble(unrelated), 3.5);
+
+  // The objects outlive the references handed out to the frame.
+  first.reset();
+  second.reset();
+  EXPECT_EQ(PyFloat_AsDouble(mem.readOwned(value)), 3.5);
+}
 
 class DeoptStressTest : public RuntimeTest {
  public:
@@ -379,10 +420,8 @@ class DeoptStressTest : public RuntimeTest {
     Ref<PyFunctionObject> funcobj(compileAndGet(src, "test"));
     ASSERT_NE(funcobj, nullptr);
     std::unique_ptr<Function> irfunc(buildHIR(funcobj));
-    irfunc->reifier =
-        ThreadedRef<>::create(makeFrameReifier(funcobj->func_code).get());
     auto guards = insertDeopts(*irfunc);
-    jit::Compiler::runPasses(*irfunc, PassConfig::kAllExceptInliner);
+    Compiler::runPasses(*irfunc, PassConfig::kAllExceptInliner);
     auto delete_one_deopt = [&](const DeoptMetadata& deopt_meta) {
       auto it = guards.find(deopt_meta.nonce);
       JIT_CHECK(it != guards.end(), "No guard for nonce {}", deopt_meta.nonce);
@@ -393,7 +432,8 @@ class DeoptStressTest : public RuntimeTest {
     Context* ngen_ctx = getContext();
     auto pyfunc = reinterpret_cast<PyFunctionObject*>(funcobj.get());
     while (!guards.empty()) {
-      NativeGenerator gen(irfunc.get());
+      NativeGeneratorFactory factory;
+      NativeGenerator gen(irfunc.get(), factory);
       auto jitfunc = reinterpret_cast<vectorcallfunc>(gen.getVectorcallEntry());
       ASSERT_NE(jitfunc, nullptr);
       ngen_ctx->setGuardFailureCallback(delete_one_deopt);
@@ -412,12 +452,12 @@ class DeoptStressTest : public RuntimeTest {
  private:
   std::unordered_map<int, Instr*> insertDeopts(Function& irfunc) {
     std::unordered_map<int, Instr*> guards;
-    Register* reg = irfunc.env.AllocateRegister();
+    Register* reg = irfunc.env.allocateRegister();
     int next_nonce{0};
     for (auto& block : irfunc.cfg.blocks) {
       bool has_periodic_tasks =
           std::any_of(block.begin(), block.end(), [](auto& instr) {
-            return instr.IsRunPeriodicTasks();
+            return instr.isRunPeriodicTasks();
           });
       if (has_periodic_tasks) {
         // skip blocks that depend on the contents of the eval breaker
@@ -429,9 +469,9 @@ class DeoptStressTest : public RuntimeTest {
           // Nothing defines reg, so it will be null initialized and the guard
           // will fail, thus causing deopt.
           auto guard = Guard::create(reg);
-          guard->InsertBefore(instr);
+          guard->insertBefore(instr);
           auto nonce = next_nonce++;
-          guard->set_nonce(nonce);
+          guard->setNonce(nonce);
           guards[nonce] = guard;
         }
       }
@@ -456,14 +496,15 @@ class DeoptStressTest : public RuntimeTest {
     }
     std::cerr << '\n';
     std::cerr << "HIR of failed function:\n";
-    std::cerr << HIRPrinter().ToString(irfunc) << '\n';
+    std::cerr << HIRPrinter().toString(irfunc) << '\n';
     std::cerr << "Disassembly:\n";
     // Recompile so we get the annotated disassembly
     bool old_dump_asm = true;
-    std::swap(jit::getMutableConfig().log.dump_asm, old_dump_asm);
-    NativeGenerator gen(&irfunc);
+    std::swap(getMutableConfig().log.dump_asm, old_dump_asm);
+    NativeGeneratorFactory factory;
+    NativeGenerator gen(&irfunc, factory);
     gen.getVectorcallEntry();
-    jit::getMutableConfig().log.dump_asm = old_dump_asm;
+    getMutableConfig().log.dump_asm = old_dump_asm;
     std::cerr << '\n';
     std::cerr << "Python traceback: ";
     PyErr_Print();
@@ -666,6 +707,26 @@ def test(n):
   runTest(src, args, 1, result);
 }
 
+// A module attribute that resolves to a type is pinned with a GuardIs by the
+// Simplify pass. Exercise that guard (and its Snapshot) under deopt stress.
+TEST_F(DeoptStressTest, CallModuleType) {
+  const char* src = R"(
+import collections
+
+def test(n):
+  acc = 0
+  for x in range(1, n + 1):
+    d = collections.OrderedDict()
+    d[x] = x
+    acc += d[x]
+  return acc
+)";
+  auto arg1 = Ref<>::steal(PyLong_FromLong(5));
+  PyObject* args[] = {arg1};
+  auto result = Ref<>::steal(PyLong_FromLong(15));
+  runTest(src, args, 1, result);
+}
+
 TEST_F(DeoptStressTest, CallDescriptor) {
   const char* src = R"(
 class Multiplier:
@@ -828,3 +889,5 @@ TEST_F(DeoptTest, ValueKind) {
   EXPECT_EQ(deoptValueKind(TLong), ValueKind::kObject);
   EXPECT_EQ(deoptValueKind(TNullptr), ValueKind::kObject);
 }
+
+} // namespace cinderx

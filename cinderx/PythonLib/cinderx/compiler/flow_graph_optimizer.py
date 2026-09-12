@@ -13,9 +13,23 @@ from .optimizer import PyLimits, safe_lshift, safe_mod, safe_multiply, safe_powe
 
 TYPE_CHECKING = False
 if TYPE_CHECKING:
-    from typing import Callable
+    from typing import Callable, Protocol, Sequence
 
     from .pyassem import Block, Instruction, PyFlowGraph
+
+    class _RewritableInstr(Protocol):
+        # Minimal interface needed to rewrite an instruction into a
+        # LOAD_COMMON_CONSTANT. Both pyassem.Instruction and the lightweight
+        # fakes used in tests satisfy this structurally.
+        opname: str
+        oparg: object
+        ioparg: int
+
+    class _RewritableBlock(Protocol):
+        # Read-only property so the element type is matched covariantly: any
+        # block whose instructions satisfy _RewritableInstr is accepted.
+        @property
+        def insts(self) -> Sequence[_RewritableInstr]: ...
 
     Handler = Callable[
         [
@@ -52,7 +66,7 @@ UNARY_OPS: dict[str, object] = {
     "UNARY_POSITIVE": lambda v: +v,
 }
 
-BINARY_OPS: dict[int, Callable[[object, object], object]] = {
+BINARY_OPS: dict[int, Callable[..., object]] = {
     find_op_idx("NB_POWER"): lambda x, y: safe_power(x, y, PyLimits),
     find_op_idx("NB_MULTIPLY"): lambda x, y: safe_multiply(x, y, PyLimits),
     find_op_idx("NB_TRUE_DIVIDE"): lambda left, right: left / right,
@@ -74,8 +88,6 @@ SWAPPABLE: set[str] = {"STORE_FAST", "STORE_FAST_MAYBE_NULL", "POP_TOP"}
 class FlowGraphOptimizer:
     """Flow graph optimizer."""
 
-    JUMP_ABS: str = "<INVALID JUMP OPCODE>"  # Set to different opcodes in 3.10 and 3.12
-
     def __init__(self, graph: PyFlowGraph) -> None:
         self.graph = graph
 
@@ -83,7 +95,7 @@ class FlowGraphOptimizer:
         raise NotImplementedError()
 
     def set_to_nop(self, instr: Instruction) -> None:
-        raise NotImplemented()
+        raise NotImplementedError()
 
     def dispatch_instr(
         self,
@@ -162,7 +174,7 @@ class FlowGraphOptimizer:
             return instr_index + self.jump_thread(
                 block, instr, target, "POP_JUMP_IF_FALSE"
             )
-        elif target.opname in (self.JUMP_ABS, "JUMP_FORWARD", "JUMP_IF_FALSE_OR_POP"):
+        elif target.opname in ("JUMP", "JUMP_FORWARD", "JUMP_IF_FALSE_OR_POP"):
             return instr_index + self.jump_thread(
                 block, instr, target, "JUMP_IF_FALSE_OR_POP"
             )
@@ -188,7 +200,7 @@ class FlowGraphOptimizer:
             return instr_index + self.jump_thread(
                 block, instr, target, "POP_JUMP_IF_TRUE"
             )
-        elif target.opname in (self.JUMP_ABS, "JUMP_FORWARD", "JUMP_IF_TRUE_OR_POP"):
+        elif target.opname in ("JUMP", "JUMP_FORWARD", "JUMP_IF_TRUE_OR_POP"):
             return instr_index + self.jump_thread(
                 block, instr, target, "JUMP_IF_TRUE_OR_POP"
             )
@@ -210,7 +222,7 @@ class FlowGraphOptimizer:
         block: Block,
     ) -> int | None:
         assert target is not None
-        if target.opname in (self.JUMP_ABS, "JUMP_FORWARD", "JUMP"):
+        if target.opname in ("JUMP", "JUMP_FORWARD", "JUMP"):
             return instr_index + self.jump_thread(block, instr, target, instr.opname)
 
     def opt_jump(
@@ -222,8 +234,8 @@ class FlowGraphOptimizer:
         block: Block,
     ) -> int | None:
         assert target is not None
-        if target.opname in (self.JUMP_ABS, "JUMP_FORWARD"):
-            return instr_index + self.jump_thread(block, instr, target, self.JUMP_ABS)
+        if target.opname in ("JUMP", "JUMP_FORWARD"):
+            return instr_index + self.jump_thread(block, instr, target, "JUMP")
 
     def opt_for_iter(
         self,
@@ -307,7 +319,7 @@ class FlowGraphOptimizer:
                 or next_instr.opname == "JUMP_IF_TRUE"
             )
             if is_true == jump_if_true:
-                next_instr.opname = self.JUMP_ABS
+                next_instr.opname = "JUMP"
                 block.has_fallthrough = False
             else:
                 next_instr.target = None
@@ -316,7 +328,7 @@ class FlowGraphOptimizer:
             is_true = bool(const)
             jump_if_true = next_instr.opname == "JUMP_IF_TRUE_OR_POP"
             if is_true == jump_if_true:
-                next_instr.opname = self.JUMP_ABS
+                next_instr.opname = "JUMP"
                 block.has_fallthrough = False
             else:
                 self.set_to_nop(block.insts[instr_index])
@@ -349,108 +361,32 @@ class FlowGraphOptimizer:
         block.insts = block.insts[: instr_index + 1]
 
     handlers: dict[str, Handler] = {
+        # pyrefly: ignore [bad-assignment]
         "JUMP_IF_FALSE_OR_POP": opt_jump_if_false_or_pop,
+        # pyrefly: ignore [bad-assignment]
         "JUMP_IF_TRUE_OR_POP": opt_jump_if_true_or_pop,
+        # pyrefly: ignore [bad-assignment]
         "POP_JUMP_IF_FALSE": opt_pop_jump_if,
+        # pyrefly: ignore [bad-assignment]
         "POP_JUMP_IF_TRUE": opt_pop_jump_if,
+        # pyrefly: ignore [bad-assignment]
         "JUMP_FORWARD": opt_jump,
+        # pyrefly: ignore [bad-assignment]
         "FOR_ITER": opt_for_iter,
+        # pyrefly: ignore [bad-assignment]
         "ROT_N": opt_rot_n,
+        # pyrefly: ignore [bad-assignment]
         "LOAD_CONST": opt_load_const,
+        # pyrefly: ignore [bad-assignment]
         "RETURN_VALUE": opt_return_value,
     }
-
-
-class FlowGraphOptimizer310(FlowGraphOptimizer):
-    """Python 3.10-specifc optimizations."""
-
-    def opt_build_tuple(
-        self: FlowGraphOptimizer,
-        instr_index: int,
-        instr: Instruction,
-        next_instr: Instruction | None,
-        target: Instruction | None,
-        block: Block,
-    ) -> int | None:
-        if (
-            next_instr
-            and next_instr.opname == "UNPACK_SEQUENCE"
-            and instr.ioparg == next_instr.ioparg
-        ):
-            if instr.ioparg == 1:
-                self.set_to_nop(instr)
-                self.set_to_nop(next_instr)
-            elif instr.ioparg == 2:
-                instr.opname = "ROT_TWO"
-                self.set_to_nop(next_instr)
-            elif instr.ioparg == 3:
-                instr.opname = "ROT_THREE"
-                next_instr.opname = "ROT_TWO"
-            return
-        if instr_index >= instr.ioparg:
-            self.fold_tuple_on_constants(instr_index, instr, block)
-
-    JUMP_ABS = "JUMP_ABSOLUTE"
-    handlers: dict[str, Handler] = {
-        **FlowGraphOptimizer.handlers,
-        JUMP_ABS: FlowGraphOptimizer.opt_jump,
-        "BUILD_TUPLE": opt_build_tuple,
-    }
-
-    def set_to_nop(self, instr: Instruction) -> None:
-        instr.opname = "NOP"
-
-    def jump_thread(
-        self, block: Block, instr: Instruction, target: Instruction, opname: str
-    ) -> int:
-        """Attempt to eliminate jumps to jumps by updating inst to jump to
-        target->i_target using the provided opcode. Return 0 if successful, 1 if
-        not; this makes it easier for our callers to revisit the same
-        instruction again only if we changed it."""
-        assert instr.is_jump(self.graph.opcode)
-        assert target.is_jump(self.graph.opcode)
-        if instr.lineno == target.lineno and instr.target != target.target:
-            instr.target = target.target
-            instr.opname = opname
-            return 0
-        return 1
-
-    def optimize_basic_block(self, block: Block) -> None:
-        instr_index = 0
-
-        while instr_index < len(block.insts):
-            instr = block.insts[instr_index]
-
-            target_instr: Instruction | None = None
-            if instr.is_jump(self.graph.opcode):
-                target = instr.target
-                assert target is not None
-                # Skip over empty basic blocks.
-                while len(target.insts) == 0:
-                    instr.target = target.next
-                    target = instr.target
-                    assert target is not None
-                target_instr = target.insts[0]
-
-            next_instr = (
-                block.insts[instr_index + 1]
-                if instr_index + 1 < len(block.insts)
-                else None
-            )
-
-            new_index = self.dispatch_instr(
-                instr_index, instr, next_instr, target_instr, block
-            )
-            instr_index = instr_index + 1 if new_index is None else new_index
 
 
 LOAD_CONST_INSTRS = ("LOAD_CONST", "LOAD_SMALL_INT")
 
 
 class FlowGraphOptimizer312(FlowGraphOptimizer):
-    """Python 3.12-specifc optimizations."""
-
-    JUMP_ABS = "JUMP"
+    """Python 3.12-specific optimizations."""
 
     def set_to_nop(self, instr: Instruction) -> None:
         instr.set_to_nop()
@@ -698,7 +634,7 @@ class FlowGraphOptimizer312(FlowGraphOptimizer):
             return None
 
         # Create an array with elements {0, 1, 2, ..., depth - 1}:
-        stack = [i for i in range(depth)]
+        stack = list(range(depth))
         # Simulate the combined effect of these instructions by "running" them on
         # our "stack":
         for i in range(instr_index, cnt):
@@ -771,7 +707,7 @@ class FlowGraphOptimizer312(FlowGraphOptimizer):
 
     handlers: dict[str, Handler] = {
         **FlowGraphOptimizer.handlers,
-        JUMP_ABS: FlowGraphOptimizer.opt_jump,
+        "JUMP": FlowGraphOptimizer.opt_jump,
         "LOAD_CONST": opt_load_const,
         "PUSH_NULL": opt_push_null,
         "BUILD_TUPLE": opt_build_tuple,
@@ -1077,6 +1013,7 @@ class BaseFlowGraphOptimizer314(FlowGraphOptimizer312):
         block: Block,
     ) -> int | None:
         assert isinstance(self, FlowGraphOptimizer314)
+        # pyrefly: ignore [bad-argument-type]
         self.optimize_one_unary(instr_index, instr, block, operator.inv)
 
     def optimize_unary_negative(
@@ -1088,6 +1025,7 @@ class BaseFlowGraphOptimizer314(FlowGraphOptimizer312):
         block: Block,
     ) -> int | None:
         assert isinstance(self, FlowGraphOptimizer314)
+        # pyrefly: ignore [bad-argument-type]
         self.optimize_one_unary(instr_index, instr, block, operator.neg)
 
     def optimize_unary_not(
@@ -1110,11 +1048,31 @@ class BaseFlowGraphOptimizer314(FlowGraphOptimizer312):
         assert isinstance(self, FlowGraphOptimizer314)
         self.optimize_one_unary(instr_index, instr, block, operator.not_)
 
-    def fold_constrant_intrinsic_list_to_tuple(
-        self, block: Block, instr_index: int
-    ) -> None:
-        consts_found = 0
-        expect_append = True
+    def fold_constant_seq_into_load_const(self, block: Block, instr_index: int) -> None:
+        """Replace:
+            BUILD_LIST/BUILD_SET 0
+            LOAD_CONST c1
+            LIST_APPEND/SET_ADD 1
+            ...
+            LOAD_CONST cN
+            LIST_APPEND/SET_ADD 1
+            [CALL_INTRINSIC_1 INTRINSIC_LIST_TO_TUPLE]   <-- optional
+        with:
+            LOAD_CONST (c1, c2, ... cN)
+
+        The instruction at `instr_index` is either the LIST_TO_TUPLE intrinsic
+        (so only the BUILD_LIST/LIST_APPEND form is considered), or the trailing
+        LIST_APPEND or SET_ADD itself, in which case the matching
+        BUILD_LIST/BUILD_SET start is selected from its opcode and sets are
+        folded into a frozenset.
+        """
+        target = block.insts[instr_index]
+        expected_append = target.opname == "CALL_INTRINSIC_1"
+        append_op = "LIST_APPEND" if expected_append else target.opname
+        build_op = "BUILD_LIST" if append_op == "LIST_APPEND" else "BUILD_SET"
+        # Walking backwards, appends and the constants they push alternate. The
+        # intrinsic is preceded by an append, a trailing append by a constant.
+        expect_append = expected_append
         for i in range(instr_index - 1, -1, -1):
             instr = block.insts[i]
             opcode = instr.opname
@@ -1122,34 +1080,36 @@ class BaseFlowGraphOptimizer314(FlowGraphOptimizer312):
             if opcode == "NOP":
                 continue
 
-            if opcode == "BUILD_LIST" and oparg == 0:
+            if opcode == build_op and oparg == 0:
                 if not expect_append:
                     # Not a start sequence
                     return
 
                 # Sequence start, we are done.
                 consts = []
-                if opcode == "BUILD_LIST" and oparg == 0:
-                    for newpos in range(instr_index - 1, i - 1, -1):
-                        instr = block.insts[newpos]
-                        if instr.opname in LOAD_CONST_INSTRS:
-                            const = instr.oparg
-                            consts.append(const)
-                        instr.set_to_nop_no_loc()
+                start = instr_index - 1 if expected_append else instr_index
+                for newpos in range(start, i - 1, -1):
+                    instr = block.insts[newpos]
+                    if instr.opname in LOAD_CONST_INSTRS:
+                        const = instr.oparg
+                        consts.append(const)
+                    instr.set_to_nop_no_loc()
 
                 consts.reverse()
-                self.make_load_const(block.insts[instr_index], tuple(consts))
+                newconst: object = (
+                    frozenset(consts) if build_op == "BUILD_SET" else tuple(consts)
+                )
+                self.make_load_const(target, newconst)
                 return
 
             if expect_append:
-                if opcode != "LIST_APPEND" or oparg != 1:
+                if opcode != append_op or oparg != 1:
                     return
             elif opcode not in LOAD_CONST_INSTRS:
                 return
-            consts_found += 1
             expect_append = not expect_append
 
-    def optimize_call_instrinsic_1(
+    def optimize_call_intrinsic_1(
         self: FlowGraphOptimizer,
         instr_index: int,
         instr: Instruction,
@@ -1158,14 +1118,14 @@ class BaseFlowGraphOptimizer314(FlowGraphOptimizer312):
         block: Block,
     ) -> int | None:
         assert isinstance(self, FlowGraphOptimizer314)
-        # pyre-fixme[16]: Module `opcodes` has no attribute `INTRINSIC_1`.
         intrins = INTRINSIC_1[instr.ioparg]
         if intrins == "INTRINSIC_LIST_TO_TUPLE":
             if next_instr is not None and next_instr.opname == "GET_ITER":
                 instr.set_to_nop()
             else:
-                self.fold_constrant_intrinsic_list_to_tuple(block, instr_index)
+                self.fold_constant_seq_into_load_const(block, instr_index)
         if intrins == "INTRINSIC_UNARY_POSITIVE":
+            # pyrefly: ignore [bad-argument-type]
             self.optimize_one_unary(instr_index, instr, block, operator.pos)
 
     def optimize_swap(
@@ -1195,7 +1155,7 @@ class BaseFlowGraphOptimizer314(FlowGraphOptimizer312):
         "UNARY_INVERT": optimize_unary_invert,
         "UNARY_NEGATIVE": optimize_unary_negative,
         "UNARY_NOT": optimize_unary_not,
-        "CALL_INTRINSIC_1": optimize_call_instrinsic_1,
+        "CALL_INTRINSIC_1": optimize_call_intrinsic_1,
         "SWAP": optimize_swap,
     }
     del handlers["PUSH_NULL"]
@@ -1214,6 +1174,62 @@ class FlowGraphOptimizer314(BaseFlowGraphOptimizer314):
                 if new_i is not None:
                     i = new_i
             i += 1
+
+
+class FlowGraphOptimizer316(FlowGraphOptimizer314):
+    """Python 3.16-specific optimizations."""
+
+    def optimize_call_intrinsic_1(
+        self: FlowGraphOptimizer,
+        instr_index: int,
+        instr: Instruction,
+        next_instr: Instruction | None,
+        target: Instruction | None,
+        block: Block,
+    ) -> int | None:
+        assert isinstance(self, FlowGraphOptimizer316)
+        intrins = INTRINSIC_1[instr.ioparg]
+        if intrins == "INTRINSIC_LIST_TO_TUPLE":
+            # Unlike 3.14/3.15, folding is attempted even when iterating, so a
+            # big constant tuple becomes a single LOAD_CONST instead of staying
+            # a list build. The intrinsic is only dropped if folding didn't
+            # already rewrite it.
+            self.fold_constant_seq_into_load_const(block, instr_index)
+            if (
+                instr.opname == "CALL_INTRINSIC_1"
+                and next_instr is not None
+                and next_instr.opname == "GET_ITER"
+            ):
+                instr.set_to_nop()
+        if intrins == "INTRINSIC_UNARY_POSITIVE":
+            # pyrefly: ignore [bad-argument-type]
+            self.optimize_one_unary(instr_index, instr, block, operator.pos)
+
+    def optimize_list_append_set_add(
+        self: FlowGraphOptimizer,
+        instr_index: int,
+        instr: Instruction,
+        next_instr: Instruction | None,
+        target: Instruction | None,
+        block: Block,
+    ) -> int | None:
+        assert isinstance(self, FlowGraphOptimizer316)
+        # Sequences too big for optimize_lists_and_sets are built with repeated
+        # appends. When they're only iterated over or tested for membership a
+        # constant tuple/frozenset is a suitable replacement.
+        if (
+            instr.oparg == 1
+            and next_instr is not None
+            and next_instr.opname in ("GET_ITER", "CONTAINS_OP")
+        ):
+            self.fold_constant_seq_into_load_const(block, instr_index)
+
+    handlers: dict[str, Handler] = {
+        **FlowGraphOptimizer314.handlers,
+        "CALL_INTRINSIC_1": optimize_call_intrinsic_1,
+        "LIST_APPEND": optimize_list_append_set_add,
+        "SET_ADD": optimize_list_append_set_add,
+    }
 
 
 class FlowGraphConstOptimizer314(BaseFlowGraphOptimizer314):
@@ -1285,3 +1301,65 @@ class FlowGraphConstOptimizer314(BaseFlowGraphOptimizer314):
         "LOAD_CONST": opt_load_const,
         "LOAD_SMALL_INT": opt_load_const,
     }
+
+
+# Oparg values for LOAD_COMMON_CONSTANT (from pycore_opcode_utils.h)
+CONSTANT_NONE = 7
+CONSTANT_EMPTY_STR = 8
+CONSTANT_TRUE = 9
+CONSTANT_FALSE = 10
+CONSTANT_MINUS_ONE = 11
+CONSTANT_EMPTY_TUPLE = 13
+
+
+def _common_constant_oparg(
+    const: object, *, allow_empty_tuple: bool = False
+) -> int | None:
+    if const is None:
+        return CONSTANT_NONE
+    if const is True:
+        return CONSTANT_TRUE
+    if const is False:
+        return CONSTANT_FALSE
+    if type(const) is str and len(const) == 0:
+        return CONSTANT_EMPTY_STR
+    if type(const) is int and const == -1:
+        return CONSTANT_MINUS_ONE
+    if allow_empty_tuple and type(const) is tuple and len(const) == 0:
+        return CONSTANT_EMPTY_TUPLE
+    return None
+
+
+class FlowGraphConstOptimizer315(FlowGraphConstOptimizer314):
+    # Whether the empty tuple is part of the LOAD_COMMON_CONSTANT table.
+    _allow_empty_tuple_const: bool = False
+
+    def make_load_const(self, instr: Instruction, const: object) -> None:
+        oparg = _common_constant_oparg(
+            const, allow_empty_tuple=self._allow_empty_tuple_const
+        )
+        if oparg is not None:
+            instr.opname = "LOAD_COMMON_CONSTANT"
+            instr.oparg = oparg
+            instr.ioparg = oparg
+        else:
+            super().make_load_const(instr, const)
+
+
+class FlowGraphConstOptimizer316(FlowGraphConstOptimizer315):
+    _allow_empty_tuple_const = True
+
+
+def convert_load_const_to_load_common_constant(
+    blocks: Sequence[_RewritableBlock], *, allow_empty_tuple: bool = False
+) -> None:
+    for block in blocks:
+        for instr in block.insts:
+            if instr.opname in ("LOAD_CONST", "LOAD_SMALL_INT"):
+                oparg = _common_constant_oparg(
+                    instr.oparg, allow_empty_tuple=allow_empty_tuple
+                )
+                if oparg is not None:
+                    instr.opname = "LOAD_COMMON_CONSTANT"
+                    instr.oparg = oparg
+                    instr.ioparg = oparg

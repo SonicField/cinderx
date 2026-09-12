@@ -10,7 +10,7 @@
 #include <sstream>
 #include <string>
 
-namespace jit {
+namespace cinderx::jit {
 
 constexpr std::string_view indent1 = "         ";
 constexpr std::string_view indent2 = "             ";
@@ -157,57 +157,115 @@ bool FlagProcessor::hasHandled(std::string_view option_name) {
 }
 
 void FlagProcessor::setFlags(PyObject* cmdline_args) {
-  assert(cmdline_args != nullptr);
-
   for (auto& option : options_) {
     option->handled = false;
 
-    PyObject* key = PyUnicode_FromString(option->cmdline_flag.c_str());
-    assert(key != nullptr);
-
-    PyObject* resolves_to = PyDict_GetItem(cmdline_args, key);
-    Py_DECREF(key);
+    // Check if option is specified in the command line arguments.
     std::string found;
-
-    if (resolves_to != nullptr) {
-      const char* got =
-          PyUnicode_Check(resolves_to) ? PyUnicode_AsUTF8(resolves_to) : "";
-      option->callback_on_match(got);
+    if (handleCliFlag(*option, cmdline_args)) {
       found = option->cmdline_flag;
     }
-    if (found.empty() && !option->environment_variable.empty()) {
-      // check to see if it can be found via an environment variable
-      const char* envval = Py_GETENV(option->environment_variable.c_str());
-      if (envval != nullptr && envval[0] != '\0') {
-        option->callback_on_match(envval);
-        found = option->environment_variable;
-      }
+
+    // Otherwise check to see if it can be found via an environment variable.
+    if (found.empty() && handleEnvVar(*option)) {
+      found = option->environment_variable;
     }
 
     if (!found.empty()) {
       option->handled = true;
-      // use overridden debug message if it's been defined
-      JIT_DLOG(
-          "{} has been specified - {}",
-          found,
-          option->debug_message.empty() ? option->flag_description
-                                        : option->debug_message);
+
+      // Log everything but skip the debug option itself.
+      if (option->cmdline_flag != "cinderx-jit-debug") {
+        // Use overridden debug message if it's been defined.
+        std::string_view msg = option->debug_message.empty()
+            ? option->flag_description
+            : option->debug_message;
+        JIT_DLOG("{} has been specified - {}", found, msg);
+      }
     }
   }
 
+  // Check for unrecognized "-X cinderx-jit..." options.
   PyObject* key;
   PyObject* value;
-  auto jit_str = Ref<>::steal(PyUnicode_FromString("jit"));
   for (Py_ssize_t pos = 0; PyDict_Next(cmdline_args, &pos, &key, &value);) {
-    int match = PyUnicode_Tailmatch(
-        key, jit_str, /*start=*/0, /*end=*/3, /*direction=*/-1);
-    JIT_DCHECK(match != -1, "An error occurred");
-    const char* option = PyUnicode_AsUTF8(key);
-    JIT_DCHECK(option != nullptr, "An error occurred");
-    if (match && !canHandle(option)) {
+    const char* raw_option = PyUnicode_AsUTF8(key);
+    JIT_CHECK(
+        raw_option != nullptr,
+        "Failed to convert command line key of type '{}' to a string",
+        Py_TYPE(key)->tp_name);
+    std::string_view option = raw_option;
+    if (option.starts_with("cinderx-jit") && !canHandle(option)) {
       JIT_LOG("Warning: JIT cannot handle X-option {}", option);
     }
   }
+}
+
+bool FlagProcessor::handleCliFlag(
+    const Option& option,
+    BorrowedRef<> cmdline_args) {
+  const char* flag = option.cmdline_flag.c_str();
+  auto key = Ref<>::steal(PyUnicode_FromString(flag));
+  JIT_CHECK(key != nullptr, "Failed to allocate Python string for '{}'", flag);
+
+  // Check if option is specified in the command line arguments.
+  std::string found;
+  BorrowedRef<> resolves_to = PyDict_GetItem(cmdline_args, key);
+
+  // If it wasn't found, try the old school "-X jit-..." scheme.
+  if (resolves_to == nullptr) {
+    constexpr std::string_view prefix = "cinderx-";
+    std::string_view flag_view = flag;
+    if (flag_view.starts_with(prefix)) {
+      flag_view.remove_prefix(prefix.size());
+      // This is safe because the string view is still NUL-terminated.
+      key = Ref<>::steal(PyUnicode_FromString(flag_view.data()));
+      JIT_CHECK(
+          key != nullptr,
+          "Failed to allocate Python string for '{}'",
+          flag_view);
+      resolves_to = PyDict_GetItem(cmdline_args, key);
+    }
+  }
+
+  if (resolves_to != nullptr) {
+    const char* resolved =
+        PyUnicode_Check(resolves_to) ? PyUnicode_AsUTF8(resolves_to) : "";
+    option.callback_on_match(resolved);
+    return true;
+  }
+
+  return false;
+}
+
+bool FlagProcessor::handleEnvVar(const Option& option) {
+  const std::string& var_name = option.environment_variable;
+  if (var_name.empty()) {
+    return false;
+  }
+
+  const char* env_val = Py_GETENV(var_name.c_str());
+  if (env_val != nullptr && env_val[0] != '\0') {
+    option.callback_on_match(env_val);
+    return true;
+  }
+
+  // Didn't find it under the "CINDERX_JIT_..." naming scheme, try the
+  // old-school "PYTHONJIT..." scheme.
+  std::string old_var_name = option.environment_variable;
+  const std::string_view prefix = "CINDERX_JIT";
+  if (old_var_name.starts_with(prefix)) {
+    old_var_name.replace(0, prefix.size(), "PYTHONJIT");
+  }
+  std::erase(old_var_name, '_');
+
+  env_val = Py_GETENV(old_var_name.c_str());
+  if (env_val != nullptr && env_val[0] != '\0') {
+    option.callback_on_match(env_val);
+    return true;
+  }
+
+  return false;
 }
 
 // split long lines into many, but only cut on whitespace
@@ -247,11 +305,11 @@ std::string Option::getFormatted(std::string left_hand_side) {
   return left_hand_side;
 }
 
-std::string Option::getFormatted_cmdline_flag() {
+std::string Option::getFormattedCmdlineFlag() {
   return getFormatted(cmdline_flag);
 }
 
-std::string Option::getFormatted_environment_variable() {
+std::string Option::getFormattedEnvironmentVariable() {
   return environment_variable.empty() ? "" : getFormatted(environment_variable);
 }
 
@@ -262,15 +320,14 @@ std::string FlagProcessor::jitXOptionHelpMessage() {
   for (auto const& option : options_) {
     if (!option->hidden_flag) {
       std::string fmt_env_var =
-          option->getFormatted_environment_variable().empty()
+          option->getFormattedEnvironmentVariable().empty()
           ? ""
-          : fmt::format(
-                "; also {}", option->getFormatted_environment_variable());
+          : fmt::format("; also {}", option->getFormattedEnvironmentVariable());
       ret += indent1;
       ret += multi_line_split_(
                  fmt::format(
                      "-X {}: {}{}\n",
-                     option->getFormatted_cmdline_flag(),
+                     option->getFormattedCmdlineFlag(),
                      option->flag_description,
                      fmt_env_var)) +
           "\n";
@@ -279,4 +336,4 @@ std::string FlagProcessor::jitXOptionHelpMessage() {
   return ret;
 }
 
-} // namespace jit
+} // namespace cinderx::jit

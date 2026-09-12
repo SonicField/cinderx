@@ -9,18 +9,29 @@ import threading
 import time
 import unittest
 
-# pyre-ignore[21]: can't find test.support
-from test import support
+from cinderx.test_support import has_cpython_test_package, passUnless
 
-# pyre-ignore[21]: can't find test.fork_wait
-from test.fork_wait import ForkWait
+_HAVE_CPYTHON_TESTS = has_cpython_test_package()
+
+if _HAVE_CPYTHON_TESTS:
+    # pyre-ignore[21]: can't find test.support
+    from test import support
+
+    # pyre-ignore[21]: can't find test.fork_wait
+    from test.fork_wait import ForkWait
+else:
+    support = None
+    # ForkWait is the base class below, so the class statement needs something
+    # to inherit from even when every test in it is going to be passed over.
+    ForkWait = unittest.TestCase
 
 
-# Skip test if fork does not exist.
-support.get_attribute(os, "fork")
-
-
-# pyre-ignore[11]: Invalid type ForkWait
+@passUnless(
+    _HAVE_CPYTHON_TESTS and hasattr(os, "fork"),
+    "needs fork() and CPython's test package",
+)
+# pyre-ignore[39]: the base class is whichever of the two above got bound,
+# and Pyre can't see either of them.
 class CinderX_ForkTest(ForkWait):
     def test_threaded_import_lock_fork(self) -> None:
         """Check fork() in main thread works while a subthread is doing an import"""
@@ -54,15 +65,13 @@ class CinderX_ForkTest(ForkWait):
                 if m == complete_module:
                     os._exit(exitcode)
                 else:
-                    if support.verbose > 1:
-                        print("Child encountered partial module")
+                    print("Child encountered partial module")
                     os._exit(1)
             else:
                 t.join()
                 # Exitcode 1 means the child got a partial module (bad.) No
                 # exitcode (but a hang, which manifests as 'got pid 0')
                 # means the child deadlocked (also bad.)
-                # pyre-ignore[16]: no attribute wait_impl
                 self.wait_impl(pid, exitcode=exitcode)
         finally:
             try:
@@ -71,8 +80,13 @@ class CinderX_ForkTest(ForkWait):
                 pass
 
 
+# Prevent test loaders from collecting the imported base as a separate test case.
+del ForkWait
+
+
 def tearDownModule():
-    support.reap_children()
+    if support is not None:
+        support.reap_children()
 
 
 if __name__ == "__main__":

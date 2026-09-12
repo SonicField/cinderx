@@ -10,7 +10,7 @@
 #include <string>
 #include <string_view>
 
-namespace jit::hir {
+namespace cinderx::jit::hir {
 
 // Helper class for pretty printing IR.
 //
@@ -26,16 +26,16 @@ class HIRPrinter {
   // specify whether or not the full instruction should be printed.
   HIRPrinter() = default;
 
-  void Print(std::ostream& os, const Function& func);
-  void Print(std::ostream& os, const BasicBlock& block);
-  void Print(std::ostream& os, const Instr& instr);
-  void Print(std::ostream& os, const CFG& cfg);
-  void Print(std::ostream& os, const FrameState& state);
+  void print(std::ostream& os, const Function& func);
+  void print(std::ostream& os, const BasicBlock& block);
+  void print(std::ostream& os, const Instr& instr);
+  void print(std::ostream& os, const CFG& cfg);
+  void print(std::ostream& os, const FrameState& state);
 
   template <class T>
-  std::string ToString(const T& obj) {
+  std::string toString(const T& obj) {
     std::ostringstream os;
-    Print(os, obj);
+    print(os, obj);
     return os.str();
   }
 
@@ -43,9 +43,9 @@ class HIRPrinter {
   HIRPrinter& setLinePrefix(std::string_view prefix);
 
  private:
-  void Indent();
-  void Dedent();
-  std::ostream& Indented(std::ostream& os);
+  void indent();
+  void dedent();
+  std::ostream& indented(std::ostream& os);
 
   const Function* func_{nullptr};
   std::string line_prefix_;
@@ -59,25 +59,27 @@ std::ostream& operator<<(std::ostream& os, const BasicBlock& block);
 std::ostream& operator<<(std::ostream& os, const Instr& instr);
 std::ostream& operator<<(std::ostream& os, const FrameState& state);
 
-} // namespace jit::hir
+} // namespace cinderx::jit::hir
 
 template <>
-struct fmt::formatter<jit::hir::Function> : fmt::ostream_formatter {};
+struct fmt::formatter<cinderx::jit::hir::Function> : fmt::ostream_formatter {};
 
 template <>
-struct fmt::formatter<jit::hir::CFG> : fmt::ostream_formatter {};
+struct fmt::formatter<cinderx::jit::hir::CFG> : fmt::ostream_formatter {};
 
 template <>
-struct fmt::formatter<jit::hir::BasicBlock> : fmt::ostream_formatter {};
+struct fmt::formatter<cinderx::jit::hir::BasicBlock> : fmt::ostream_formatter {
+};
 
 template <>
-struct fmt::formatter<jit::hir::Instr> : fmt::ostream_formatter {};
+struct fmt::formatter<cinderx::jit::hir::Instr> : fmt::ostream_formatter {};
 
 template <>
-struct fmt::formatter<jit::hir::DeoptBase> : fmt::ostream_formatter {};
+struct fmt::formatter<cinderx::jit::hir::DeoptBase> : fmt::ostream_formatter {};
 
 template <>
-struct fmt::formatter<jit::hir::Phi> : fmt::ostream_formatter {};
+struct fmt::formatter<cinderx::jit::hir::Phi> : fmt::ostream_formatter {};
 
 template <>
-struct fmt::formatter<jit::hir::FrameState> : fmt::ostream_formatter {};
+struct fmt::formatter<cinderx::jit::hir::FrameState> : fmt::ostream_formatter {
+};

@@ -9,7 +9,7 @@
 #include <sstream>
 #include <utility>
 
-namespace jit::codegen {
+namespace cinderx::jit::codegen {
 
 std::string Annotations::disassembleSection(
     void* entry,
@@ -17,7 +17,7 @@ std::string Annotations::disassembleSection(
     CodeSection section) {
   JIT_CHECK(
       getConfig().log.dump_asm,
-      "Annotations are not recorded without -X jit-dump-asm");
+      "Annotations are not recorded without -X cinderx-jit-dump-asm");
   auto text = code.sectionByName(codeSectionName(section));
   if (text == nullptr) {
     return "";
@@ -37,7 +37,11 @@ std::string Annotations::disassembleSection(
     }
     auto inserted =
         annot_bounds.emplace(begin, std::make_pair(&annot, end)).second;
-    JIT_DCHECK(inserted, "Duplicate start address for annotation");
+    JIT_DCHECK(
+        inserted,
+        "Duplicate start address for annotation {} {}",
+        annot.str,
+        annot_bounds[begin].first->str);
   }
 
   Annotation* prev_annot = nullptr;
@@ -46,6 +50,12 @@ std::string Annotations::disassembleSection(
 
   std::stringstream result;
   Disassembler dis(section_start, size);
+  if (dis.cursor() == nullptr) {
+    // Should already be handled by ENABLE_DISASSEMBLER ifdefs, but putting this
+    // defensive check here just in case.
+    return "";
+  }
+
   dis.setPrintInstBytes(false);
   for (auto cursor = section_start, end = cursor + size; cursor < end;) {
     auto new_annot = prev_annot;
@@ -75,7 +85,7 @@ std::string Annotations::disassembleSection(
         auto prev_hir = prev_annot ? prev_annot->instr : nullptr;
         if (new_hir != nullptr && new_hir != prev_hir) {
           annot_str =
-              hir::HIRPrinter().setFullSnapshots(true).ToString(*new_hir);
+              hir::HIRPrinter().setFullSnapshots(true).toString(*new_hir);
         } else if (!new_annot->str.empty()) {
           annot_str = new_annot->str;
         }
@@ -107,4 +117,4 @@ std::string Annotations::disassemble(
   return result;
 }
 
-} // namespace jit::codegen
+} // namespace cinderx::jit::codegen

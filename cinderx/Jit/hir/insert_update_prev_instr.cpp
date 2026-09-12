@@ -9,11 +9,9 @@
 #include <stack>
 #include <vector>
 
-namespace jit::hir {
+namespace cinderx::jit::hir {
 
 namespace {
-
-#if PY_VERSION_HEX >= 0x030C0000
 
 class BytecodeIndexToLine {
  public:
@@ -68,12 +66,9 @@ struct InlineStackState {
   BeginInlinedFunction* parent;
 };
 
-#endif
-
 } // namespace
 
-void InsertUpdatePrevInstr::Run([[maybe_unused]] Function& func) {
-#if PY_VERSION_HEX >= 0x030C0000
+void InsertUpdatePrevInstr::run([[maybe_unused]] Function& func) {
   // We can have instructions w/ different code objects when we have
   // inlined functions so we maintain multiple BytecodeIndexToLine based upon
   // the code object
@@ -93,12 +88,20 @@ void InsertUpdatePrevInstr::Run([[maybe_unused]] Function& func) {
     worklist.pop();
 
     int prev_emitted_lno_or_bc = INT_MAX;
+    Instr* last_emitted = nullptr;
     for (Instr& instr : *block) {
       auto update_one = [&]() {
         auto add_update_prev_instr = [&](int line_no) {
-          Instr* update_instr = UpdatePrevInstr::create(line_no, parent);
-          update_instr->copyBytecodeOffset(instr);
-          update_instr->InsertBefore(instr);
+          if (last_emitted != nullptr) {
+            last_emitted->unlink();
+            static_cast<UpdatePrevInstr*>(last_emitted)->setLineNo(line_no);
+            last_emitted->copyBytecodeOffset(instr);
+            last_emitted->insertBefore(instr);
+          } else {
+            last_emitted = UpdatePrevInstr::create(line_no, parent);
+            last_emitted->copyBytecodeOffset(instr);
+            last_emitted->insertBefore(instr);
+          }
         };
         // If we don't have a valid line table to optimize with, update after
         // every bytecode.
@@ -126,7 +129,7 @@ void InsertUpdatePrevInstr::Run([[maybe_unused]] Function& func) {
       // Inlined functions have a single entry point and a single exit, so we
       // will encounter the exit by following the successor blocks from the
       // entry.
-      if (instr.IsBeginInlinedFunction()) {
+      if (instr.isBeginInlinedFunction()) {
         // We need to ensure we have emitted a line number update to the outer
         // function before going to the inlined function, otherwise the runtime
         // will see the outer function has having an incomplete frame and skip
@@ -140,38 +143,46 @@ void InsertUpdatePrevInstr::Run([[maybe_unused]] Function& func) {
         }
         parents[begin] = parent;
         parent = begin;
-        if (getConfig().frame_mode == FrameMode::kLightweight) {
-          inited_once = false;
-        }
-      } else if (instr.IsEndInlinedFunction()) {
+        last_emitted = nullptr;
+        prev_emitted_lno_or_bc = INT_MAX;
+#ifdef ENABLE_LIGHTWEIGHT_FRAMES
+        inited_once = false;
+#endif
+      } else if (instr.isEndInlinedFunction()) {
         parent =
             parents[static_cast<EndInlinedFunction&>(instr).matchingBegin()];
+        last_emitted = nullptr;
+        prev_emitted_lno_or_bc = INT_MAX;
       }
 
-      if (getConfig().frame_mode == FrameMode::kLightweight) {
-        // The first LoadEvalBreaker is emitted for the RESUME instruction which
-        // indicates when we should update the line number from the instruction
-        // - 1 to the first instruction to indicate that the frame is now
-        // complete.
-        if (!inited_once && instr.IsLoadEvalBreaker()) {
-          auto target_code = parent == nullptr ? func.code : parent->code();
-          auto& cur_bc_idx_to_line = code_bc_idx_map.at(target_code);
-          int line_no = cur_bc_idx_to_line.lineNoFor(
-              BCIndex(target_code->_co_firsttraceable));
-          Instr* update_instr = UpdatePrevInstr::create(line_no, parent);
-          update_instr->setBytecodeOffset(
-              BCIndex(target_code->_co_firsttraceable));
-          update_instr->InsertBefore(instr);
+#ifdef ENABLE_LIGHTWEIGHT_FRAMES
+      // The first LoadEvalBreaker is emitted for the RESUME instruction which
+      // indicates when we should update the line number from the instruction
+      // - 1 to the first instruction to indicate that the frame is now
+      // complete.
+      if (!inited_once && instr.isLoadEvalBreaker()) {
+        auto target_code = parent == nullptr ? func.code : parent->code();
+        auto& cur_bc_idx_to_line = code_bc_idx_map.at(target_code);
+        int line_no = cur_bc_idx_to_line.lineNoFor(
+            BCIndex(target_code->_co_firsttraceable));
+        Instr* update_instr = UpdatePrevInstr::create(line_no, parent);
+        update_instr->setBytecodeOffset(
+            BCIndex(target_code->_co_firsttraceable));
+        update_instr->insertBefore(instr);
+        last_emitted = update_instr;
 
-          inited_once = true;
-        }
-      } else if (hasArbitraryExecution(instr)) {
+        inited_once = true;
+      }
+#else
+      if (hasArbitraryExecution(instr)) {
         update_one();
+        last_emitted = nullptr;
       }
+#endif
     }
 
     // Add the successors to be processed
-    auto term = block->GetTerminator();
+    auto term = block->getTerminator();
     for (std::size_t i = 0, n = term->numEdges(); i < n; ++i) {
       BasicBlock* succ = term->successor(i);
       if (!enqueued.contains(succ)) {
@@ -180,7 +191,6 @@ void InsertUpdatePrevInstr::Run([[maybe_unused]] Function& func) {
       }
     }
   }
-#endif
 }
 
-} // namespace jit::hir
+} // namespace cinderx::jit::hir

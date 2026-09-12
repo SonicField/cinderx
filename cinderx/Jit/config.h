@@ -2,12 +2,15 @@
 
 #pragma once
 
+#include "cinderx/Common/define.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
-namespace jit {
+namespace cinderx::jit {
 
 // Lifetime diagram of the JIT compiler:
 //
@@ -28,12 +31,6 @@ enum class State : uint8_t {
   kFinalizing,
 };
 
-enum class FrameMode : uint8_t {
-  kNormal,
-  kShadow,
-  kLightweight,
-};
-
 // List of HIR optimization passes to run.
 struct HIROptimizations {
   bool begin_inlined_function_elim{true};
@@ -42,11 +39,11 @@ struct HIROptimizations {
   bool dead_code_elim{true};
   bool dynamic_comparison_elim{true};
   bool guard_type_removal{true};
-  // TASK(T156009029): Inliner should be on by default.
-  bool inliner{false};
+  bool inliner{true};
   bool insert_update_prev_instr{true};
   bool phi_elim{true};
   bool simplify{true};
+  bool sink_primitive_box{true};
 };
 
 // List of LIR optimization passes to run.
@@ -54,6 +51,7 @@ struct LIROptimizations {
   bool inliner{true};
 };
 
+// Configuration options to control the simplifier's behavior.
 struct SimplifierConfig {
   // The maximum number of times the simplifier can process a function's CFG.
   size_t iteration_limit{100};
@@ -62,11 +60,42 @@ struct SimplifierConfig {
   size_t new_block_limit{1000};
 };
 
+// Configuration options to control the inliner's behavior.
+struct InlinerConfig {
+  // Limit on how much the inliner can inline.  The number here is internal to
+  // the inliner, doesn't have any specific meaning, and can change as the
+  // inliner's algorithm changes.
+  size_t cost_limit{2000};
+  // Prune an inlining candidate when the caller's call count is at least this
+  // many times the callee's call count.  A callee's total call count is an
+  // upper bound on the calls made from any single call site, so a callee called
+  // far less often than the caller must be a cold call site that isn't worth
+  // inlining.  Only applied when the caller has a non-zero call count.
+  size_t cold_call_threshold{20};
+  // Maximum depth for transitive (recursive) inlining.  When the inliner
+  // inlines a function it also considers that function's own callees as
+  // candidates; this bounds how many levels deep that can go.  A top-level call
+  // site is at depth 0, so a function inlined there lands at depth 1.
+  //
+  // A limit of 1 will disable transitive inlining entirely, and only allow
+  // inlining direct function calls.
+  size_t depth_limit{10};
+};
+
 struct GdbOptions {
   // Whether GDB support is enabled.
   bool supported{false};
   // Whether to write generated ELF objects to disk.
   bool write_elf_objects{false};
+};
+
+// Options for controlling how JIT-compiled functions are serialized out for
+// external profiling tools (i.e. Linux perf).
+struct PerfMapOptions {
+  // To which directory to write JIT dumps to, implies JIT dumps are enabled.
+  std::string jit_dump_dir;
+  // Whether perf map support is enabled.
+  bool enabled{false};
 };
 
 struct JitListOptions {
@@ -81,6 +110,10 @@ struct JitListOptions {
 struct LogOptions {
   // Log general debug messages from the JIT.
   bool debug{false};
+  // Log debug messages in dataflow analysis.
+  bool debug_dataflow_analysis{false};
+  // Log debug messages in the guard removal pass.
+  bool debug_guard_removal{false};
   // Log debug messages in the inlining pass.
   bool debug_inliner{false};
   // Log debug messages in the refcount insertion pass.
@@ -112,9 +145,35 @@ struct LogOptions {
   FILE* output_file{stderr};
 };
 
+// Settings related to the memory allocated for JIT-compiled code.
+struct MemoryOptions {
+  // Use huge pages for allocated code.
+  bool huge_pages{true};
+  // Use huge pages for cold code sections as well.  Only applicable when
+  // multiple_code_sections is enabled.
+  bool cold_code_huge_pages{false};
+  // Split allocated code into separate hot and cold sections.
+  bool multiple_code_sections{false};
+  // Allocate JIT code near rt::call by passing an mmap address hint.  This
+  // keeps runtime helper calls within direct branch range and improves
+  // instruction cache / TLB locality.  Falls back to unhinted allocation when
+  // the kernel can't place the allocation near the hint.
+  bool hinted_code_allocation{false};
+};
+
 enum class AsmSyntax : uint8_t {
   ATT,
   Intel,
+};
+
+// Which register allocator the JIT should use to lower LIR virtual registers to
+// physical locations.
+enum class RegAllocKind : uint8_t {
+  // Optimizing linear scan allocator (the default).
+  kLinearScan,
+  // Trivial allocator that spills everything to the stack.  Intended for
+  // testing and isolating the rest of the JIT pipeline.
+  kSpill,
 };
 
 // Collection of configuration values for the JIT.
@@ -128,41 +187,28 @@ struct Config {
   // Ignore other CLI arguments and environment variables, force the JIT
   // to be initialized or uninitialized.  Intended for testing.
   std::optional<bool> force_init;
-  FrameMode frame_mode{
-#ifdef ENABLE_LIGHTWEIGHT_FRAMES
-      FrameMode::kLightweight
-#else
-      FrameMode::kNormal
-#endif
-  };
   bool allow_jit_list_wildcards{false};
   bool compile_all_static_functions{false};
-  bool multiple_code_sections{false};
   bool multithreaded_compile_test{false};
-  bool use_huge_pages{true};
-  // Assume that data found in the Python frame is unchanged across function
-  // calls.  This includes the code object, and the globals and builtins
-  // dictionaries (but not their contents).
-  bool stable_frame{true};
   // Use inline caches for attribute accesses.
-  bool attr_caches{
-#ifdef Py_GIL_DISABLED
-      // TODO(T250369692): FT support for inline-caches.
-      false
-#else
-      true
-#endif
-  };
+  //
+  // TODO(T250369692): FT support for inline-caches.
+  bool attr_caches{!kFreeThreadedBuild};
   // Collect stats information about attribute caches.
   bool collect_attr_cache_stats{false};
+  // Use inline caches for binary operations (currently the add variant only),
+  // dispatching through a self-modifying function pointer that specializes on
+  // the operand types observed at runtime.  Opt-in / off by default.
+  bool binary_op_caches{false};
   // Use type annotations to create runtime checks.
   bool emit_type_annotation_guards{false};
   // Whether or not to JIT specialized opcodes or to fall back to their generic
   // counterparts.
-  bool specialized_opcodes{false};
+  bool specialized_opcodes{true};
+
   // Support instrumentation (monitoring/tracing/profiling) by falling back to
-  // the interpreter
-  bool support_instrumentation{false};
+  // the interpreter.
+  bool support_instrumentation{true};
 
   // Add RefineType instructions for Static Python values before they get
   // typechecked.  Enabled by default as HIR doesn't pass through Static Python
@@ -174,42 +220,73 @@ struct Config {
   HIROptimizations hir_opts;
   LIROptimizations lir_opts;
   SimplifierConfig simplifier;
-  // Limit on how much the inliner can inline.  The number here is internal to
-  // the inliner, doesn't have any specific meaning, and can change as the
-  // inliner's algorithm changes.
-  size_t inliner_cost_limit{2000};
+  InlinerConfig inliner;
   // Number of workers to use for batch compilation, like in precompile_all().
   // If this number isn't configured then batch compilation will happen inline
   // on the calling thread.
   size_t batch_compile_workers{0};
+  // Compile lazily-triggered functions on a background thread without holding
+  // the GIL, instead of compiling inline on the calling thread.  The calling
+  // thread keeps running through the interpreter until the background
+  // compilation finishes and swaps in the JIT-compiled entry point.
+  bool background_compile{kFreeThreadedBuild};
   // When a function is being compiled, this is the maximum number of dependent
   // functions called by it that can be compiled along with it.
   size_t preload_dependent_limit{99};
-  // Sizes (in bytes) of the hot and cold code sections. Only applicable if
-  // multiple code sections are enabled.
-  size_t cold_code_section_size{0};
-  size_t hot_code_section_size{0};
   // Memory threshold after which we stop jitting.
   size_t max_code_size{0};
-  // Size (in number of entries) of the LoadAttrCached and StoreAttrCached
-  // inline caches used by the JIT.
+  // Maximum number of HIR blocks we can support for a single function.
+  size_t max_hir_blocks{4000};
+  // Maximum number of HIR instructions we can support for a single function.
+  size_t max_hir_instrs{40000};
+  // Maximum number of LIR blocks we can support for a single function.
+  size_t max_lir_blocks{5000};
+  // Maximum number of LIR instructions we can support for a single function.
+  size_t max_lir_instrs{80000};
+  // Size (in number of entries) of the inline attribute caches used by the JIT.
   uint32_t attr_cache_size{4};
   std::optional<uint32_t> compile_after_n_calls;
   GdbOptions gdb;
+  PerfMapOptions perf_map;
   JitListOptions jit_list;
   LogOptions log;
+  MemoryOptions mem;
   bool compile_perf_trampoline_prefork{false};
   bool dump_hir_stats{false};
 
   // The ASM syntax the JIT should use when disassembling.
   AsmSyntax asm_syntax{AsmSyntax::ATT};
+
+  // The register allocator the JIT should use.
+  RegAllocKind reg_alloc{RegAllocKind::kLinearScan};
+
+  // List of function name patterns for which to capture compilation times.
+  std::vector<std::string> capture_compilation_times_for;
+
+  // Use stable sentinel pointers in output (for deterministic test output).
+  bool use_stable_pointers{false};
+
+  // Delay adaptive specialization until a function has been called enough
+  // times.
+  bool delay_adaptive_code{false};
+  // Number of calls before adaptive specialization kicks in.
+  uint64_t adaptive_threshold{80};
 };
 
+// The JIT's config object. The accessors defined below are used in very hot
+// paths in the JIT and need to be defined in a header to ensure that they are
+// inlined reliably without LTO.
+extern Config s_jit_config;
+
 // Get the JIT's current config object.
-const Config& getConfig();
+inline const Config& getConfig() {
+  return s_jit_config;
+}
 
 // Get the JIT's current config object with the intent of modifying it.
-Config& getMutableConfig();
+inline Config& getMutableConfig() {
+  return s_jit_config;
+}
 
 // Check that the JIT is initialized.  Though it might be paused and or
 // finalizing, it's not necessarily usable.
@@ -221,4 +298,4 @@ bool isJitUsable();
 // Check that the JIT is initialized but currently paused and unusable.
 bool isJitPaused();
 
-} // namespace jit
+} // namespace cinderx::jit

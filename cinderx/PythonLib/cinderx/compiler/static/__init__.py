@@ -13,7 +13,6 @@ from ast import (
     AsyncFunctionDef,
     Attribute,
     BinOp,
-    BoolOp,
     Call,
     ClassDef,
     cmpop,
@@ -40,13 +39,13 @@ from ..pyassem import (
     PyFlowGraph312,
     PyFlowGraph314,
     PyFlowGraph315,
-    PyFlowGraphCinder310,
+    PyFlowGraph316,
 )
 from ..pycodegen import (
-    CinderCodeGenerator310,
     CinderCodeGenerator312,
     CinderCodeGenerator314,
     CinderCodeGenerator315,
+    CinderCodeGenerator316,
     CodeGenerator,
     CodeGenTree,
     compile_code,
@@ -54,11 +53,7 @@ from ..pycodegen import (
     FuncOrLambda,
     PatternContext,
 )
-from ..strict import (
-    StrictCodeGenerator310,
-    StrictCodeGenerator312,
-    StrictCodeGenerator314,
-)
+from ..strict import StrictCodeGenerator312, StrictCodeGenerator314
 from ..strict.code_gen_base import StrictCodeGenBase
 from ..strict.common import FIXED_MODULES
 from ..symbols import BaseSymbolVisitor, ClassScope, ModuleScope, Scope
@@ -93,13 +88,6 @@ from .types import (
     Value,
 )
 
-try:
-    from cinder import _set_qualname
-except ImportError:
-
-    def _set_qualname(code: CodeType, qualname: str) -> None:
-        pass
-
 
 def exec_static(
     source: str,
@@ -133,10 +121,6 @@ class StaticPatternContext(PatternContext):
         return pc
 
 
-class PyFlowGraphStatic310(PyFlowGraphCinder310):
-    opcode: Opcode = opcode_static.opcode
-
-
 class PyFlowGraphStatic312(PyFlowGraph312):
     opcode: Opcode = opcode_static.opcode
 
@@ -155,9 +139,7 @@ class InitSubClassGenerator:
         return self.qualname
 
     def getCode(self) -> CodeType:
-        code = self.flow_graph.getCode()
-        _set_qualname(code, self.qualname)
-        return code
+        return self.flow_graph.getCode()
 
 
 class StaticCodeGenBase(StrictCodeGenBase):
@@ -248,6 +230,7 @@ class StaticCodeGenBase(StrictCodeGenBase):
             t = self.get_type(arg)
             if self._is_type_checked(t.klass):
                 arg_checks.append(self._calculate_idx(arg.arg, i, cellvars))
+                # pyrefly: ignore [bad-argument-type]
                 arg_checks.append(t.klass.type_descr)
 
         for i, arg in enumerate(args.args):
@@ -262,6 +245,7 @@ class StaticCodeGenBase(StrictCodeGenBase):
                 arg_checks.append(
                     self._calculate_idx(arg.arg, i + len(args.posonlyargs), cellvars)
                 )
+                # pyrefly: ignore [bad-argument-type]
                 arg_checks.append(t.klass.type_descr)
 
         for i, arg in enumerate(args.kwonlyargs):
@@ -274,6 +258,7 @@ class StaticCodeGenBase(StrictCodeGenBase):
                         cellvars,
                     )
                 )
+                # pyrefly: ignore [bad-argument-type]
                 arg_checks.append(t.klass.type_descr)
 
         # we should never emit arg checks for object
@@ -294,6 +279,7 @@ class StaticCodeGenBase(StrictCodeGenBase):
         self.cur_mod.set_node_data(key, data_type, value)
 
     @classmethod
+    # pyrefly: ignore [bad-override]
     def make_code_gen(
         cls,
         module_name: str,
@@ -924,7 +910,7 @@ class StaticCodeGenBase(StrictCodeGenBase):
         # the final dict.  This allows us to not introduce a new opcode, but we should
         # also be able to dispatch the INVOKE_METHOD rather efficiently.
         dict_descr = dict_type.klass.type_descr
-        update_descr = dict_descr + ("update",)
+        update_descr = (dict_descr, "update")
         for i, (k, v) in enumerate(zip(node.keys, node.values)):
             is_unpacking = k is None
             if elements == 0xFFFF or (elements and is_unpacking):
@@ -938,6 +924,7 @@ class StaticCodeGenBase(StrictCodeGenBase):
                     self.emit("BUILD_CHECKED_MAP", (dict_descr, 0))
                     built_final_dict = True
                 self.emit_dup()
+                self.emit_load_static_method(update_descr)
                 self.visit(v)
 
                 self.emit_invoke_method(update_descr, 1)
@@ -948,6 +935,7 @@ class StaticCodeGenBase(StrictCodeGenBase):
         if elements or not built_final_dict:
             if built_final_dict:
                 self.emit_dup()
+                self.emit_load_static_method(update_descr)
             self.compile_subgendict(
                 node, len(node.keys) - elements, len(node.keys), dict_descr
             )
@@ -1029,6 +1017,7 @@ class StaticCodeGenBase(StrictCodeGenBase):
         if elements or not built_final_list:
             if built_final_list:
                 self.emit_dup()
+                self.emit_load_static_method(extend_descr)
             self.compile_sub_checked_list(
                 node, len(node.elts) - elements, len(node.elts), list_descr
             )
@@ -1095,7 +1084,9 @@ class StaticCodeGenBase(StrictCodeGenBase):
                 "visit" + className,
                 StaticCodeGenBase.generic_visit,
             )
+            # pyrefly: ignore [unsupported-operation]
             self._default_cache[klass] = meth
+        # pyrefly: ignore [bad-return]
         return meth(self, node, *args)
 
     def get_bool_const(self, node: AST) -> bool | None:
@@ -1211,69 +1202,6 @@ class StaticCodeGenBase(StrictCodeGenBase):
             # in static.types.CIntInstance.bind_compare, and we need to
             # box `x` here before the COMPARE opcode is emitted.
             ltype.emit_box(self)
-
-
-class Static310CodeGenerator(StaticCodeGenBase, CinderCodeGenerator310):
-    flow_graph = PyFlowGraphStatic310
-    parent_impl = StrictCodeGenerator310
-
-    def visitBoolOp(self, node: BoolOp) -> None:
-        end = self.newBlock()
-        for child in node.values[:-1]:
-            self.get_type(child).emit_jumpif_pop(
-                child, end, type(node.op) is ast.Or, self
-            )
-            self.nextBlock()
-        self.visit(node.values[-1])
-        self.nextBlock(end)
-
-    def visitCompare(self, node: Compare) -> None:
-        self.set_pos(node)
-        self.visit(node.left)
-        cleanup = self.newBlock("cleanup")
-        left = node.left
-        for op, code in zip(node.ops[:-1], node.comparators[:-1]):
-            optype = self.get_type(op)
-            ltype = self.get_type(left)
-            if ltype != optype:
-                optype.emit_convert(ltype, self)
-            self.emitChainedCompareStep(op, code, cleanup)
-            left = code
-        # now do the last comparison
-        if node.ops:
-            op = node.ops[-1]
-            optype = self.get_type(op)
-            ltype = self.get_type(left)
-            if ltype != optype:
-                self.emit_convert_compare_arg(op, optype, ltype)
-            code = node.comparators[-1]
-            self.visit(code)
-            rtype = self.get_type(code)
-            if rtype != optype:
-                optype.emit_convert(rtype, self)
-            optype.emit_compare(op, self)
-        if len(node.ops) > 1:
-            end = self.newBlock("end")
-            self.emit_jump_forward(end)
-            self.nextBlock(cleanup)
-            self.emit_rotate_stack(2)
-            self.emit("POP_TOP")
-            self.nextBlock(end)
-
-    def emitChainedCompareStep(
-        self, op: cmpop, value: AST, cleanup: Block, always_pop: bool = False
-    ) -> None:
-        optype = self.get_type(op)
-        self.visit(value)
-        rtype = self.get_type(value)
-        if rtype != optype:
-            optype.emit_convert(rtype, self)
-        self.emit_dup()
-        self.emit_rotate_stack(3)
-        optype.emit_compare(op, self)
-        method = optype.emit_jumpif_only if always_pop else optype.emit_jumpif_pop_only
-        method(cleanup, False, self)
-        self.nextBlock(label="compare_or_cleanup")
 
 
 class Static312CodeGenerator(StaticCodeGenBase, CinderCodeGenerator312):
@@ -1394,11 +1322,15 @@ class Static315CodeGenerator(Static314CodeGenerator, CinderCodeGenerator315):
     flow_graph = PyFlowGraph315
 
 
-if sys.version_info >= (3, 15):
+class Static316CodeGenerator(Static315CodeGenerator, CinderCodeGenerator316):
+    flow_graph = PyFlowGraph316
+
+
+if sys.version_info >= (3, 16):
+    StaticCodeGenerator = Static316CodeGenerator
+elif sys.version_info >= (3, 15):
     StaticCodeGenerator = Static315CodeGenerator
 elif sys.version_info >= (3, 14):
     StaticCodeGenerator = Static314CodeGenerator
-elif sys.version_info >= (3, 12):
-    StaticCodeGenerator = Static312CodeGenerator
 else:
-    StaticCodeGenerator = Static310CodeGenerator
+    StaticCodeGenerator = Static312CodeGenerator

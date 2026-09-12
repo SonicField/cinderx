@@ -4,21 +4,21 @@
 
 #include "cinderx/Jit/hir/pass.h"
 
-namespace jit::hir {
+namespace cinderx::jit::hir {
 
 // Inserts incref/decref instructions.
-class RefcountInsertion : public Pass {
+class RefcountInsertion final : public Pass {
  public:
   RefcountInsertion() : Pass("RefcountInsertion") {}
 
-  void Run(Function& irfunc) override;
+  RefcountInsertion(const RefcountInsertion&) = delete;
+  RefcountInsertion& operator=(const RefcountInsertion&) = delete;
 
-  static std::unique_ptr<RefcountInsertion> Factory() {
+  void run(Function& irfunc) override;
+
+  static std::unique_ptr<RefcountInsertion> factory() {
     return std::make_unique<RefcountInsertion>();
   }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(RefcountInsertion);
 };
 
-} // namespace jit::hir
+} // namespace cinderx::jit::hir

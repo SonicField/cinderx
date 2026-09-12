@@ -13,8 +13,15 @@ from dataclasses import dataclass
 from enum import IntEnum, IntFlag
 
 try:
-    # pyre-ignore[21]: No _inline_cache_entries
-    from opcode import _inline_cache_entries
+    # Import from .opcodes rather than opcode so we get the version with
+    # CinderX inline cache entries included (on 3.15+ opcodes.py copies the
+    # dict before mutating it, so the original opcode._inline_cache_entries
+    # doesn't have CinderX entries).
+    if sys.version_info >= (3, 15):
+        from .opcodes import _inline_cache_entries
+    else:
+        # pyre-ignore[21]: No _inline_cache_entries
+        from opcode import _inline_cache_entries
 except ImportError:
     _inline_cache_entries = None
 from types import CodeType
@@ -41,15 +48,18 @@ from .consts import (
 )
 from .debug import dump_graph
 from .flow_graph_optimizer import (
+    convert_load_const_to_load_common_constant,
     FlowGraphConstOptimizer314,
+    FlowGraphConstOptimizer315,
+    FlowGraphConstOptimizer316,
     FlowGraphOptimizer,
-    FlowGraphOptimizer310,
     FlowGraphOptimizer312,
     FlowGraphOptimizer314,
+    FlowGraphOptimizer316,
 )
 from .opcode_cinder import opcode as cinder_opcode
 from .opcodebase import Opcode
-from .opcodes import opcode as opcodes_opcode, STATIC_OPCODES
+from .opcodes import opcode as opcodes_opcode, STATIC_OPCODES, STATIC_OPMAP
 from .symbols import ClassScope, Scope
 
 
@@ -61,9 +71,14 @@ class ResumeOparg(IntFlag):
     Yield = 1
     YieldFrom = 2
     Await = 3
+    GenExprStart = 4
 
-    LocationMask = 0x03
-    Depth1Mask = 0x04
+    if sys.version_info >= (3, 15):
+        LocationMask = 0x07
+        Depth1Mask = 0x08
+    else:
+        LocationMask = 0x03
+        Depth1Mask = 0x04
 
 
 def sign(a: float) -> float:
@@ -182,7 +197,7 @@ class Instruction:
         return f"Instruction({', '.join(args)})"
 
     def is_jump(self, opcode: Opcode) -> bool:
-        op = opcode.opmap[self.opname]
+        op = STATIC_OPMAP[self.opname]
         return opcode.has_jump(op)
 
     def set_to_nop(self) -> None:
@@ -594,6 +609,7 @@ class IndexedSet:
 
 TConstValue = TypeVar("TConstValue", bound=object)
 TConstKey: TypeAlias = (
+    # pyrefly: ignore [invalid-argument]
     tuple[type[TConstValue], TConstValue] | tuple[type[TConstValue], TConstValue, ...]
 )
 
@@ -619,6 +635,7 @@ class PyFlowGraph(FlowGraph):
         posonlyargs: int = 0,
         suppress_default_const: bool = False,
     ) -> None:
+        # pyrefly: ignore [bad-argument-count]
         self.super_init()
         self.name = name
         self.filename = filename
@@ -819,6 +836,7 @@ class PyFlowGraph(FlowGraph):
 
                     assert target_depth >= 0
 
+                    # pyrefly: ignore [bad-argument-type]
                     self.push_block(worklist, instr.target, target_depth)
 
                 depth = new_depth
@@ -926,6 +944,7 @@ class PyFlowGraph(FlowGraph):
         res = self.consts.get(key, self)
         if res is self:
             res = self.consts[key] = len(self.consts)
+        # pyrefly: ignore [bad-return]
         return res
 
     def get_const_key(self, value: TConstValue) -> TConstKey:
@@ -993,59 +1012,109 @@ class PyFlowGraph(FlowGraph):
 
     # similarly for other opcodes...
     _converters: dict[str, Callable[[PyFlowGraph, object], int]] = {
+        # pyrefly: ignore [bad-assignment]
         "LOAD_CLASS": _convert_LOAD_CONST,
+        # pyrefly: ignore [bad-assignment]
         "LOAD_CONST": _convert_LOAD_CONST,
+        # pyrefly: ignore [bad-assignment]
         "INVOKE_FUNCTION": _convert_LOAD_CONST,
+        # pyrefly: ignore [bad-assignment]
         "INVOKE_METHOD": _convert_LOAD_CONST,
+        # pyrefly: ignore [bad-assignment]
         "LOAD_METHOD_STATIC": _convert_LOAD_CONST,
+        # pyrefly: ignore [bad-assignment]
         "INVOKE_NATIVE": _convert_LOAD_CONST,
+        # pyrefly: ignore [bad-assignment]
         "LOAD_FIELD": _convert_LOAD_CONST,
+        # pyrefly: ignore [bad-assignment]
         "STORE_FIELD": _convert_LOAD_CONST,
+        # pyrefly: ignore [bad-assignment]
         "CAST": _convert_LOAD_CONST,
+        # pyrefly: ignore [bad-assignment]
         "TP_ALLOC": _convert_LOAD_CONST,
+        # pyrefly: ignore [bad-assignment]
         "BUILD_CHECKED_MAP": _convert_LOAD_CONST,
+        # pyrefly: ignore [bad-assignment]
         "BUILD_CHECKED_LIST": _convert_LOAD_CONST,
+        # pyrefly: ignore [bad-assignment]
         "PRIMITIVE_LOAD_CONST": _convert_LOAD_CONST,
+        # pyrefly: ignore [bad-assignment]
         "LOAD_FAST": _convert_LOAD_FAST,
+        # pyrefly: ignore [bad-assignment]
         "LOAD_FAST_AND_CLEAR": _convert_LOAD_FAST,
+        # pyrefly: ignore [bad-assignment]
         "STORE_FAST": _convert_LOAD_FAST,
+        # pyrefly: ignore [bad-assignment]
         "STORE_FAST_MAYBE_NULL": _convert_LOAD_FAST,
+        # pyrefly: ignore [bad-assignment]
         "DELETE_FAST": _convert_LOAD_FAST,
+        # pyrefly: ignore [bad-assignment]
         "LOAD_LOCAL": _convert_LOAD_LOCAL,
+        # pyrefly: ignore [bad-assignment]
         "STORE_LOCAL": _convert_LOAD_LOCAL,
+        # pyrefly: ignore [bad-assignment]
         "LOAD_NAME": _convert_NAME,
+        # pyrefly: ignore [bad-assignment]
         "LOAD_FROM_DICT_OR_DEREF": _convert_DEREF,
+        # pyrefly: ignore [bad-assignment]
         "LOAD_FROM_DICT_OR_GLOBALS": _convert_NAME,
+        # pyrefly: ignore [bad-argument-type]
         "LOAD_CLOSURE": lambda self, arg: self.closure.get_index(arg),
         "COMPARE_OP": lambda self, arg: self.opcode.CMP_OP.index(arg),
+        # pyrefly: ignore [bad-assignment]
         "LOAD_GLOBAL": _convert_NAME,
+        # pyrefly: ignore [bad-assignment]
         "STORE_GLOBAL": _convert_NAME,
+        # pyrefly: ignore [bad-assignment]
         "DELETE_GLOBAL": _convert_NAME,
+        # pyrefly: ignore [bad-assignment]
         "CONVERT_NAME": _convert_NAME,
+        # pyrefly: ignore [bad-assignment]
         "STORE_NAME": _convert_NAME,
+        # pyrefly: ignore [bad-assignment]
         "STORE_ANNOTATION": _convert_NAME,
+        # pyrefly: ignore [bad-assignment]
         "DELETE_NAME": _convert_NAME,
+        # pyrefly: ignore [bad-assignment]
         "IMPORT_NAME": _convert_NAME,
+        # pyrefly: ignore [bad-assignment]
         "IMPORT_FROM": _convert_NAME,
+        # pyrefly: ignore [bad-assignment]
         "STORE_ATTR": _convert_NAME,
+        # pyrefly: ignore [bad-assignment]
         "LOAD_ATTR": _convert_NAME,
+        # pyrefly: ignore [bad-assignment]
         "DELETE_ATTR": _convert_NAME,
+        # pyrefly: ignore [bad-assignment]
         "LOAD_METHOD": _convert_NAME,
+        # pyrefly: ignore [bad-assignment]
         "LOAD_DEREF": _convert_DEREF,
+        # pyrefly: ignore [bad-assignment]
         "STORE_DEREF": _convert_DEREF,
+        # pyrefly: ignore [bad-assignment]
         "DELETE_DEREF": _convert_DEREF,
+        # pyrefly: ignore [bad-assignment]
         "LOAD_CLASSDEREF": _convert_DEREF,
+        # pyrefly: ignore [bad-assignment]
         "REFINE_TYPE": _convert_LOAD_CONST,
+        # pyrefly: ignore [bad-assignment]
         "LOAD_METHOD_SUPER": _convert_LOAD_SUPER,
+        # pyrefly: ignore [bad-assignment]
         "LOAD_ATTR_SUPER": _convert_LOAD_SUPER,
+        # pyrefly: ignore [bad-assignment]
         "LOAD_SUPER_ATTR": _convert_LOAD_SUPER_ATTR,
+        # pyrefly: ignore [bad-assignment]
         "LOAD_ZERO_SUPER_ATTR": _convert_LOAD_SUPER_ATTR,
+        # pyrefly: ignore [bad-assignment]
         "LOAD_SUPER_METHOD": _convert_LOAD_SUPER_ATTR,
+        # pyrefly: ignore [bad-assignment]
         "LOAD_ZERO_SUPER_METHOD": _convert_LOAD_SUPER_ATTR,
+        # pyrefly: ignore [bad-assignment]
         "LOAD_TYPE": _convert_LOAD_CONST,
     }
 
     # Converters which add an entry to co_consts
+    # pyrefly: ignore [bad-assignment]
     _const_converters: set[Callable[[PyFlowGraph, object], int]] = {
         _convert_LOAD_CONST,
         _convert_LOAD_LOCAL,
@@ -1301,8 +1370,10 @@ class PyFlowGraph(FlowGraph):
             last = block.insts[-1]
             if last.is_jump(self.opcode) and last.opname != "END_ASYNC_FOR":
                 target = last.target
+                # pyrefly: ignore [missing-attribute]
                 while not target.insts and target.next:
                     target = target.next
+                # pyrefly: ignore [bad-assignment]
                 last.target = target
         self.ordered_blocks = [block for block in self.ordered_blocks if block.insts]
 
@@ -1345,6 +1416,7 @@ class PyFlowGraph(FlowGraph):
                 worklist.append(next)
                 next.num_predecessors += 1
 
+        # pyrefly: ignore [bad-argument-type]
         self.unlink_unreachable_basic_blocks(reachable_blocks)
 
     def normalize_basic_block(self, block: Block) -> None:
@@ -1410,144 +1482,6 @@ class PyFlowGraph(FlowGraph):
         }
 
 
-class PyFlowGraph310(PyFlowGraph):
-    flow_graph_optimizer = FlowGraphOptimizer310
-
-    # pyre-ignore[2] Forwarding all of the arguments up to the super __init__.
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        # Final assembled code objects
-        self.bytecode: bytes | None = None
-        self.line_table: bytes | None = None
-
-    def emit_call_one_arg(self) -> None:
-        self.emit("CALL_FUNCTION", 1)
-
-    def emit_load_method(self, name: str) -> None:
-        self.emit("LOAD_METHOD", name)
-
-    def emit_call_method(self, argcnt: int) -> None:
-        self.emit("CALL_METHOD", argcnt)
-
-    def emit_prologue(self) -> None:
-        pass
-
-    def is_exit_without_line_number(self, target: Block) -> bool:
-        return target.is_exit and target.insts[0].lineno < 0
-
-    def get_duplicate_exit_visitation_order(self) -> Iterable[Block]:
-        return self.blocks_in_reverse_allocation_order()
-
-    def emit_jump_forward(self, target: Block) -> None:
-        self.emit("JUMP_FORWARD", target)
-
-    def emit_jump_forward_noline(self, target: Block) -> None:
-        self.emit_noline("JUMP_FORWARD", target)
-
-    def optimizeCFG(self) -> None:
-        """Optimize a well-formed CFG."""
-        for block in self.blocks_in_reverse_allocation_order():
-            self.extend_block(block)
-
-        assert self.stage == CLOSED, self.stage
-
-        optimizer = self.flow_graph_optimizer(self)
-        for block in self.ordered_blocks:
-            optimizer.optimize_basic_block(block)
-            optimizer.clean_basic_block(block, -1)
-
-        for block in self.blocks_in_reverse_allocation_order():
-            self.extend_block(block)
-
-        self.remove_redundant_nops(optimizer)
-
-        self.eliminate_empty_basic_blocks()
-        self.remove_unreachable_basic_blocks()
-
-        maybe_empty_blocks = self.remove_redundant_jumps(optimizer)
-
-        if maybe_empty_blocks:
-            self.eliminate_empty_basic_blocks()
-
-        self.stage = OPTIMIZED
-
-    def assemble_final_code(self) -> None:
-        """Finish assembling code object components from the final graph."""
-        self.finalize()
-        assert self.stage == FINAL, self.stage
-
-        self.compute_stack_depth()
-        self.flatten_graph()
-
-        assert self.stage == FLAT, self.stage
-        self.bytecode = self.make_byte_code()
-        self.line_table = self.make_line_table()
-
-    def getCode(self) -> CodeType:
-        """Get a Python code object"""
-        self.assemble_final_code()
-        bytecode = self.bytecode
-        assert bytecode is not None
-        line_table = self.line_table
-        assert line_table is not None
-        assert self.stage == DONE, self.stage
-        return self.new_code_object(bytecode, line_table)
-
-    def new_code_object(self, code: bytes, lnotab: bytes) -> CodeType:
-        assert self.stage == DONE, self.stage
-        if (self.flags & CO_NEWLOCALS) == 0:
-            nlocals = len(self.fast_vars)
-        else:
-            nlocals = len(self.varnames)
-
-        firstline = self.firstline
-        # For module, .firstline is initially not set, and should be first
-        # line with actual bytecode instruction (skipping docstring, optimized
-        # out instructions, etc.)
-        if not firstline:
-            firstline = self.first_inst_lineno
-        # If no real instruction, fallback to 1
-        if not firstline:
-            firstline = 1
-
-        consts = self.getConsts()
-        consts = consts + tuple(self.extra_consts)
-        return self.make_code(nlocals, code, consts, firstline, lnotab)
-
-    def make_code(
-        self,
-        nlocals: int,
-        code: bytes,
-        consts: tuple[object, ...],
-        firstline: int,
-        lnotab: bytes,
-    ) -> CodeType:
-        return CodeType(
-            len(self.args),
-            self.posonlyargs,
-            len(self.kwonlyargs),
-            nlocals,
-            self.stacksize,
-            self.flags,
-            code,
-            consts,
-            tuple(self.names),
-            tuple(self.varnames),
-            self.filename,
-            self.name,
-            # pyre-fixme[6]: For 13th argument expected `str` but got `int`.
-            firstline,
-            # pyre-fixme[6]: For 14th argument expected `int` but got `bytes`.
-            lnotab,
-            # pyre-fixme[6]: For 15th argument expected `bytes` but got `tuple[str,
-            #  ...]`.
-            tuple(self.freevars),
-            # pyre-fixme[6]: For 16th argument expected `bytes` but got `tuple[str,
-            #  ...]`.
-            tuple(self.cellvars),
-        )
-
-
 class PyFlowGraphCinderMixin(PyFlowGraph):
     opcode: Opcode = cinder_opcode
 
@@ -1566,10 +1500,6 @@ class PyFlowGraphCinderMixin(PyFlowGraph):
             self.setFlag(CO_SUPPRESS_JIT)
         # pyre-ignore[16]: `PyFlowGraph` has no attribute `make_code`
         return super().make_code(nlocals, code, consts, firstline, lnotab)
-
-
-class PyFlowGraphCinder310(PyFlowGraphCinderMixin, PyFlowGraph310):
-    pass
 
 
 class PyFlowGraph312(PyFlowGraph):
@@ -1777,6 +1707,7 @@ class PyFlowGraph312(PyFlowGraph):
                 to_end.append(block)
 
         for block in to_end:
+            # pyrefly: ignore [missing-attribute]
             prev.next = block
             block.prev = prev
             prev = block
@@ -2050,12 +1981,14 @@ class PyFlowGraph312(PyFlowGraph):
     def instrsize(self, instr: Instruction, oparg: int) -> int:
         opname = instr.opname
         opcode_index = opcodes_opcode.opmap[opname]
+        # pyrefly: ignore [bad-argument-type]
         if opcode_index >= len(_inline_cache_entries):
             # T190611021: This should never happen as we should remove pseudo
             # instructions, but we are still missing some functionality
             # like zero-cost exceptions so we emit things like END_FINALLY
             base_size = 0
         else:
+            # pyrefly: ignore [unsupported-operation]
             base_size = _inline_cache_entries[opcode_index]
         if oparg <= 0xFF:
             return 1 + base_size
@@ -2117,6 +2050,7 @@ class PyFlowGraph312(PyFlowGraph):
         for block in self.ordered_blocks:
             seen_blocks.add(block.bid)
             if block.insts:
+                # pyrefly: ignore [bad-argument-type]
                 ret = self.normalize_jumps_in_block(block, seen_blocks)
                 new_blocks[block] = ret
         new_ordered = []
@@ -2130,7 +2064,9 @@ class PyFlowGraph312(PyFlowGraph):
         self, opcode: str, addCode: Callable[[int, int], None]
     ) -> None:
         opcode_index = opcodes_opcode.opmap[opcode]
+        # pyrefly: ignore [bad-argument-type]
         if opcode_index < len(_inline_cache_entries):
+            # pyrefly: ignore [unsupported-operation]
             base_size = _inline_cache_entries[opcode_index]
         else:
             base_size = 0
@@ -2260,7 +2196,6 @@ class PyFlowGraph312(PyFlowGraph):
         lnotab: bytes,
         exception_table: bytes,
     ) -> CodeType:
-        # pyre-ignore[19]: Too many arguments (this is right for 3.12)
         return CodeType(
             len(self.args),
             self.posonlyargs,
@@ -2347,12 +2282,14 @@ class PyFlowGraph312(PyFlowGraph):
     _const_opcodes.add("KW_NAMES")
 
 
+# pyrefly: ignore [inconsistent-inheritance]
 class PyFlowGraphCinder312(PyFlowGraphCinderMixin, PyFlowGraph312):
     pass
 
 
 class PyFlowGraph314(PyFlowGraph312):
     flow_graph_optimizer = FlowGraphOptimizer314
+    flow_graph_const_optimizer = FlowGraphConstOptimizer314
     _constant_idx: dict[object, int] = {
         AssertionError: 0,
         NotImplementedError: 1,
@@ -2361,6 +2298,8 @@ class PyFlowGraph314(PyFlowGraph312):
         any: 4,
         list: 5,
         set: 6,
+        # CONSTANT_BUILTIN_FROZENSET; only emitted by the 3.16 code generator.
+        frozenset: 12,
     }
     _load_special_idx = {
         "__enter__": 0,
@@ -2443,6 +2382,7 @@ class PyFlowGraph314(PyFlowGraph312):
                 to_end.append(block)
 
         for block in to_end:
+            # pyrefly: ignore [missing-attribute]
             prev.next = block
             block.prev = prev
             prev = block
@@ -2485,7 +2425,9 @@ class PyFlowGraph314(PyFlowGraph312):
                 if instr.is_jump(self.opcode):
                     target = instr.target
                     if target not in warm and target not in visited:
+                        # pyrefly: ignore [bad-argument-type]
                         stack.append(target)
+                        # pyrefly: ignore [bad-argument-type]
                         visited.add(target)
         return cold
 
@@ -2572,6 +2514,7 @@ class PyFlowGraph314(PyFlowGraph312):
     _converters: dict[str, Callable[[PyFlowGraph, object], int]] = {
         **PyFlowGraph312._converters,
         "LOAD_COMMON_CONSTANT": lambda self, val: PyFlowGraph314._constant_idx[val],
+        # pyrefly: ignore [bad-index]
         "LOAD_SPECIAL": lambda self, val: PyFlowGraph314._load_special_idx[val],
         "COMPARE_OP": _convert_compare_op,
     }
@@ -2584,6 +2527,7 @@ class PyFlowGraph314(PyFlowGraph312):
 
     def instrsize(self, instr: Instruction, oparg: int) -> int:
         opname = instr.opname
+        # pyrefly: ignore [missing-attribute]
         base_size = _inline_cache_entries.get(opname, 0)
         if opname in STATIC_OPCODES:
             # extended opcode
@@ -2642,6 +2586,7 @@ class PyFlowGraph314(PyFlowGraph312):
     def emit_inline_cache(
         self, opcode: str, addCode: Callable[[int, int], None]
     ) -> None:
+        # pyrefly: ignore [missing-attribute]
         base_size = _inline_cache_entries.get(opcode, 0)
         for _i in range(base_size):
             addCode(0, 0)
@@ -2998,11 +2943,18 @@ class PyFlowGraph314(PyFlowGraph312):
                     for _ in range(net_popped):
                         refs.pop()
 
-                elif opcode in ("END_SEND", "SET_FUNCTION_ATTRIBUTE"):
+                elif opcode == "SET_FUNCTION_ATTRIBUTE":
                     assert self.opcode.stack_effect_raw(opcode, oparg, False) == -1
                     tos = refs.pop()
-                    refs.pop()  # Pop the second item
-                    refs.append(Ref(tos.instr, tos.local))  # Push back the top item
+                    refs.pop()
+                    refs.append(Ref(tos.instr, tos.local))
+
+                elif opcode == "END_SEND":
+                    effect = self.opcode.stack_effect_raw(opcode, oparg, False)
+                    tos = refs.pop()
+                    for _ in range(-effect):
+                        refs.pop()
+                    refs.append(Ref(tos.instr, tos.local))
 
                 # Handle opcodes that consume some inputs and push new values
                 elif opcode == "CHECK_EXC_MATCH":
@@ -3207,7 +3159,9 @@ class PyFlowGraph314(PyFlowGraph312):
             if last.opname not in UNCONDITIONAL_JUMP_OPCODES:
                 continue
             target = last.target
+            # pyrefly: ignore [missing-attribute]
             while not target.insts:
+                # pyrefly: ignore [missing-attribute]
                 target = target.next
             next = block.next
             while next and not next.insts:
@@ -3228,6 +3182,10 @@ class PyFlowGraph314(PyFlowGraph312):
             if not removed:
                 break
 
+    def convert_load_const_to_load_common_constant(self) -> None:
+        # This is not done on 3.14, only on 3.15 and later
+        pass
+
     def optimizeCFG(self) -> None:
         """Optimize a well-formed CFG."""
         self.mark_except_handlers()
@@ -3241,7 +3199,7 @@ class PyFlowGraph314(PyFlowGraph312):
         self.remove_unreachable_basic_blocks()
         self.propagate_line_numbers()
 
-        const_optimizer = FlowGraphConstOptimizer314(self)
+        const_optimizer = self.flow_graph_const_optimizer(self)
         for block in self.ordered_blocks:
             const_optimizer.optimize_basic_block(block)
 
@@ -3259,6 +3217,8 @@ class PyFlowGraph314(PyFlowGraph312):
         self.remove_unreachable_basic_blocks()
         self.remove_redundant_nops_and_jumps(optimizer)
 
+        self.convert_load_const_to_load_common_constant()
+
         self.stage = OPTIMIZED
 
         self.remove_unused_consts()
@@ -3271,6 +3231,27 @@ class PyFlowGraph314(PyFlowGraph312):
 
 
 class PyFlowGraph315(PyFlowGraph314):
+    flow_graph_const_optimizer = FlowGraphConstOptimizer315
+
+    END_SEND_OFFSET = 6
+
+    def convert_load_const_to_load_common_constant(self) -> None:
+        convert_load_const_to_load_common_constant(self.ordered_blocks)
+
+    def is_redundant_pair(
+        self, prev_instr: Instruction | None, instr: Instruction
+    ) -> bool:
+        if prev_instr is not None and instr.opname == "POP_TOP":
+            if prev_instr.opname in (
+                "LOAD_CONST",
+                "LOAD_SMALL_INT",
+                "LOAD_COMMON_CONSTANT",
+            ):
+                return True
+            elif prev_instr.opname == "COPY" and prev_instr.oparg == 1:
+                return True
+        return False
+
     def _convert_IMPORT_NAME(self: PyFlowGraph, arg: object) -> int:
         if isinstance(arg, tuple):
             name, flags = arg
@@ -3322,6 +3303,38 @@ class PyFlowGraph315(PyFlowGraph314):
                 # to random memory...
                 if target.num_predecessors == 1 and target.insts:
                     self.maybe_propagate_location(target.insts[0], prev_loc)
+
+
+class PyFlowGraph316(PyFlowGraph315):
+    flow_graph_optimizer = FlowGraphOptimizer316
+    flow_graph_const_optimizer = FlowGraphConstOptimizer316
+
+    def convert_load_const_to_load_common_constant(self) -> None:
+        convert_load_const_to_load_common_constant(
+            self.ordered_blocks, allow_empty_tuple=True
+        )
+
+    def emit_with_loc(self, opcode: str, oparg: object, loc: AST | SrcLocation) -> None:
+        # 3.16a1 removed DELETE_NAME/DELETE_GLOBAL (magic 3702/3703) and
+        # DELETE_ATTR (gh-145855): deleting is now PUSH_NULL; STORE_{NAME,GLOBAL,
+        # ATTR}, where storing NULL performs the delete. DELETE_FAST/DELETE_DEREF
+        # are unchanged. We rewrite in emit_with_loc (not emit) because attribute
+        # ops call emit_with_loc directly while emit() delegates here, so this
+        # single override catches every emission site.
+        if opcode == "DELETE_NAME":
+            super().emit_with_loc("PUSH_NULL", 0, loc)
+            super().emit_with_loc("STORE_NAME", oparg, loc)
+        elif opcode == "DELETE_GLOBAL":
+            super().emit_with_loc("PUSH_NULL", 0, loc)
+            super().emit_with_loc("STORE_GLOBAL", oparg, loc)
+        elif opcode == "DELETE_ATTR":
+            # The owner is already on the stack, so swap it above the pushed NULL
+            # to get the STORE_ATTR operand order (value, owner) right.
+            super().emit_with_loc("PUSH_NULL", 0, loc)
+            super().emit_with_loc("SWAP", 2, loc)
+            super().emit_with_loc("STORE_ATTR", oparg, loc)
+        else:
+            super().emit_with_loc(opcode, oparg, loc)
 
 
 # Constants for reference tracking flags
@@ -3703,7 +3716,7 @@ class ExceptionTable:
         assert value >= 0 and value < (1 << 30)
         CONTINUATION_BIT = 64
 
-        if value > (1 << 24):
+        if value >= (1 << 24):
             self.write_byte((value >> 24) | CONTINUATION_BIT | msb)
             msb = 0
         for i in (18, 12, 6):

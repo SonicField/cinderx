@@ -5,7 +5,7 @@
 #include "cinderx/Jit/code_patcher.h"
 #include "cinderx/Jit/threaded_compile.h"
 
-namespace jit {
+namespace cinderx::jit {
 
 // Patch a DeoptPatchpoint when the given PyTypeObject changes at all. This
 // should only be used (instead of a more specific subclass) in cases where it
@@ -16,6 +16,16 @@ class TypeDeoptPatcher : public JumpPatcher {
   explicit TypeDeoptPatcher(BorrowedRef<PyTypeObject> type);
 
   virtual bool maybePatch(BorrowedRef<PyTypeObject> new_ty);
+
+  // Re-check, without patching, that the assumptions this patcher was created
+  // with still hold. Used to validate watches deferred during
+  // threaded/background compilation: the type may have changed between the
+  // compile's checks and the installation of the watch, in which case the
+  // watch would never fire for that change. Must be called with the GIL held,
+  // which callers guarantee; in particular it must not use
+  // ThreadedCompileGILHolder, as the compile context is still active when
+  // finalizing on a background worker.
+  virtual bool assumptionsStillValid() const;
 
   // Access the type being watched.
   BorrowedRef<PyTypeObject> type() const;
@@ -38,12 +48,14 @@ class TypeAttrDeoptPatcher : public TypeDeoptPatcher {
       BorrowedRef<> target_object);
 
   bool maybePatch(BorrowedRef<PyTypeObject> new_ty) override;
+  bool assumptionsStillValid() const override;
 
  private:
   void onPatch() override;
 
-  ThreadedRef<PyUnicodeObject> attr_name_;
-  ThreadedRef<> target_object_;
+  // Strong references held by the CodeRuntime
+  BorrowedRef<PyUnicodeObject> attr_name_;
+  BorrowedRef<> target_object_;
 };
 
 class SplitDictDeoptPatcher : public TypeDeoptPatcher {
@@ -54,11 +66,14 @@ class SplitDictDeoptPatcher : public TypeDeoptPatcher {
       PyDictKeysObject* keys);
 
   bool maybePatch(BorrowedRef<PyTypeObject> new_ty) override;
+  bool assumptionsStillValid() const override;
 
  private:
   void onPatch() override;
+  bool hasOurSharedKeys(BorrowedRef<PyTypeObject> type) const;
 
-  ThreadedRef<PyUnicodeObject> attr_name_;
+  // Strong reference held by the CodeRuntime
+  BorrowedRef<PyUnicodeObject> attr_name_;
 
   // We don't need to hold a strong reference to keys_ like we do for
   // attr_name_ because calls to PyTypeModified() happen before the old keys
@@ -66,4 +81,4 @@ class SplitDictDeoptPatcher : public TypeDeoptPatcher {
   PyDictKeysObject* keys_;
 };
 
-} // namespace jit
+} // namespace cinderx::jit

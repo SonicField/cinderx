@@ -1,0 +1,1996 @@
+// This file is part of AsmJit project <https://asmjit.com>
+//
+// See asmjit.h or LICENSE.md for license and copyright information
+// SPDX-License-Identifier: Zlib
+
+#include "../core/api-build_p.h"
+#include "../core/assembler.h"
+#include "../core/codewriter_p.h"
+#include "../core/logger.h"
+#include "../core/support.h"
+
+#include <algorithm>
+#include <cstring>
+#include <tuple>
+
+ASMJIT_BEGIN_NAMESPACE
+
+// Globals
+// =======
+
+static const char CodeHolder_addrTabName[] = ".addrtab";
+static const char CodeHolder_a64BranchStubName[] = ".a64stubs";
+static constexpr uint32_t kA64BranchStubSize = 16;
+static constexpr uint32_t kA64AddressLiteralSize = 8;
+
+//! Encode MOD byte.
+static inline uint32_t x86EncodeMod(uint32_t m, uint32_t o, uint32_t rm) noexcept {
+  return (m << 6) | (o << 3) | rm;
+}
+
+// LabelLinkIterator
+// =================
+
+class LabelLinkIterator {
+public:
+  inline LabelLinkIterator(LabelEntry* le) noexcept { reset(le); }
+
+  inline explicit operator bool() const noexcept { return isValid(); }
+  inline bool isValid() const noexcept { return _link != nullptr; }
+
+  inline LabelLink* link() const noexcept { return _link; }
+  inline LabelLink* operator->() const noexcept { return _link; }
+
+  inline void reset(LabelEntry* le) noexcept {
+    _pPrev = &le->_links;
+    _link = *_pPrev;
+  }
+
+  inline void next() noexcept {
+    _pPrev = &_link->next;
+    _link = *_pPrev;
+  }
+
+  inline void resolveAndNext(CodeHolder* code) noexcept {
+    LabelLink* linkToDelete = _link;
+
+    _link = _link->next;
+    *_pPrev = _link;
+
+    code->_unresolvedLinkCount--;
+    code->_allocator.release(linkToDelete, sizeof(LabelLink));
+  }
+
+  LabelLink** _pPrev;
+  LabelLink* _link;
+};
+
+// CodeHolder - Utilities
+// ======================
+
+static void CodeHolder_resetInternal(CodeHolder* self, ResetPolicy resetPolicy) noexcept {
+  uint32_t i;
+  const ZoneVector<BaseEmitter*>& emitters = self->emitters();
+
+  i = emitters.size();
+  while (i)
+    self->detach(emitters[--i]);
+
+  // Reset everything into its construction state.
+  self->_environment.reset();
+  self->_cpuFeatures.reset();
+  self->_baseAddress = Globals::kNoBaseAddress;
+  self->_logger = nullptr;
+  self->_errorHandler = nullptr;
+
+  // Reset all sections.
+  uint32_t numSections = self->_sections.size();
+  for (i = 0; i < numSections; i++) {
+    Section* section = self->_sections[i];
+    if (section->_buffer.data() && !section->_buffer.isExternal())
+      ::free(section->_buffer._data);
+    section->_buffer._data = nullptr;
+    section->_buffer._capacity = 0;
+  }
+
+  // Reset zone allocator and all containers using it.
+  ZoneAllocator* allocator = self->allocator();
+
+  self->_emitters.reset();
+  self->_namedLabels.reset();
+  self->_relocations.reset();
+  self->_labelEntries.reset();
+  self->_sections.reset();
+  self->_sectionsByOrder.reset();
+
+  self->_unresolvedLinkCount = 0;
+  self->_addressTableSection = nullptr;
+  self->_addressTableEntries.reset();
+  self->_a64BranchStubSection = nullptr;
+  self->_a64BranchStubEntries.reset();
+  self->_a64BranchStubIslands.reset();
+  self->_a64BranchStubIslandEntries.reset();
+
+  allocator->reset(&self->_zone);
+  self->_zone.reset(resetPolicy);
+}
+
+static void CodeHolder_onSettingsUpdated(CodeHolder* self) noexcept {
+  // Notify all attached emitters about a settings update.
+  for (BaseEmitter* emitter : self->emitters()) {
+    emitter->onSettingsUpdated();
+  }
+}
+
+// CodeHolder - Construction & Destruction
+// =======================================
+
+CodeHolder::CodeHolder(const Support::Temporary* temporary) noexcept
+  : _environment(),
+    _cpuFeatures{},
+    _baseAddress(Globals::kNoBaseAddress),
+    _logger(nullptr),
+    _errorHandler(nullptr),
+    _zone(16384 - Zone::kBlockOverhead, 1, temporary),
+    _allocator(&_zone),
+    _unresolvedLinkCount(0),
+    _addressTableSection(nullptr),
+    _a64BranchStubSection(nullptr) {}
+
+CodeHolder::~CodeHolder() noexcept {
+  CodeHolder_resetInternal(this, ResetPolicy::kHard);
+}
+
+// CodeHolder - Initialization & Reset
+// ===================================
+
+inline void CodeHolder_setSectionDefaultName(
+  Section* section,
+  char c0 = 0, char c1 = 0, char c2 = 0, char c3 = 0,
+  char c4 = 0, char c5 = 0, char c6 = 0, char c7 = 0) noexcept {
+
+  section->_name.u32[0] = Support::bytepack32_4x8(uint8_t(c0), uint8_t(c1), uint8_t(c2), uint8_t(c3));
+  section->_name.u32[1] = Support::bytepack32_4x8(uint8_t(c4), uint8_t(c5), uint8_t(c6), uint8_t(c7));
+}
+
+Error CodeHolder::init(const Environment& environment, uint64_t baseAddress) noexcept {
+  return init(environment, CpuFeatures{}, baseAddress);
+}
+
+Error CodeHolder::init(const Environment& environment, const CpuFeatures& cpuFeatures, uint64_t baseAddress) noexcept {
+  // Cannot reinitialize if it's locked or there is one or more emitter attached.
+  if (isInitialized())
+    return DebugUtils::errored(kErrorAlreadyInitialized);
+
+  // If we are just initializing there should be no emitters attached.
+  ASMJIT_ASSERT(_emitters.empty());
+
+  // Create a default section and insert it to the `_sections` array.
+  Error err = _sections.willGrow(&_allocator) |
+              _sectionsByOrder.willGrow(&_allocator);
+  if (err == kErrorOk) {
+    Section* section = _allocator.allocZeroedT<Section>();
+    if (ASMJIT_LIKELY(section)) {
+      section->_flags = SectionFlags::kExecutable | SectionFlags::kReadOnly;
+      CodeHolder_setSectionDefaultName(section, '.', 't', 'e', 'x', 't');
+      _sections.appendUnsafe(section);
+      _sectionsByOrder.appendUnsafe(section);
+    }
+    else {
+      err = DebugUtils::errored(kErrorOutOfMemory);
+    }
+  }
+
+  if (ASMJIT_UNLIKELY(err)) {
+    _zone.reset();
+    return err;
+  }
+  else {
+    _environment = environment;
+    _cpuFeatures = cpuFeatures;
+    _baseAddress = baseAddress;
+    return kErrorOk;
+  }
+}
+
+void CodeHolder::reset(ResetPolicy resetPolicy) noexcept {
+  CodeHolder_resetInternal(this, resetPolicy);
+}
+
+// CodeHolder - Attach / Detach
+// ============================
+
+Error CodeHolder::attach(BaseEmitter* emitter) noexcept {
+  // Catch a possible misuse of the API.
+  if (ASMJIT_UNLIKELY(!emitter))
+    return DebugUtils::errored(kErrorInvalidArgument);
+
+  // Invalid emitter, this should not be possible.
+  EmitterType type = emitter->emitterType();
+  if (ASMJIT_UNLIKELY(type == EmitterType::kNone || uint32_t(type) > uint32_t(EmitterType::kMaxValue)))
+    return DebugUtils::errored(kErrorInvalidState);
+
+  uint64_t archMask = emitter->_archMask;
+  if (ASMJIT_UNLIKELY(!(archMask & (uint64_t(1) << uint32_t(arch())))))
+    return DebugUtils::errored(kErrorInvalidArch);
+
+  // This is suspicious, but don't fail if `emitter` is already attached
+  // to this code holder. This is not error, but it's not recommended.
+  if (emitter->_code != nullptr) {
+    if (emitter->_code == this)
+      return kErrorOk;
+    return DebugUtils::errored(kErrorInvalidState);
+  }
+
+  // Reserve the space now as we cannot fail after `onAttach()` succeeded.
+  ASMJIT_PROPAGATE(_emitters.willGrow(&_allocator, 1));
+  ASMJIT_PROPAGATE(emitter->onAttach(this));
+
+  // Connect CodeHolder <-> BaseEmitter.
+  ASMJIT_ASSERT(emitter->_code == this);
+  _emitters.appendUnsafe(emitter);
+
+  return kErrorOk;
+}
+
+Error CodeHolder::detach(BaseEmitter* emitter) noexcept {
+  if (ASMJIT_UNLIKELY(!emitter))
+    return DebugUtils::errored(kErrorInvalidArgument);
+
+  if (ASMJIT_UNLIKELY(emitter->_code != this))
+    return DebugUtils::errored(kErrorInvalidState);
+
+  // NOTE: We always detach if we were asked to, if error happens during
+  // `emitter->onDetach()` we just propagate it, but the BaseEmitter will
+  // be detached.
+  Error err = kErrorOk;
+  if (!emitter->isDestroyed())
+    err = emitter->onDetach(this);
+
+  // Disconnect CodeHolder <-> BaseEmitter.
+  uint32_t index = _emitters.indexOf(emitter);
+  ASMJIT_ASSERT(index != Globals::kNotFound);
+
+  _emitters.removeAt(index);
+  emitter->_code = nullptr;
+
+  return err;
+}
+
+// CodeHolder - Logging
+// ====================
+
+void CodeHolder::setLogger(Logger* logger) noexcept {
+#ifndef ASMJIT_NO_LOGGING
+  _logger = logger;
+  CodeHolder_onSettingsUpdated(this);
+#else
+  DebugUtils::unused(logger);
+#endif
+}
+
+// CodeHolder - Error Handling
+// ===========================
+
+void CodeHolder::setErrorHandler(ErrorHandler* errorHandler) noexcept {
+  _errorHandler = errorHandler;
+  CodeHolder_onSettingsUpdated(this);
+}
+
+// CodeHolder - Code Buffer
+// ========================
+
+static Error CodeHolder_reserveInternal(CodeHolder* self, CodeBuffer* cb, size_t n) noexcept {
+  uint8_t* oldData = cb->_data;
+  uint8_t* newData;
+
+  if (oldData && !cb->isExternal())
+    newData = static_cast<uint8_t*>(::realloc(oldData, n));
+  else
+    newData = static_cast<uint8_t*>(::malloc(n));
+
+  if (ASMJIT_UNLIKELY(!newData))
+    return DebugUtils::errored(kErrorOutOfMemory);
+
+  cb->_data = newData;
+  cb->_capacity = n;
+
+  // Update pointers used by assemblers, if attached.
+  for (BaseEmitter* emitter : self->emitters()) {
+    if (emitter->isAssembler()) {
+      BaseAssembler* a = static_cast<BaseAssembler*>(emitter);
+      if (&a->_section->_buffer == cb) {
+        size_t offset = a->offset();
+
+        a->_bufferData = newData;
+        a->_bufferEnd  = newData + n;
+        a->_bufferPtr  = newData + offset;
+      }
+    }
+  }
+
+  return kErrorOk;
+}
+
+Error CodeHolder::growBuffer(CodeBuffer* cb, size_t n) noexcept {
+  // The size of the section must be valid.
+  size_t size = cb->size();
+  if (ASMJIT_UNLIKELY(n > std::numeric_limits<uintptr_t>::max() - size))
+    return DebugUtils::errored(kErrorOutOfMemory);
+
+  // We can now check if growing the buffer is really necessary. It's unlikely
+  // that this function is called while there is still room for `n` bytes.
+  size_t capacity = cb->capacity();
+  size_t required = cb->size() + n;
+  if (ASMJIT_UNLIKELY(required <= capacity))
+    return kErrorOk;
+
+  if (cb->isFixed())
+    return DebugUtils::errored(kErrorTooLarge);
+
+  size_t kInitialCapacity = 8096;
+  if (capacity < kInitialCapacity)
+    capacity = kInitialCapacity;
+  else
+    capacity += Globals::kAllocOverhead;
+
+  do {
+    size_t old = capacity;
+    if (capacity < Globals::kGrowThreshold)
+      capacity *= 2;
+    else
+      capacity += Globals::kGrowThreshold;
+
+    // Overflow.
+    if (ASMJIT_UNLIKELY(old > capacity))
+      return DebugUtils::errored(kErrorOutOfMemory);
+  } while (capacity - Globals::kAllocOverhead < required);
+
+  return CodeHolder_reserveInternal(this, cb, capacity - Globals::kAllocOverhead);
+}
+
+Error CodeHolder::reserveBuffer(CodeBuffer* cb, size_t n) noexcept {
+  size_t capacity = cb->capacity();
+
+  if (n <= capacity)
+    return kErrorOk;
+
+  if (cb->isFixed())
+    return DebugUtils::errored(kErrorTooLarge);
+
+  return CodeHolder_reserveInternal(this, cb, n);
+}
+
+// CodeHolder - Sections
+// =====================
+
+Error CodeHolder::newSection(Section** sectionOut, const char* name, size_t nameSize, SectionFlags flags, uint32_t alignment, int32_t order) noexcept {
+  *sectionOut = nullptr;
+
+  if (nameSize == SIZE_MAX)
+    nameSize = strlen(name);
+
+  if (alignment == 0)
+    alignment = 1;
+
+  if (ASMJIT_UNLIKELY(!Support::isPowerOf2(alignment)))
+    return DebugUtils::errored(kErrorInvalidArgument);
+
+  if (ASMJIT_UNLIKELY(nameSize > Globals::kMaxSectionNameSize))
+    return DebugUtils::errored(kErrorInvalidSectionName);
+
+  uint32_t sectionId = _sections.size();
+  if (ASMJIT_UNLIKELY(sectionId == Globals::kInvalidId))
+    return DebugUtils::errored(kErrorTooManySections);
+
+  ASMJIT_PROPAGATE(_sections.willGrow(&_allocator));
+  ASMJIT_PROPAGATE(_sectionsByOrder.willGrow(&_allocator));
+
+  Section* section = _allocator.allocZeroedT<Section>();
+  if (ASMJIT_UNLIKELY(!section))
+    return DebugUtils::errored(kErrorOutOfMemory);
+
+  section->_id = sectionId;
+  section->_flags = flags;
+  section->_alignment = alignment;
+  section->_order = order;
+  memcpy(section->_name.str, name, nameSize);
+
+  Section** insertPosition = std::lower_bound(_sectionsByOrder.begin(), _sectionsByOrder.end(), section, [](const Section* a, const Section* b) {
+    return std::make_tuple(a->order(), a->id()) < std::make_tuple(b->order(), b->id());
+  });
+
+  _sections.appendUnsafe(section);
+  _sectionsByOrder.insertUnsafe((size_t)(insertPosition - _sectionsByOrder.data()), section);
+
+  *sectionOut = section;
+  return kErrorOk;
+}
+
+Section* CodeHolder::sectionByName(const char* name, size_t nameSize) const noexcept {
+  if (nameSize == SIZE_MAX)
+    nameSize = strlen(name);
+
+  // This could be also put in a hash-table similarly like we do with labels,
+  // however it's questionable as the number of sections should be pretty low
+  // in general. Create an issue if this becomes a problem.
+  if (nameSize <= Globals::kMaxSectionNameSize) {
+    for (Section* section : _sections)
+      if (memcmp(section->_name.str, name, nameSize) == 0 && section->_name.str[nameSize] == '\0')
+        return section;
+  }
+
+  return nullptr;
+}
+
+Section* CodeHolder::ensureAddressTableSection() noexcept {
+  if (_addressTableSection)
+    return _addressTableSection;
+
+  newSection(&_addressTableSection,
+             CodeHolder_addrTabName,
+             sizeof(CodeHolder_addrTabName) - 1,
+             SectionFlags::kNone,
+             _environment.registerSize(),
+             std::numeric_limits<int32_t>::max());
+  return _addressTableSection;
+}
+
+Error CodeHolder::addAddressToAddressTable(uint64_t address) noexcept {
+  AddressTableEntry* entry = _addressTableEntries.get(address);
+  if (entry)
+    return kErrorOk;
+
+  Section* section = ensureAddressTableSection();
+  if (ASMJIT_UNLIKELY(!section))
+    return DebugUtils::errored(kErrorOutOfMemory);
+
+  entry = _zone.newT<AddressTableEntry>(address);
+  if (ASMJIT_UNLIKELY(!entry))
+    return DebugUtils::errored(kErrorOutOfMemory);
+
+  _addressTableEntries.insert(entry);
+  section->_virtualSize += _environment.registerSize();
+
+  return kErrorOk;
+}
+
+Section* CodeHolder::ensureA64BranchStubSection() noexcept {
+  if (_a64BranchStubSection)
+    return _a64BranchStubSection;
+
+  newSection(&_a64BranchStubSection,
+             CodeHolder_a64BranchStubName,
+             sizeof(CodeHolder_a64BranchStubName) - 1,
+             SectionFlags::kExecutable | SectionFlags::kReadOnly,
+             8,
+             std::numeric_limits<int32_t>::max());
+  return _a64BranchStubSection;
+}
+
+Error CodeHolder::addAddressToA64BranchStubTable(uint64_t address) noexcept {
+  A64BranchStubEntry* entry = _a64BranchStubEntries.get(address);
+  if (entry)
+    return kErrorOk;
+
+  Section* section = ensureA64BranchStubSection();
+  if (ASMJIT_UNLIKELY(!section))
+    return DebugUtils::errored(kErrorOutOfMemory);
+
+  entry = _zone.newT<A64BranchStubEntry>(address);
+  if (ASMJIT_UNLIKELY(!entry))
+    return DebugUtils::errored(kErrorOutOfMemory);
+
+  entry->_slot = uint32_t(section->_virtualSize / kA64BranchStubSize);
+  _a64BranchStubEntries.insert(entry);
+  section->_virtualSize += kA64BranchStubSize;
+
+  return kErrorOk;
+}
+
+// CodeHolder - Labels & Symbols
+// =============================
+
+//! Only used to lookup a label from `_namedLabels`.
+class LabelByName {
+public:
+  inline LabelByName(const char* key, size_t keySize, uint32_t hashCode, uint32_t parentId) noexcept
+    : _key(key),
+      _keySize(uint32_t(keySize)),
+      _hashCode(hashCode),
+      _parentId(parentId) {}
+
+  inline uint32_t hashCode() const noexcept { return _hashCode; }
+
+  inline bool matches(const LabelEntry* entry) const noexcept {
+    return entry->nameSize() == _keySize &&
+           entry->parentId() == _parentId &&
+           ::memcmp(entry->name(), _key, _keySize) == 0;
+  }
+
+  const char* _key;
+  uint32_t _keySize;
+  uint32_t _hashCode;
+  uint32_t _parentId;
+};
+
+// Returns a hash of `name` and fixes `nameSize` if it's `SIZE_MAX`.
+static uint32_t CodeHolder_hashNameAndGetSize(const char* name, size_t& nameSize) noexcept {
+  uint32_t hashCode = 0;
+  if (nameSize == SIZE_MAX) {
+    size_t i = 0;
+    for (;;) {
+      uint8_t c = uint8_t(name[i]);
+      if (!c) break;
+      hashCode = Support::hashRound(hashCode, c);
+      i++;
+    }
+    nameSize = i;
+  }
+  else {
+    for (size_t i = 0; i < nameSize; i++) {
+      uint8_t c = uint8_t(name[i]);
+      if (ASMJIT_UNLIKELY(!c)) return DebugUtils::errored(kErrorInvalidLabelName);
+      hashCode = Support::hashRound(hashCode, c);
+    }
+  }
+  return hashCode;
+}
+
+LabelLink* CodeHolder::newLabelLink(LabelEntry* le, uint32_t sectionId, size_t offset, intptr_t rel, const OffsetFormat& format) noexcept {
+  LabelLink* link = _allocator.allocT<LabelLink>();
+  if (ASMJIT_UNLIKELY(!link)) return nullptr;
+
+  link->next = le->_links;
+  le->_links = link;
+
+  link->sectionId = sectionId;
+  link->relocId = Globals::kInvalidId;
+  link->offset = offset;
+  link->rel = rel;
+  link->format = format;
+
+  _unresolvedLinkCount++;
+  return link;
+}
+
+Error CodeHolder::newLabelEntry(LabelEntry** entryOut) noexcept {
+  *entryOut = nullptr;
+
+  uint32_t labelId = _labelEntries.size();
+  if (ASMJIT_UNLIKELY(labelId == Globals::kInvalidId))
+    return DebugUtils::errored(kErrorTooManyLabels);
+
+  ASMJIT_PROPAGATE(_labelEntries.willGrow(&_allocator));
+  LabelEntry* le = _allocator.allocZeroedT<LabelEntry>();
+
+  if (ASMJIT_UNLIKELY(!le))
+    return DebugUtils::errored(kErrorOutOfMemory);
+
+  le->_setId(labelId);
+  le->_parentId = Globals::kInvalidId;
+  le->_offset = 0;
+  _labelEntries.appendUnsafe(le);
+
+  *entryOut = le;
+  return kErrorOk;
+}
+
+Error CodeHolder::newNamedLabelEntry(LabelEntry** entryOut, const char* name, size_t nameSize, LabelType type, uint32_t parentId) noexcept {
+  *entryOut = nullptr;
+  uint32_t hashCode = CodeHolder_hashNameAndGetSize(name, nameSize);
+
+  if (ASMJIT_UNLIKELY(nameSize == 0)) {
+    if (type == LabelType::kAnonymous)
+      return newLabelEntry(entryOut);
+    else
+      return DebugUtils::errored(kErrorInvalidLabelName);
+  }
+
+  if (ASMJIT_UNLIKELY(nameSize > Globals::kMaxLabelNameSize))
+    return DebugUtils::errored(kErrorLabelNameTooLong);
+
+  switch (type) {
+    case LabelType::kAnonymous: {
+      // Anonymous labels cannot have a parent (or more specifically, parent is useless here).
+      if (ASMJIT_UNLIKELY(parentId != Globals::kInvalidId))
+        return DebugUtils::errored(kErrorInvalidParentLabel);
+
+      uint32_t labelId = _labelEntries.size();
+      if (ASMJIT_UNLIKELY(labelId == Globals::kInvalidId))
+        return DebugUtils::errored(kErrorTooManyLabels);
+
+      ASMJIT_PROPAGATE(_labelEntries.willGrow(&_allocator));
+      LabelEntry* le = _allocator.allocZeroedT<LabelEntry>();
+
+      if (ASMJIT_UNLIKELY(!le))
+        return DebugUtils::errored(kErrorOutOfMemory);
+
+      // NOTE: This LabelEntry has a name, but we leave its hashCode as zero as it's anonymous.
+      le->_setId(labelId);
+      le->_parentId = Globals::kInvalidId;
+      le->_offset = 0;
+      ASMJIT_PROPAGATE(le->_name.setData(&_zone, name, nameSize));
+
+      _labelEntries.appendUnsafe(le);
+
+      *entryOut = le;
+      return kErrorOk;
+    }
+
+    case LabelType::kLocal: {
+      if (ASMJIT_UNLIKELY(parentId >= _labelEntries.size()))
+        return DebugUtils::errored(kErrorInvalidParentLabel);
+
+      hashCode ^= parentId;
+      break;
+    }
+
+    case LabelType::kGlobal:
+    case LabelType::kExternal: {
+      if (ASMJIT_UNLIKELY(parentId != Globals::kInvalidId))
+        return DebugUtils::errored(kErrorInvalidParentLabel);
+      break;
+    }
+
+    default: {
+      return DebugUtils::errored(kErrorInvalidArgument);
+    }
+  }
+
+  // Don't allow to insert duplicates. Local labels allow duplicates that have
+  // different id, this is already accomplished by having a different hashes
+  // between the same label names having different parent labels.
+  LabelEntry* le = _namedLabels.get(LabelByName(name, nameSize, hashCode, parentId));
+  if (ASMJIT_UNLIKELY(le))
+    return DebugUtils::errored(kErrorLabelAlreadyDefined);
+
+  Error err = kErrorOk;
+  uint32_t labelId = _labelEntries.size();
+
+  if (ASMJIT_UNLIKELY(labelId == Globals::kInvalidId))
+    return DebugUtils::errored(kErrorTooManyLabels);
+
+  ASMJIT_PROPAGATE(_labelEntries.willGrow(&_allocator));
+  le = _allocator.allocZeroedT<LabelEntry>();
+
+  if (ASMJIT_UNLIKELY(!le))
+    return DebugUtils::errored(kErrorOutOfMemory);
+
+  le->_hashCode = hashCode;
+  le->_setId(labelId);
+  le->_type = type;
+  le->_parentId = parentId;
+  le->_offset = 0;
+  ASMJIT_PROPAGATE(le->_name.setData(&_zone, name, nameSize));
+
+  _labelEntries.appendUnsafe(le);
+  _namedLabels.insert(allocator(), le);
+
+  *entryOut = le;
+  return err;
+}
+
+uint32_t CodeHolder::labelIdByName(const char* name, size_t nameSize, uint32_t parentId) noexcept {
+  uint32_t hashCode = CodeHolder_hashNameAndGetSize(name, nameSize);
+  if (ASMJIT_UNLIKELY(!nameSize))
+    return 0;
+
+  if (parentId != Globals::kInvalidId)
+    hashCode ^= parentId;
+
+  LabelEntry* le = _namedLabels.get(LabelByName(name, nameSize, hashCode, parentId));
+  return le ? le->id() : uint32_t(Globals::kInvalidId);
+}
+
+ASMJIT_API Error CodeHolder::resolveUnresolvedLinks() noexcept {
+  if (!hasUnresolvedLinks())
+    return kErrorOk;
+
+  Error err = kErrorOk;
+  for (LabelEntry* le : labelEntries()) {
+    if (!le->isBound())
+      continue;
+
+    LabelLinkIterator link(le);
+    if (link) {
+      Support::FastUInt8 of = 0;
+      Section* toSection = le->section();
+      uint64_t toOffset = Support::addOverflow(toSection->offset(), le->offset(), &of);
+
+      do {
+        uint32_t linkSectionId = link->sectionId;
+        if (link->relocId == Globals::kInvalidId) {
+          Section* fromSection = sectionById(linkSectionId);
+          size_t linkOffset = link->offset;
+
+          CodeBuffer& buf = _sections[linkSectionId]->buffer();
+          ASMJIT_ASSERT(linkOffset < buf.size());
+
+          // Calculate the offset relative to the start of the virtual base.
+          Support::FastUInt8 localOF = of;
+          uint64_t fromOffset = Support::addOverflow<uint64_t>(fromSection->offset(), linkOffset, &localOF);
+          int64_t displacement = int64_t(toOffset - fromOffset + uint64_t(int64_t(link->rel)));
+
+          if (!localOF) {
+            ASMJIT_ASSERT(size_t(linkOffset) < buf.size());
+            ASMJIT_ASSERT(buf.size() - size_t(linkOffset) >= link->format.valueSize());
+
+            // AArch64 conditional branch: patched in place.
+            if (link->format.type() == OffsetType::kAArch64_TestBranch ||
+                link->format.type() == OffsetType::kAArch64_CompBranch ||
+                link->format.type() == OffsetType::kAArch64_CondBranch) {
+              uint8_t* instPtr = buf._data + linkOffset;
+              uint32_t origOpcode = Support::readU32uLE(instPtr);
+              uint32_t immBitCount = link->format.immBitCount();
+              uint32_t immMask = Support::lsbMask<uint32_t>(immBitCount);
+
+              int64_t dispImm = displacement >> 2;
+              if ((displacement & 3) == 0 && Support::isEncodableOffset64(dispImm, immBitCount)) {
+                uint32_t dispBits = (uint32_t(dispImm) & immMask) << 5;
+                Support::writeU32uLE(instPtr, origOpcode | dispBits);
+              } else {
+                err = DebugUtils::errored(kErrorInvalidDisplacement);
+                link.next();
+                continue;
+              }
+
+              link.resolveAndNext(this);
+              continue;
+            }
+
+            // Overwrite a real displacement in the CodeBuffer.
+            if (CodeWriterUtils::writeOffset(buf._data + linkOffset, displacement, link->format)) {
+              link.resolveAndNext(this);
+              continue;
+            }
+          }
+
+          err = DebugUtils::errored(kErrorInvalidDisplacement);
+          // Falls through to `link.next()`.
+        }
+
+        link.next();
+      } while (link);
+    }
+  }
+
+  return err;
+}
+
+ASMJIT_API Error CodeHolder::bindLabel(const Label& label, uint32_t toSectionId, uint64_t toOffset) noexcept {
+  LabelEntry* le = labelEntry(label);
+  if (ASMJIT_UNLIKELY(!le))
+    return DebugUtils::errored(kErrorInvalidLabel);
+
+  if (ASMJIT_UNLIKELY(toSectionId > _sections.size()))
+    return DebugUtils::errored(kErrorInvalidSection);
+
+  // Label can be bound only once.
+  if (ASMJIT_UNLIKELY(le->isBound()))
+    return DebugUtils::errored(kErrorLabelAlreadyBound);
+
+  // Bind the label.
+  Section* section = _sections[toSectionId];
+  le->_section = section;
+  le->_offset = toOffset;
+
+  Error err = kErrorOk;
+  CodeBuffer& buf = section->buffer();
+
+  // Fix all links to this label we have collected so far if they are within
+  // the same section. We ignore any inter-section links as these have to be
+  // fixed later.
+  LabelLinkIterator link(le);
+  while (link) {
+    uint32_t linkSectionId = link->sectionId;
+    size_t linkOffset = link->offset;
+
+    uint32_t relocId = link->relocId;
+    if (relocId != Globals::kInvalidId) {
+      // Adjust relocation data only.
+      RelocEntry* re = _relocations[relocId];
+      re->_payload += toOffset;
+      re->_targetSectionId = toSectionId;
+    }
+    else {
+      if (linkSectionId != toSectionId) {
+        Section* sourceSection = sectionById(linkSectionId);
+        CodeBuffer& sourceBuffer = sourceSection->buffer();
+        if (arch() == Arch::kAArch64 &&
+            link->format.type() == OffsetType::kSignedOffset &&
+            link->format.regionSize() == 4 &&
+            link->format.immBitCount() == 26 &&
+            link->format.immDiscardLsb() == 2 &&
+            linkOffset + 4 <= sourceBuffer.size()) {
+          uint32_t opcode = Support::readU32uLE(sourceBuffer.data() + linkOffset);
+          uint32_t branchOpcode = opcode & 0xFC000000u;
+          if (branchOpcode == 0x14000000u || branchOpcode == 0x94000000u) {
+            RelocEntry* re;
+            Error relocErr = newRelocEntry(
+              &re,
+              branchOpcode == 0x94000000u
+                ? RelocType::kA64AddressEntry
+                : RelocType::kA64JumpAddressEntry);
+            if (relocErr) {
+              err = relocErr;
+              link.next();
+              continue;
+            }
+
+            re->_sourceSectionId = linkSectionId;
+            re->_sourceOffset = linkOffset;
+            re->_targetSectionId = toSectionId;
+            re->_payload = toOffset + uint64_t(int64_t(link->rel));
+            re->_format = link->format;
+            link.resolveAndNext(this);
+            continue;
+          }
+        }
+
+        link.next();
+        continue;
+      }
+
+      ASMJIT_ASSERT(linkOffset < buf.size());
+      int64_t displacement = int64_t(toOffset - uint64_t(linkOffset) + uint64_t(int64_t(link->rel)));
+
+      // Size of the value we are going to patch. Only BYTE/DWORD is allowed.
+      ASMJIT_ASSERT(buf.size() - size_t(linkOffset) >= link->format.regionSize());
+
+      // AArch64 conditional branch: 4-byte instruction patched in place.
+      // The Builder's relaxBranches() pass guarantees all conditional
+      // branches are in range, so out-of-range is an error.
+      if (link->format.type() == OffsetType::kAArch64_TestBranch ||
+          link->format.type() == OffsetType::kAArch64_CompBranch ||
+          link->format.type() == OffsetType::kAArch64_CondBranch) {
+        uint8_t* instPtr = buf._data + linkOffset;
+        uint32_t origOpcode = Support::readU32uLE(instPtr);
+        uint32_t immBitCount = link->format.immBitCount();
+        uint32_t immMask = Support::lsbMask<uint32_t>(immBitCount);
+
+        int64_t dispImm = displacement >> 2;
+        if ((displacement & 3) == 0 && Support::isEncodableOffset64(dispImm, immBitCount)) {
+          uint32_t dispBits = (uint32_t(dispImm) & immMask) << 5;
+          Support::writeU32uLE(instPtr, origOpcode | dispBits);
+        } else {
+          err = DebugUtils::errored(kErrorInvalidDisplacement);
+          link.next();
+          continue;
+        }
+
+        link.resolveAndNext(this);
+        continue;
+      }
+
+      // Overwrite a real displacement in the CodeBuffer.
+      if (!CodeWriterUtils::writeOffset(buf._data + linkOffset, displacement, link->format)) {
+        err = DebugUtils::errored(kErrorInvalidDisplacement);
+        link.next();
+        continue;
+      }
+    }
+
+    link.resolveAndNext(this);
+  }
+
+  return err;
+}
+
+// CodeHolder - Relocations
+// ========================
+
+Error CodeHolder::newRelocEntry(RelocEntry** dst, RelocType relocType) noexcept {
+  ASMJIT_PROPAGATE(_relocations.willGrow(&_allocator));
+
+  uint32_t relocId = _relocations.size();
+  if (ASMJIT_UNLIKELY(relocId == Globals::kInvalidId))
+    return DebugUtils::errored(kErrorTooManyRelocations);
+
+  RelocEntry* re = _allocator.allocZeroedT<RelocEntry>();
+  if (ASMJIT_UNLIKELY(!re))
+    return DebugUtils::errored(kErrorOutOfMemory);
+
+  re->_id = relocId;
+  re->_relocType = relocType;
+  re->_sourceSectionId = Globals::kInvalidId;
+  re->_targetSectionId = Globals::kInvalidId;
+  _relocations.appendUnsafe(re);
+
+  *dst = re;
+  return kErrorOk;
+}
+
+// CodeHolder - Expression Evaluation
+// ==================================
+
+static Error CodeHolder_evaluateExpression(CodeHolder* self, Expression* exp, uint64_t* out) noexcept {
+  uint64_t value[2];
+  for (size_t i = 0; i < 2; i++) {
+    uint64_t v;
+    switch (exp->valueType[i]) {
+      case ExpressionValueType::kNone: {
+        v = 0;
+        break;
+      }
+
+      case ExpressionValueType::kConstant: {
+        v = exp->value[i].constant;
+        break;
+      }
+
+      case ExpressionValueType::kLabel: {
+        LabelEntry* le = exp->value[i].label;
+        if (!le->isBound())
+          return DebugUtils::errored(kErrorExpressionLabelNotBound);
+        v = le->section()->offset() + le->offset();
+        break;
+      }
+
+      case ExpressionValueType::kExpression: {
+        Expression* nested = exp->value[i].expression;
+        ASMJIT_PROPAGATE(CodeHolder_evaluateExpression(self, nested, &v));
+        break;
+      }
+
+      default:
+        return DebugUtils::errored(kErrorInvalidState);
+    }
+
+    value[i] = v;
+  }
+
+  uint64_t result;
+  uint64_t& a = value[0];
+  uint64_t& b = value[1];
+
+  switch (exp->opType) {
+    case ExpressionOpType::kAdd:
+      result = a + b;
+      break;
+
+    case ExpressionOpType::kSub:
+      result = a - b;
+      break;
+
+    case ExpressionOpType::kMul:
+      result = a * b;
+      break;
+
+    case ExpressionOpType::kSll:
+      result = (b > 63) ? uint64_t(0) : uint64_t(a << b);
+      break;
+
+    case ExpressionOpType::kSrl:
+      result = (b > 63) ? uint64_t(0) : uint64_t(a >> b);
+      break;
+
+    case ExpressionOpType::kSra:
+      result = Support::sar(a, Support::min<uint64_t>(b, 63));
+      break;
+
+    default:
+      return DebugUtils::errored(kErrorInvalidState);
+  }
+
+  *out = result;
+  return kErrorOk;
+}
+
+// CodeHolder - Utilities
+// ======================
+
+static bool CodeHolder_canEncodeA64Branch(uint64_t sourceOffset, uint64_t targetOffset) noexcept {
+  int64_t displacement = int64_t(targetOffset - sourceOffset);
+  int64_t dispImm = displacement >> 2;
+  return (displacement & 3) == 0 && Support::isEncodableOffset64(dispImm, 26);
+}
+
+static bool CodeHolder_canEncodeA64LdrLiteral(uint64_t sourceOffset, uint64_t targetOffset) noexcept {
+  int64_t displacement = int64_t(targetOffset - sourceOffset);
+  int64_t dispImm = displacement >> 2;
+  return (displacement & 3) == 0 && Support::isEncodableOffset64(dispImm, 19);
+}
+
+static bool CodeHolder_canAlwaysEncodeA64Adrp(uint64_t sourceOffset, uint64_t targetOffset) noexcept {
+  int64_t displacement = int64_t(targetOffset - sourceOffset);
+  int64_t floorPageDelta;
+  int64_t ceilPageDelta;
+
+  if (displacement >= 0) {
+    uint64_t magnitude = uint64_t(displacement);
+    floorPageDelta = int64_t(magnitude / 4096);
+    ceilPageDelta = int64_t((magnitude + 4095) / 4096);
+  }
+  else {
+    uint64_t magnitude = uint64_t(-(displacement + 1)) + 1;
+    floorPageDelta = -int64_t((magnitude + 4095) / 4096);
+    ceilPageDelta = -int64_t(magnitude / 4096);
+  }
+
+  return Support::isEncodableOffset64(floorPageDelta, 21) &&
+         Support::isEncodableOffset64(ceilPageDelta, 21);
+}
+
+static bool CodeHolder_canReachA64BranchStubIslandEntry(
+  uint64_t sourceOffset,
+  uint64_t entryOffset,
+  A64BranchStubIslandUse use) noexcept {
+
+  if (use == A64BranchStubIslandUse::kAddressLiteral)
+    return CodeHolder_canEncodeA64LdrLiteral(sourceOffset, entryOffset);
+
+  return CodeHolder_canEncodeA64Branch(sourceOffset, entryOffset);
+}
+
+static uint32_t CodeHolder_a64BranchStubIslandEntrySize(A64BranchStubIslandUse use) noexcept {
+  return use == A64BranchStubIslandUse::kAddressLiteral
+    ? kA64AddressLiteralSize
+    : kA64BranchStubSize;
+}
+
+struct A64MovSequencePlan {
+  bool useMovz;
+  uint32_t instructionCount;
+};
+
+static A64MovSequencePlan CodeHolder_planA64MovSequence(uint64_t value) noexcept {
+  uint32_t zeroHalfWords = 0;
+  uint32_t onesHalfWords = 0;
+
+  for (uint32_t i = 0; i < 4; i++) {
+    uint32_t hw = uint32_t((value >> (i * 16)) & 0xFFFFu);
+    zeroHalfWords += uint32_t(hw == 0x0000u);
+    onesHalfWords += uint32_t(hw == 0xFFFFu);
+  }
+
+  const bool useMovz = zeroHalfWords >= onesHalfWords;
+  const uint32_t instructionCount = 4u - (useMovz ? zeroHalfWords : onesHalfWords);
+  return {useMovz, Support::max<uint32_t>(instructionCount, 1u)};
+}
+
+static bool CodeHolder_canEncodeA64AdrOrAdrp(uint64_t targetAddress, uint64_t pc) noexcept {
+  int64_t displacement = int64_t(targetAddress - pc);
+  if (Support::isEncodableOffset64(displacement, 21))
+    return true;
+
+  int64_t pageDelta = (int64_t(targetAddress) >> 12) - (int64_t(pc) >> 12);
+  return Support::isEncodableOffset64(pageDelta, 21);
+}
+
+static A64BranchStubIslandEntry* CodeHolder_findA64BranchStubIslandEntry(
+  CodeHolder* self,
+  uint32_t sourceSectionId,
+  uint64_t sourceOffset,
+  uint64_t target,
+  uint32_t targetSectionId,
+  A64BranchStubIslandUse use) noexcept {
+
+  for (A64BranchStubIslandEntry* entry : self->_a64BranchStubIslandEntries)
+    if (entry->_sourceSectionId == sourceSectionId && entry->_target == target &&
+        entry->_targetSectionId == targetSectionId && entry->_use == use &&
+        CodeHolder_canReachA64BranchStubIslandEntry(sourceOffset, entry->_offset, use))
+      return entry;
+
+  return nullptr;
+}
+
+static A64BranchStubIsland* CodeHolder_findReachableA64BranchStubIsland(
+  CodeHolder* self,
+  uint32_t sourceSectionId,
+  uint64_t sourceOffset,
+  A64BranchStubIslandUse use) noexcept {
+
+  uint32_t entrySize = CodeHolder_a64BranchStubIslandEntrySize(use);
+  for (A64BranchStubIsland* island : self->_a64BranchStubIslands) {
+    uint64_t newStubOffset = uint64_t(island->_guardOffset) + island->_size;
+    uint64_t newIslandEnd = newStubOffset + entrySize;
+    if (island->_sourceSectionId == sourceSectionId &&
+        CodeHolder_canReachA64BranchStubIslandEntry(sourceOffset, newStubOffset, use) &&
+        CodeHolder_canEncodeA64Branch(island->_guardOffset, newIslandEnd))
+      return island;
+  }
+
+  return nullptr;
+}
+
+static Error CodeHolder_appendToSection(
+  CodeHolder* self,
+  Section* section,
+  size_t size) noexcept {
+
+  size_t oldSize = section->bufferSize();
+  if (ASMJIT_UNLIKELY(size > SIZE_MAX - oldSize))
+    return DebugUtils::errored(kErrorTooLarge);
+
+  ASMJIT_PROPAGATE(self->reserveBuffer(&section->_buffer, oldSize + size));
+  uint8_t* data = section->_buffer.data();
+  std::memset(data + oldSize, 0, size);
+  section->_buffer._size = oldSize + size;
+  return kErrorOk;
+}
+
+static Error CodeHolder_addA64BranchStubIslandEntry(
+  CodeHolder* self,
+  Section* sourceSection,
+  uint64_t sourceOffset,
+  uint64_t target,
+  uint32_t targetSectionId,
+  A64BranchStubIslandUse use,
+  A64BranchStubIslandEntry** entryOut,
+  bool* appended) noexcept {
+
+  *entryOut = CodeHolder_findA64BranchStubIslandEntry(
+    self, sourceSection->id(), sourceOffset, target, targetSectionId, use);
+  *appended = false;
+  if (*entryOut)
+    return kErrorOk;
+
+  A64BranchStubIsland* island = CodeHolder_findReachableA64BranchStubIsland(
+    self, sourceSection->id(), sourceOffset, use);
+  uint64_t stubOffset;
+
+  if (island) {
+    uint32_t entrySize = CodeHolder_a64BranchStubIslandEntrySize(use);
+    stubOffset = uint64_t(island->_guardOffset) + island->_size;
+    if (ASMJIT_UNLIKELY(stubOffset > uint64_t(std::numeric_limits<uint32_t>::max()) ||
+                        stubOffset + entrySize > uint64_t(std::numeric_limits<uint32_t>::max())))
+      return DebugUtils::errored(kErrorTooLarge);
+
+    if (stubOffset == sourceSection->bufferSize()) {
+      ASMJIT_PROPAGATE(CodeHolder_appendToSection(self, sourceSection, entrySize));
+      island->_size += entrySize;
+    }
+    else {
+      island = nullptr;
+    }
+  }
+
+  if (!island) {
+    uint32_t entrySize = CodeHolder_a64BranchStubIslandEntrySize(use);
+    uint64_t guardOffset = sourceSection->bufferSize();
+    stubOffset = guardOffset + 4;
+    uint32_t initialIslandSize = 4 + entrySize;
+
+    if (ASMJIT_UNLIKELY(guardOffset > uint64_t(std::numeric_limits<uint32_t>::max()) ||
+                        stubOffset + entrySize > uint64_t(std::numeric_limits<uint32_t>::max())))
+      return DebugUtils::errored(kErrorTooLarge);
+
+    if (ASMJIT_UNLIKELY(!CodeHolder_canReachA64BranchStubIslandEntry(sourceOffset, stubOffset, use) ||
+                        !CodeHolder_canEncodeA64Branch(guardOffset, guardOffset + initialIslandSize)))
+      return DebugUtils::errored(kErrorRelocOffsetOutOfRange);
+
+    ASMJIT_PROPAGATE(self->_a64BranchStubIslands.willGrow(self->allocator()));
+    ASMJIT_PROPAGATE(CodeHolder_appendToSection(self, sourceSection, initialIslandSize));
+
+    island = self->_zone.newT<A64BranchStubIsland>(sourceSection->id(), uint32_t(guardOffset), initialIslandSize);
+    if (ASMJIT_UNLIKELY(!island))
+      return DebugUtils::errored(kErrorOutOfMemory);
+
+    self->_a64BranchStubIslands.appendUnsafe(island);
+  }
+
+  ASMJIT_PROPAGATE(self->_a64BranchStubIslandEntries.willGrow(self->allocator()));
+  A64BranchStubIslandEntry* entry = self->_zone.newT<A64BranchStubIslandEntry>(
+    target,
+    targetSectionId,
+    sourceSection->id(),
+    uint32_t(stubOffset),
+    use);
+
+  if (ASMJIT_UNLIKELY(!entry))
+    return DebugUtils::errored(kErrorOutOfMemory);
+
+  self->_a64BranchStubIslandEntries.appendUnsafe(entry);
+
+  *entryOut = entry;
+  *appended = true;
+  return kErrorOk;
+}
+
+Error CodeHolder::ensureBranchStubIslands(bool* changed) noexcept {
+  *changed = false;
+
+  Section* a64BranchStubSection = _a64BranchStubSection;
+  Section* addressTableSection = _addressTableSection;
+  uint32_t addressSize = _environment.registerSize();
+
+  for (const RelocEntry* re : _relocations) {
+    RelocType relocType = re->relocType();
+    bool isBranch = relocType == RelocType::kA64AddressEntry ||
+                    relocType == RelocType::kA64JumpAddressEntry;
+    bool isAbsoluteAddressLoad = relocType == RelocType::kA64AdrAbsEntry;
+    bool isLabelAddressLoad = relocType == RelocType::kA64AdrEntry;
+    bool isLabelLiteralLoad = relocType == RelocType::kA64LdrLiteralEntry;
+    if (!isBranch && !isAbsoluteAddressLoad && !isLabelAddressLoad && !isLabelLiteralLoad)
+      continue;
+
+    Section* sourceSection = sectionById(re->sourceSectionId());
+    uint64_t sourceOffset = sourceSection->offset() + re->sourceOffset();
+    uint32_t targetSectionId = re->targetSectionId();
+    Section* targetSection = targetSectionId != Globals::kInvalidId
+      ? sectionById(targetSectionId)
+      : nullptr;
+    A64BranchStubIslandUse use;
+
+    if (isBranch) {
+      if (targetSection) {
+        uint64_t targetOffset = targetSection->offset() + re->payload();
+        if (CodeHolder_canEncodeA64Branch(sourceOffset, targetOffset))
+          continue;
+      }
+      else {
+        if (hasBaseAddress() &&
+            CodeHolder_canEncodeA64Branch(baseAddress() + sourceOffset, re->payload()))
+          continue;
+
+        A64BranchStubEntry* stubEntry = _a64BranchStubEntries.get(re->payload());
+        if (ASMJIT_UNLIKELY(!a64BranchStubSection || !stubEntry || !stubEntry->hasAssignedSlot()))
+          return DebugUtils::errored(kErrorInvalidRelocEntry);
+
+        uint64_t globalStubOffset =
+          a64BranchStubSection->offset() + uint64_t(size_t(stubEntry->slot()) * kA64BranchStubSize);
+        if (CodeHolder_canEncodeA64Branch(sourceOffset, globalStubOffset))
+          continue;
+      }
+
+      use = A64BranchStubIslandUse::kBranch;
+    }
+    else if (isAbsoluteAddressLoad) {
+      const uint32_t reservedSize = a64AdrAbsRegionSize(re->payload());
+      const A64MovSequencePlan movPlan = CodeHolder_planA64MovSequence(re->payload());
+      if (movPlan.instructionCount * 4u <= reservedSize)
+        continue;
+
+      if (hasBaseAddress() &&
+          CodeHolder_canEncodeA64AdrOrAdrp(re->payload(), baseAddress() + sourceOffset))
+        continue;
+
+      if (ASMJIT_UNLIKELY(!addressTableSection || addressTableSection->virtualSize() < addressSize))
+        return DebugUtils::errored(kErrorInvalidRelocEntry);
+
+      uint64_t firstAddressOffset = addressTableSection->offset();
+      uint64_t lastAddressOffset =
+        firstAddressOffset + addressTableSection->virtualSize() - addressSize;
+      if (CodeHolder_canEncodeA64LdrLiteral(sourceOffset, firstAddressOffset) &&
+          CodeHolder_canEncodeA64LdrLiteral(sourceOffset, lastAddressOffset))
+        continue;
+
+      use = A64BranchStubIslandUse::kAddressLiteral;
+    }
+    else {
+      if (ASMJIT_UNLIKELY(!targetSection))
+        return DebugUtils::errored(kErrorInvalidRelocEntry);
+
+      uint64_t targetOffset = targetSection->offset() + re->payload();
+      if (isLabelLiteralLoad && CodeHolder_canEncodeA64LdrLiteral(sourceOffset, targetOffset))
+        continue;
+      if (CodeHolder_canAlwaysEncodeA64Adrp(sourceOffset, targetOffset)) {
+        if (!isLabelLiteralLoad) continue;
+
+        if (ASMJIT_UNLIKELY(re->sourceOffset() > sourceSection->bufferSize() ||
+                            sourceSection->bufferSize() - size_t(re->sourceOffset()) < 4))
+          return DebugUtils::errored(kErrorInvalidRelocEntry);
+
+        uint32_t origLdr = Support::readU32uLE(sourceSection->data() + re->sourceOffset());
+        uint32_t opc = (origLdr >> 30) & 3u;
+        uint32_t loadSize = opc == 1u ? 8u : 4u;
+        if (opc != 3u && hasBaseAddress() &&
+            ((baseAddress() + targetOffset) & (loadSize - 1u)) == 0)
+          continue;
+
+        // If a tail literal is unreachable and the base is unknown, defer the
+        // alignment decision to relocation; ADRP reach is already guaranteed.
+        if (opc != 3u && !hasBaseAddress() &&
+            !CodeHolder_canEncodeA64LdrLiteral(
+              re->sourceOffset(), sourceSection->bufferSize() + 4u))
+          continue;
+      }
+
+      use = A64BranchStubIslandUse::kAddressLiteral;
+    }
+
+    uint64_t sourceSectionOffset = re->sourceOffset();
+    A64BranchStubIslandEntry* islandEntry = nullptr;
+    bool appended = false;
+    ASMJIT_PROPAGATE(CodeHolder_addA64BranchStubIslandEntry(
+      this,
+      sourceSection,
+      sourceSectionOffset,
+      re->payload(),
+      targetSectionId,
+      use,
+      &islandEntry,
+      &appended));
+
+    sourceOffset = sourceSection->offset() + re->sourceOffset();
+    uint64_t localStubOffset = sourceSection->offset() + islandEntry->_offset;
+    if (!CodeHolder_canReachA64BranchStubIslandEntry(sourceOffset, localStubOffset, use))
+      return DebugUtils::errored(kErrorRelocOffsetOutOfRange);
+
+    *changed = *changed || appended;
+  }
+
+  return kErrorOk;
+}
+
+Error CodeHolder::flatten() noexcept {
+  for (;;) {
+    uint64_t offset = 0;
+    for (Section* section : _sectionsByOrder) {
+      uint64_t realSize = section->realSize();
+      if (realSize) {
+        uint64_t alignedOffset = Support::alignUp(offset, section->alignment());
+        if (ASMJIT_UNLIKELY(alignedOffset < offset))
+          return DebugUtils::errored(kErrorTooLarge);
+
+        Support::FastUInt8 of = 0;
+        offset = Support::addOverflow(alignedOffset, realSize, &of);
+
+        if (ASMJIT_UNLIKELY(of))
+          return DebugUtils::errored(kErrorTooLarge);
+      }
+    }
+
+    // Now we know that we can assign offsets of all sections properly.
+    Section* prev = nullptr;
+    offset = 0;
+    for (Section* section : _sectionsByOrder) {
+      uint64_t realSize = section->realSize();
+      if (realSize)
+        offset = Support::alignUp(offset, section->alignment());
+      section->_offset = offset;
+
+      // Make sure the previous section extends a bit to cover the alignment.
+      if (prev)
+        prev->_virtualSize = offset - prev->_offset;
+
+      prev = section;
+      offset += realSize;
+    }
+
+    bool changed = false;
+    ASMJIT_PROPAGATE(ensureBranchStubIslands(&changed));
+    if (!changed)
+      break;
+  }
+
+  return kErrorOk;
+}
+
+size_t CodeHolder::codeSize() const noexcept {
+  Support::FastUInt8 of = 0;
+  uint64_t offset = 0;
+
+  for (Section* section : _sectionsByOrder) {
+    uint64_t realSize = section->realSize();
+
+    if (realSize) {
+      uint64_t alignedOffset = Support::alignUp(offset, section->alignment());
+      ASMJIT_ASSERT(alignedOffset >= offset);
+      offset = Support::addOverflow(alignedOffset, realSize, &of);
+    }
+  }
+
+  if ((sizeof(uint64_t) > sizeof(size_t) && offset > uint64_t(SIZE_MAX)) || of)
+    return SIZE_MAX;
+
+  return size_t(offset);
+}
+
+// Materialize `value` into `rd` with a movz/movk (or movn/movk) sequence,
+// provided it fits in `reservedSize` bytes. Returns true when the sequence was
+// written.
+//
+// This mirrors a64::Assembler's encodeMovSequence64(), but always emits the
+// 64-bit forms since the destination of a materialized address is always an X
+// register.
+static bool tryEncodeMovSequence(uint8_t* buffer, size_t offset, uint64_t value, uint32_t rd, uint32_t reservedSize) noexcept {
+  constexpr uint32_t kMovZ = 0xD2800000u;
+  constexpr uint32_t kMovN = 0x92800000u;
+  constexpr uint32_t kMovK = 0xF2800000u;
+
+  const A64MovSequencePlan plan = CodeHolder_planA64MovSequence(value);
+  const bool useMovz = plan.useMovz;
+  const uint32_t skip = useMovz ? 0x0000u : 0xFFFFu;
+  if (plan.instructionCount * 4u > reservedSize)
+    return false;
+
+  uint32_t op = useMovz ? kMovZ : kMovN;
+  uint32_t written = 0;
+
+  for (uint32_t i = 0; i < 4; i++) {
+    uint32_t hw = uint32_t((value >> (i * 16)) & 0xFFFFu);
+    if (hw == skip)
+      continue;
+
+    // movn stores the inverted halfword; the movk instructions that follow it
+    // store the halfword as-is.
+    uint32_t imm16 = op == kMovN ? hw ^ 0xFFFFu : hw;
+    Support::writeU32uLE(buffer + offset + written * 4u, op | (i << 21) | (imm16 << 5) | rd);
+    op = kMovK;
+    written++;
+  }
+
+  if (written == 0)
+    Support::writeU32uLE(buffer + offset, (useMovz ? kMovZ : kMovN) | rd);
+
+  return true;
+}
+
+// Tries to encode a PC-relative address load at `buffer + offset` using
+// `adr Rd, target` (±1MB) or `adrp Rd, page` with an optional
+// `add Rd, Rd, #off` (±4GB). Returns true on success, false if the displacement
+// is too large for either encoding.
+static bool tryEncodeAdrOrAdrpAdd(uint8_t* buffer, size_t offset, uint64_t targetAddress, uint64_t pc, uint32_t rd) noexcept {
+  int64_t displacement = int64_t(targetAddress - pc);
+
+  if (Support::isEncodableOffset64(displacement, 21)) {
+    uint32_t immLo = uint32_t(displacement) & 3u;
+    uint32_t immHi = (uint32_t(displacement) >> 2) & 0x7FFFFu;
+    uint32_t adrOpcode = 0x10000000u | (immLo << 29) | (immHi << 5) | rd;
+    Support::writeU32uLE(buffer + offset, adrOpcode);
+    return true;
+  }
+
+  int64_t pageDelta = (int64_t(targetAddress) >> 12) - (int64_t(pc) >> 12);
+  if (Support::isEncodableOffset64(pageDelta, 21)) {
+    uint32_t pageOffset = uint32_t(targetAddress) & 0xFFFu;
+    uint32_t immLo = uint32_t(pageDelta) & 3u;
+    uint32_t immHi = (uint32_t(pageDelta) >> 2) & 0x7FFFFu;
+    uint32_t adrpOpcode = 0x90000000u | (immLo << 29) | (immHi << 5) | rd;
+    Support::writeU32uLE(buffer + offset, adrpOpcode);
+    if (pageOffset != 0) {
+      uint32_t addOpcode = 0x91000000u | (pageOffset << 10) | (rd << 5) | rd;
+      Support::writeU32uLE(buffer + offset + 4, addOpcode);
+    }
+    return true;
+  }
+
+  return false;
+}
+
+static Error CodeHolder_writeA64BranchStub(uint8_t* buffer, uint64_t targetAddress) noexcept {
+  Support::writeU32uLE(buffer, 0x58000050u); // LDR X16, [PC, #8].
+  Support::writeU32uLE(buffer + 4, 0xD61F0200u); // BR X16.
+  Support::writeU64uLE(buffer + 8, targetAddress);
+  return kErrorOk;
+}
+
+static Error CodeHolder_writeA64BranchStubIslands(CodeHolder* self, uint64_t baseAddress) noexcept {
+  for (A64BranchStubIsland* island : self->_a64BranchStubIslands) {
+    Section* sourceSection = self->sectionById(island->_sourceSectionId);
+    uint64_t guardOffset = island->_guardOffset;
+    uint64_t afterIslandOffset = guardOffset + island->_size;
+
+    if (ASMJIT_UNLIKELY(afterIslandOffset > sourceSection->bufferSize() ||
+                        !CodeHolder_canEncodeA64Branch(guardOffset, afterIslandOffset)))
+      return DebugUtils::errored(kErrorRelocOffsetOutOfRange);
+
+    int64_t displacement = int64_t(afterIslandOffset - guardOffset);
+    int64_t dispImm = displacement >> 2;
+    Support::writeU32uLE(sourceSection->data() + guardOffset, 0x14000000u | (uint32_t(dispImm) & 0x03FFFFFFu));
+  }
+
+  for (A64BranchStubIslandEntry* entry : self->_a64BranchStubIslandEntries) {
+    Section* sourceSection = self->sectionById(entry->_sourceSectionId);
+    uint32_t entrySize = CodeHolder_a64BranchStubIslandEntrySize(entry->_use);
+    uint64_t targetAddress = entry->_target;
+
+    if (entry->_targetSectionId != Globals::kInvalidId) {
+      Section* targetSection = self->sectionById(entry->_targetSectionId);
+      if (ASMJIT_UNLIKELY(!targetSection))
+        return DebugUtils::errored(kErrorInvalidRelocEntry);
+      targetAddress += baseAddress + targetSection->offset();
+    }
+
+    if (ASMJIT_UNLIKELY(entry->_offset + entrySize > sourceSection->bufferSize()))
+      return DebugUtils::errored(kErrorInvalidRelocEntry);
+
+    if (entry->_use == A64BranchStubIslandUse::kAddressLiteral)
+      Support::writeU64uLE(sourceSection->data() + entry->_offset, targetAddress);
+    else
+      ASMJIT_PROPAGATE(CodeHolder_writeA64BranchStub(sourceSection->data() + entry->_offset, targetAddress));
+  }
+
+  return kErrorOk;
+}
+
+Error CodeHolder::relocateToBase(uint64_t baseAddress) noexcept {
+  // Base address must be provided.
+  if (ASMJIT_UNLIKELY(baseAddress == Globals::kNoBaseAddress))
+    return DebugUtils::errored(kErrorInvalidArgument);
+
+  _baseAddress = baseAddress;
+  uint32_t addressSize = _environment.registerSize();
+
+  Section* addressTableSection = _addressTableSection;
+  uint32_t addressTableEntryCount = 0;
+  uint8_t* addressTableEntryData = nullptr;
+
+  Section* a64BranchStubSection = _a64BranchStubSection;
+  uint32_t a64BranchStubEntryCount = 0;
+  uint8_t* a64BranchStubData = nullptr;
+
+  if (addressTableSection) {
+    size_t addrTableSize = size_t(addressTableSection->virtualSize());
+    ASMJIT_PROPAGATE(
+      reserveBuffer(&addressTableSection->_buffer, addrTableSize));
+    addressTableSection->_buffer._size = addrTableSize;
+    addressTableEntryData = addressTableSection->_buffer.data();
+  }
+
+  if (a64BranchStubSection) {
+    size_t stubTableSize = size_t(a64BranchStubSection->virtualSize());
+    ASMJIT_PROPAGATE(
+      reserveBuffer(&a64BranchStubSection->_buffer, stubTableSize));
+    a64BranchStubSection->_buffer._size = stubTableSize;
+    a64BranchStubData = a64BranchStubSection->_buffer.data();
+  }
+
+  ASMJIT_PROPAGATE(CodeHolder_writeA64BranchStubIslands(this, baseAddress));
+
+  // Relocate all recorded locations.
+  for (const RelocEntry* re : _relocations) {
+    // Possibly deleted or optimized-out entry.
+    if (re->relocType() == RelocType::kNone)
+      continue;
+
+    Section* sourceSection = sectionById(re->sourceSectionId());
+    Section* targetSection = nullptr;
+
+    if (re->targetSectionId() != Globals::kInvalidId)
+      targetSection = sectionById(re->targetSectionId());
+
+    uint64_t value = re->payload();
+    uint64_t sectionOffset = sourceSection->offset();
+    uint64_t sourceOffset = re->sourceOffset();
+
+    // Make sure that the `RelocEntry` doesn't go out of bounds.
+    size_t regionSize = re->format().regionSize();
+    if (ASMJIT_UNLIKELY(re->sourceOffset() >= sourceSection->bufferSize() ||
+                        sourceSection->bufferSize() - size_t(re->sourceOffset()) < regionSize))
+      return DebugUtils::errored(kErrorInvalidRelocEntry);
+
+    uint8_t* buffer = sourceSection->data();
+
+    switch (re->relocType()) {
+      case RelocType::kExpression: {
+        Expression* expression = (Expression*)(uintptr_t(value));
+        ASMJIT_PROPAGATE(CodeHolder_evaluateExpression(this, expression, &value));
+        break;
+      }
+
+      case RelocType::kAbsToAbs: {
+        break;
+      }
+
+      case RelocType::kRelToAbs: {
+        // Value is currently a relative offset from the start of its section.
+        // We have to convert it to an absolute offset (including base address).
+        if (ASMJIT_UNLIKELY(!targetSection))
+          return DebugUtils::errored(kErrorInvalidRelocEntry);
+
+        //value += baseAddress + sectionOffset + sourceOffset + regionSize;
+        value += baseAddress + targetSection->offset();
+        break;
+      }
+
+      case RelocType::kAbsToRel: {
+        value -= baseAddress + sectionOffset + sourceOffset + regionSize;
+
+        // Sign extend as we are not interested in the high 32-bit word in a 32-bit address space.
+        if (addressSize <= 4)
+          value = uint64_t(int64_t(int32_t(value & 0xFFFFFFFFu)));
+        else if (!Support::isInt32(int64_t(value)))
+          return DebugUtils::errored(kErrorRelocOffsetOutOfRange);
+
+        break;
+      }
+
+      case RelocType::kX64AddressEntry: {
+        size_t valueOffset = size_t(re->sourceOffset()) + re->format().valueOffset();
+        if (re->format().valueSize() != 4 || valueOffset < 2)
+          return DebugUtils::errored(kErrorInvalidRelocEntry);
+
+        // First try whether a relative 32-bit displacement would work.
+        value -= baseAddress + sectionOffset + sourceOffset + regionSize;
+        if (!Support::isInt32(int64_t(value))) {
+          // Relative 32-bit displacement is not possible, use '.addrtab' section.
+          AddressTableEntry* atEntry = _addressTableEntries.get(re->payload());
+          if (ASMJIT_UNLIKELY(!atEntry))
+            return DebugUtils::errored(kErrorInvalidRelocEntry);
+
+          // Cannot be null as we have just matched the `AddressTableEntry`.
+          ASMJIT_ASSERT(addressTableSection != nullptr);
+
+          if (!atEntry->hasAssignedSlot())
+            atEntry->_slot = addressTableEntryCount++;
+
+          size_t atEntryIndex = size_t(atEntry->slot()) * addressSize;
+          uint64_t addrSrc = sectionOffset + sourceOffset + regionSize;
+          uint64_t addrDst = addressTableSection->offset() + uint64_t(atEntryIndex);
+
+          value = addrDst - addrSrc;
+          if (!Support::isInt32(int64_t(value)))
+            return DebugUtils::errored(kErrorRelocOffsetOutOfRange);
+
+          // Bytes that replace [REX, OPCODE] bytes.
+          uint32_t byte0 = 0xFF;
+          uint32_t byte1 = buffer[valueOffset - 1];
+
+          if (byte1 == 0xE8) {
+            // Patch CALL/MOD byte to FF /2 (-> 0x15).
+            byte1 = x86EncodeMod(0, 2, 5);
+          }
+          else if (byte1 == 0xE9) {
+            // Patch JMP/MOD byte to FF /4 (-> 0x25).
+            byte1 = x86EncodeMod(0, 4, 5);
+          }
+          else {
+            return DebugUtils::errored(kErrorInvalidRelocEntry);
+          }
+
+          // Patch `jmp/call` instruction.
+          buffer[valueOffset - 2] = uint8_t(byte0);
+          buffer[valueOffset - 1] = uint8_t(byte1);
+
+          Support::writeU64uLE(addressTableEntryData + atEntryIndex, re->payload());
+        }
+        break;
+      }
+
+      case RelocType::kA64AddressEntry:
+      case RelocType::kA64JumpAddressEntry: {
+        bool isCall = (re->relocType() == RelocType::kA64AddressEntry);
+        uint64_t targetAddress = targetSection
+          ? baseAddress + targetSection->offset() + re->payload()
+          : re->payload();
+        uint64_t pc = baseAddress + sectionOffset + sourceOffset;
+        int64_t displacement = int64_t(targetAddress - pc);
+        int64_t dispImm = displacement >> 2;
+        uint32_t baseOpcode = isCall ? 0x94000000u : 0x14000000u;
+
+        if ((displacement & 3) == 0 && Support::isEncodableOffset64(dispImm, 26)) {
+          uint32_t branchOpcode = baseOpcode | (uint32_t(dispImm) & 0x03FFFFFFu);
+          Support::writeU32uLE(buffer + sourceOffset, branchOpcode);
+        }
+        else {
+          A64BranchStubIslandEntry* islandEntry =
+            CodeHolder_findA64BranchStubIslandEntry(
+              this,
+              sourceSection->id(),
+              sourceOffset,
+              re->payload(),
+              re->targetSectionId(),
+              A64BranchStubIslandUse::kBranch);
+          uint64_t stubOffset;
+
+          if (islandEntry) {
+            stubOffset = sectionOffset + islandEntry->_offset;
+          }
+          else {
+            if (ASMJIT_UNLIKELY(targetSection))
+              return DebugUtils::errored(kErrorRelocOffsetOutOfRange);
+
+            A64BranchStubEntry* stubEntry = _a64BranchStubEntries.get(targetAddress);
+            if (ASMJIT_UNLIKELY(!stubEntry))
+              return DebugUtils::errored(kErrorInvalidRelocEntry);
+
+            ASMJIT_ASSERT(a64BranchStubSection != nullptr);
+
+            if (!stubEntry->hasAssignedSlot())
+              stubEntry->_slot = a64BranchStubEntryCount++;
+            else if (a64BranchStubEntryCount <= stubEntry->slot())
+              a64BranchStubEntryCount = stubEntry->slot() + 1;
+
+            size_t stubIndex = size_t(stubEntry->slot()) * kA64BranchStubSize;
+            ASMJIT_PROPAGATE(CodeHolder_writeA64BranchStub(a64BranchStubData + stubIndex, targetAddress));
+
+            stubOffset = a64BranchStubSection->offset() + uint64_t(size_t(stubEntry->slot()) * kA64BranchStubSize);
+          }
+
+          int64_t stubDisplacement = int64_t(stubOffset - (sectionOffset + sourceOffset));
+          int64_t stubDispImm = stubDisplacement >> 2;
+
+          if ((stubDisplacement & 3) != 0 || !Support::isEncodableOffset64(stubDispImm, 26))
+            return DebugUtils::errored(kErrorRelocOffsetOutOfRange);
+
+          uint32_t branchOpcode = baseOpcode | (uint32_t(stubDispImm) & 0x03FFFFFFu);
+          Support::writeU32uLE(buffer + sourceOffset, branchOpcode);
+        }
+
+        // Skip the normal writeOffset call - we've already written the instruction directly.
+        continue;
+      }
+
+      case RelocType::kA64AdrEntry: {
+        // AArch64: The source contains 8 bytes (adr Rd, #0 + NOP as placeholder).
+        // Relaxes to `adr` (±1MB) or `adrp+add` (±4GB).
+        if (ASMJIT_UNLIKELY(!targetSection))
+          return DebugUtils::errored(kErrorInvalidRelocEntry);
+
+        uint64_t targetAddress = baseAddress + targetSection->offset() + re->payload();
+        uint64_t pc = baseAddress + sectionOffset + sourceOffset;
+        uint32_t rd = Support::readU32uLE(buffer + sourceOffset) & 0x1Fu;
+
+        if (!tryEncodeAdrOrAdrpAdd(buffer, sourceOffset, targetAddress, pc, rd)) {
+          A64BranchStubIslandEntry* islandEntry =
+            CodeHolder_findA64BranchStubIslandEntry(
+              this,
+              sourceSection->id(),
+              sourceOffset,
+              re->payload(),
+              re->targetSectionId(),
+              A64BranchStubIslandUse::kAddressLiteral);
+          if (ASMJIT_UNLIKELY(!islandEntry))
+            return DebugUtils::errored(kErrorRelocOffsetOutOfRange);
+
+          int64_t ldrDisplacement = int64_t(uint64_t(islandEntry->_offset) - sourceOffset);
+          int64_t ldrImm19 = ldrDisplacement >> 2;
+          if (ASMJIT_UNLIKELY((ldrDisplacement & 3) != 0 ||
+                              !Support::isEncodableOffset64(ldrImm19, 19)))
+            return DebugUtils::errored(kErrorRelocOffsetOutOfRange);
+
+          uint32_t ldrOpcode = 0x58000000u | ((uint32_t(ldrImm19) & 0x7FFFFu) << 5) | rd;
+          Support::writeU32uLE(buffer + sourceOffset, ldrOpcode);
+          Support::writeU32uLE(buffer + sourceOffset + 4, 0xD503201Fu);
+        }
+
+        continue;
+      }
+
+      case RelocType::kA64AdrAbsEntry: {
+        // AArch64: absolute address payload. Page-aligned targets reserve one
+        // instruction; other targets reserve two in case `adrp+add` is needed.
+        uint64_t targetAddress = re->payload();
+        uint64_t pc = baseAddress + sectionOffset + sourceOffset;
+        uint32_t rd = Support::readU32uLE(buffer + sourceOffset) & 0x1Fu;
+
+        // The reservation the assembler made for this entry, which bounds what
+        // can be written back over it.
+        uint32_t reservedSize = a64AdrAbsRegionSize(targetAddress);
+
+        if (!tryEncodeAdrOrAdrpAdd(buffer, sourceOffset, targetAddress, pc, rd) &&
+            !tryEncodeMovSequence(buffer, sourceOffset, targetAddress, rd, reservedSize)) {
+          A64BranchStubIslandEntry* islandEntry =
+            CodeHolder_findA64BranchStubIslandEntry(
+              this,
+              sourceSection->id(),
+              sourceOffset,
+              targetAddress,
+              Globals::kInvalidId,
+              A64BranchStubIslandUse::kAddressLiteral);
+          if (islandEntry) {
+            uint64_t literalOffset = islandEntry->_offset;
+            int64_t ldrDisplacement = int64_t(literalOffset - sourceOffset);
+            int64_t ldrImm19 = ldrDisplacement >> 2;
+            ASMJIT_ASSERT((ldrDisplacement & 3) == 0 && Support::isEncodableOffset64(ldrImm19, 19));
+
+            uint32_t ldrOpcode = 0x58000000u | ((uint32_t(ldrImm19) & 0x7FFFFu) << 5) | rd;
+            Support::writeU32uLE(buffer + sourceOffset, ldrOpcode);
+            continue;
+          }
+
+          // Neither a PC-relative form nor a materialized constant fits, so
+          // load the address from the address table. Statically allocated data
+          // is typically far outside adrp's +/-4GB range from JIT-allocated
+          // code, which is what makes materializing it worth trying first: it
+          // avoids both the table entry and the load.
+          AddressTableEntry* atEntry = _addressTableEntries.get(targetAddress);
+          if (ASMJIT_UNLIKELY(!atEntry))
+            return DebugUtils::errored(kErrorInvalidRelocEntry);
+
+          ASMJIT_ASSERT(addressTableSection != nullptr);
+
+          if (!atEntry->hasAssignedSlot())
+            atEntry->_slot = addressTableEntryCount++;
+
+          size_t atEntryIndex = size_t(atEntry->slot()) * addressSize;
+          uint64_t addrTableOffset = addressTableSection->offset() + uint64_t(atEntryIndex);
+
+          int64_t ldrDisplacement = int64_t(addrTableOffset - (sectionOffset + sourceOffset));
+          int64_t ldrImm19 = ldrDisplacement >> 2;
+
+          if ((ldrDisplacement & 3) != 0 || !Support::isEncodableOffset64(ldrImm19, 19))
+            return DebugUtils::errored(kErrorRelocOffsetOutOfRange);
+
+          uint32_t ldrOpcode = 0x58000000u | ((uint32_t(ldrImm19) & 0x7FFFFu) << 5) | rd;
+          Support::writeU32uLE(buffer + sourceOffset, ldrOpcode);
+
+          Support::writeU64uLE(addressTableEntryData + atEntryIndex, targetAddress);
+        }
+
+        continue;
+      }
+
+      case RelocType::kA64LdrLiteralEntry: {
+        // AArch64: The source contains 8 bytes (ldr Xd, #0 + NOP as placeholder).
+        // We try to use `ldr Xd, [PC+imm19]` first. If the displacement doesn't fit
+        // in the 19-bit signed offset (±1MB), we use `adrp Xd, page; ldr Xd, [Xd, #off]`.
+        if (ASMJIT_UNLIKELY(!targetSection))
+          return DebugUtils::errored(kErrorInvalidRelocEntry);
+
+        uint64_t targetAddress = baseAddress + targetSection->offset() + re->payload();
+        uint64_t pc = baseAddress + sectionOffset + sourceOffset;
+        int64_t displacement = int64_t(targetAddress - pc);
+
+        // Read the original ldr literal instruction to extract Rd and the size (opc field).
+        uint32_t origLdr = Support::readU32uLE(buffer + sourceOffset);
+        uint32_t rd = origLdr & 0x1Fu;
+        // Extract opc from bits [31:30]: 00=ldr W, 01=ldr X, 10=ldrsw, 11=prfm.
+        uint32_t opc = (origLdr >> 30) & 3u;
+        if (ASMJIT_UNLIKELY(opc == 3u))
+          return DebugUtils::errored(kErrorInvalidRelocEntry);
+        uint32_t loadSizeLog2 = (opc == 1u) ? 3u : 2u;
+
+        int64_t dispImm = displacement >> 2;
+        if ((displacement & 3) == 0 && Support::isEncodableOffset64(dispImm, 19)) {
+          // Fits in ldr literal: emit `ldr Xd, [PC+off]; nop`.
+          uint32_t ldrOpcode = (origLdr & ~(0x7FFFFu << 5)) | ((uint32_t(dispImm) & 0x7FFFFu) << 5);
+          Support::writeU32uLE(buffer + sourceOffset, ldrOpcode);
+          Support::writeU32uLE(buffer + sourceOffset + 4, 0xD503201Fu); // NOP
+        } else {
+          // Doesn't fit: emit `adrp Xd, target_page; ldr Xd, [Xd, #page_offset]`.
+          int64_t pageDelta = (int64_t(targetAddress) >> 12) - (int64_t(pc) >> 12);
+          uint32_t pageOffset = uint32_t(targetAddress) & 0xFFFu;
+          uint32_t scaledOffset = pageOffset >> loadSizeLog2;
+          uint32_t ldrBaseOpcode;
+          if (opc == 1u)
+            ldrBaseOpcode = 0xF9400000u; // ldr Xd, [Xn, #imm] (64-bit)
+          else if (opc == 0u)
+            ldrBaseOpcode = 0xB9400000u; // ldr Wd, [Xn, #imm] (32-bit)
+          else
+            ldrBaseOpcode = 0xB9800000u; // ldrsw Xd, [Xn, #imm] (signed 32-bit)
+
+          if (Support::isEncodableOffset64(pageDelta, 21) &&
+              (scaledOffset << loadSizeLog2) == pageOffset) {
+            uint32_t immLo = uint32_t(pageDelta) & 3u;
+            uint32_t immHi = (uint32_t(pageDelta) >> 2) & 0x7FFFFu;
+            uint32_t adrpOpcode = 0x90000000u | (immLo << 29) | (immHi << 5) | rd;
+            uint32_t ldrOpcode = ldrBaseOpcode | (scaledOffset << 10) | (rd << 5) | rd;
+
+            Support::writeU32uLE(buffer + sourceOffset, adrpOpcode);
+            Support::writeU32uLE(buffer + sourceOffset + 4, ldrOpcode);
+          }
+          else {
+            A64BranchStubIslandEntry* islandEntry =
+              CodeHolder_findA64BranchStubIslandEntry(
+                this,
+                sourceSection->id(),
+                sourceOffset,
+                re->payload(),
+                re->targetSectionId(),
+                A64BranchStubIslandUse::kAddressLiteral);
+            if (ASMJIT_UNLIKELY(!islandEntry))
+              return DebugUtils::errored(kErrorRelocOffsetOutOfRange);
+
+            int64_t literalDisplacement = int64_t(uint64_t(islandEntry->_offset) - sourceOffset);
+            int64_t literalImm19 = literalDisplacement >> 2;
+            if (ASMJIT_UNLIKELY((literalDisplacement & 3) != 0 ||
+                                !Support::isEncodableOffset64(literalImm19, 19)))
+              return DebugUtils::errored(kErrorRelocOffsetOutOfRange);
+
+            uint32_t addressLdrOpcode =
+              0x58000000u | ((uint32_t(literalImm19) & 0x7FFFFu) << 5) | rd;
+            uint32_t valueLdrOpcode = ldrBaseOpcode | (rd << 5) | rd;
+            Support::writeU32uLE(buffer + sourceOffset, addressLdrOpcode);
+            Support::writeU32uLE(buffer + sourceOffset + 4, valueLdrOpcode);
+          }
+        }
+
+        continue;
+      }
+
+      default:
+        return DebugUtils::errored(kErrorInvalidRelocEntry);
+    }
+
+    if (!CodeWriterUtils::writeOffset(buffer + re->sourceOffset(), int64_t(value), re->format())) {
+      return DebugUtils::errored(kErrorInvalidRelocEntry);
+    }
+  }
+
+  // Fixup the virtual size of the address table if it's the last section.
+  if (_sectionsByOrder.last() == addressTableSection) {
+    ASMJIT_ASSERT(addressTableSection != nullptr);
+
+    size_t addressTableSize = addressTableEntryCount * addressSize;
+    addressTableSection->_buffer._size = addressTableSize;
+    addressTableSection->_virtualSize = addressTableSize;
+  }
+
+  return kErrorOk;
+}
+
+Error CodeHolder::copySectionData(void* dst, size_t dstSize, uint32_t sectionId, CopySectionFlags copyFlags) noexcept {
+  if (ASMJIT_UNLIKELY(!isSectionValid(sectionId)))
+    return DebugUtils::errored(kErrorInvalidSection);
+
+  Section* section = sectionById(sectionId);
+  size_t bufferSize = section->bufferSize();
+
+  if (ASMJIT_UNLIKELY(dstSize < bufferSize))
+    return DebugUtils::errored(kErrorInvalidArgument);
+
+  memcpy(dst, section->data(), bufferSize);
+
+  if (bufferSize < dstSize && Support::test(copyFlags, CopySectionFlags::kPadSectionBuffer)) {
+    size_t paddingSize = dstSize - bufferSize;
+    memset(static_cast<uint8_t*>(dst) + bufferSize, 0, paddingSize);
+  }
+
+  return kErrorOk;
+}
+
+Error CodeHolder::copyFlattenedData(void* dst, size_t dstSize, CopySectionFlags copyFlags) noexcept {
+  size_t end = 0;
+  for (Section* section : _sectionsByOrder) {
+    if (section->offset() > dstSize)
+      return DebugUtils::errored(kErrorInvalidArgument);
+
+    size_t bufferSize = section->bufferSize();
+    size_t offset = size_t(section->offset());
+
+    if (ASMJIT_UNLIKELY(dstSize - offset < bufferSize))
+      return DebugUtils::errored(kErrorInvalidArgument);
+
+    uint8_t* dstTarget = static_cast<uint8_t*>(dst) + offset;
+    size_t paddingSize = 0;
+    memcpy(dstTarget, section->data(), bufferSize);
+
+    if (Support::test(copyFlags, CopySectionFlags::kPadSectionBuffer) && bufferSize < section->virtualSize()) {
+      paddingSize = Support::min<size_t>(dstSize - offset, size_t(section->virtualSize())) - bufferSize;
+      memset(dstTarget + bufferSize, 0, paddingSize);
+    }
+
+    end = Support::max(end, offset + bufferSize + paddingSize);
+  }
+
+  if (end < dstSize && Support::test(copyFlags, CopySectionFlags::kPadTargetBuffer)) {
+    memset(static_cast<uint8_t*>(dst) + end, 0, dstSize - end);
+  }
+
+  return kErrorOk;
+}
+
+// CodeHolder - Tests
+// ==================
+
+#if defined(ASMJIT_TEST)
+UNIT(code_holder) {
+  CodeHolder code;
+
+  INFO("Verifying CodeHolder::init()");
+  Environment env;
+  env.init(Arch::kX86);
+
+  code.init(env);
+  EXPECT_EQ(code.arch(), Arch::kX86);
+
+  INFO("Verifying named labels");
+  LabelEntry* le;
+  EXPECT_EQ(code.newNamedLabelEntry(&le, "NamedLabel", SIZE_MAX, LabelType::kGlobal), kErrorOk);
+  EXPECT_EQ(strcmp(le->name(), "NamedLabel"), 0);
+  EXPECT_EQ(code.labelIdByName("NamedLabel"), le->id());
+
+  INFO("Verifying section ordering");
+  Section* section1;
+  EXPECT_EQ(code.newSection(&section1, "high-priority", SIZE_MAX, SectionFlags::kNone, 1, -1), kErrorOk);
+  EXPECT_EQ(code.sections()[1], section1);
+  EXPECT_EQ(code.sectionsByOrder()[0], section1);
+
+  Section* section0;
+  EXPECT_EQ(code.newSection(&section0, "higher-priority", SIZE_MAX, SectionFlags::kNone, 1, -2), kErrorOk);
+  EXPECT_EQ(code.sections()[2], section0);
+  EXPECT_EQ(code.sectionsByOrder()[0], section0);
+  EXPECT_EQ(code.sectionsByOrder()[1], section1);
+
+  Section* section3;
+  EXPECT_EQ(code.newSection(&section3, "low-priority", SIZE_MAX, SectionFlags::kNone, 1, 2), kErrorOk);
+  EXPECT_EQ(code.sections()[3], section3);
+  EXPECT_EQ(code.sectionsByOrder()[3], section3);
+}
+#endif
+
+ASMJIT_END_NAMESPACE

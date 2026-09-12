@@ -4,7 +4,9 @@
 #include "cinderx/Jit/fixed_type_profiler.h"
 #include "cinderx/RuntimeTests/fixtures.h"
 
-using namespace jit;
+namespace cinderx {
+
+using namespace cinderx::jit;
 
 using TypeProfilerTest = RuntimeTest;
 
@@ -53,3 +55,5 @@ TEST_F(TypeProfilerTest, Fixed) {
   EXPECT_EQ(Py_REFCNT(b), b_cnt);
   EXPECT_EQ(Py_REFCNT(c), c_cnt);
 }
+
+} // namespace cinderx

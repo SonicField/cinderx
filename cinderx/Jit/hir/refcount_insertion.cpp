@@ -23,7 +23,7 @@
 // This file implements our reference count insertion pass. If this is your
 // first time here, I recommend reading refcount_insertion.md first.
 
-namespace jit::hir {
+namespace cinderx::jit::hir {
 
 namespace {
 
@@ -41,26 +41,26 @@ class BorrowSupport {
 
  public:
   void clear() {
-    bits_.SetBitWidth(0);
+    bits_.setBitWidth(0);
   }
 
   void init(size_t num_support_bits) {
-    bits_.SetBitWidth(num_support_bits);
+    bits_.setBitWidth(num_support_bits);
     bits_.fill(0);
   }
 
   bool empty() const {
-    return bits_.IsEmpty();
+    return bits_.isEmpty();
   }
 
   bool intersects(const BorrowSupport& other) const {
-    return !(bits_ & other.bits_).IsEmpty();
+    return !(bits_ & other.bits_).isEmpty();
   }
   bool intersects(AliasClass acls) const {
-    return (bits_.GetBitChunk(0) & acls.bits()) != 0;
+    return (bits_.getBitChunk(0) & acls.bits()) != 0;
   }
   bool intersects(size_t bit) const {
-    return bits_.GetBit(bit);
+    return bits_.getBit(bit);
   }
 
   bool operator==(const BorrowSupport& other) const {
@@ -75,19 +75,19 @@ class BorrowSupport {
     bits_ |= other.bits_;
   }
   void add(AliasClass acls) {
-    bits_.SetBitChunk(0, bits_.GetBitChunk(0) | acls.bits());
+    bits_.setBitChunk(0, bits_.getBitChunk(0) | acls.bits());
   }
 
   void add(size_t bit) {
-    bits_.SetBit(bit, 1);
+    bits_.setBit(bit, 1);
   }
 
   void remove(AliasClass acls) {
-    bits_.SetBitChunk(0, bits_.GetBitChunk(0) & ~acls.bits());
+    bits_.setBitChunk(0, bits_.getBitChunk(0) & ~acls.bits());
   }
 
   void remove(size_t bit) {
-    bits_.SetBit(bit, 0);
+    bits_.setBit(bit, 0);
   }
 
  private:
@@ -115,7 +115,7 @@ struct RegState {
   // The most recently defined copy of the model, which may still be the model
   // itself.
   Register* current() const {
-    JIT_DCHECK(!copies_.empty(), "{} has no live copies", model_->name());
+    JIT_DCHECK(!copies_.empty(), "{} has no live copies", *model_);
     return copies_.back();
   }
 
@@ -130,10 +130,7 @@ struct RegState {
     // copies of a value is rare.
     auto it = std::find(copies_.begin(), copies_.end(), copy);
     JIT_DCHECK(
-        it != copies_.end(),
-        "{} isn't a live copy of {}",
-        copy->name(),
-        model_->name());
+        it != copies_.end(), "{} isn't a live copy of {}", *copy, *model_);
     copies_.erase(it);
     return copies_.empty();
   }
@@ -281,9 +278,6 @@ class StateMap {
   bool operator==(const StateMap& other) const {
     return map_ == other.map_;
   }
-  bool operator!=(const StateMap& other) const {
-    return !operator==(other);
-  }
 
  private:
   map_t map_;
@@ -325,7 +319,7 @@ std::ostream& operator<<(std::ostream& os, const RegState& rstate) {
   os << "RegState{[";
   auto sep = "";
   for (int i = 0, n = rstate.numCopies(); i < n; ++i) {
-    fmt::print(os, "{}{}", sep, rstate.copy(i)->name());
+    fmt::print(os, "{}{}", sep, *rstate.copy(i));
     sep = ", ";
   }
   fmt::print(os, "], {}", rstate.kind());
@@ -347,31 +341,30 @@ std::ostream& operator<<(std::ostream& os, const StateMap& regs) {
   std::sort(states.begin(), states.end(), RegStateLess{});
   fmt::print(os, "StateMap[{}] = {{\n", states.size());
   for (auto state : states) {
-    fmt::print(
-        os, "  {} -> {}\n", state->model()->name(), fmt::streamed(*state));
+    fmt::print(os, "  {} -> {}\n", *state->model(), fmt::streamed(*state));
   }
   return os << "}";
 }
 
 } // namespace
 
-} // namespace jit::hir
+} // namespace cinderx::jit::hir
 
 template <>
-struct fmt::formatter<jit::hir::RegState> : fmt::ostream_formatter {};
+struct fmt::formatter<cinderx::jit::hir::RegState> : fmt::ostream_formatter {};
 
 template <>
-struct fmt::formatter<jit::hir::StateMap> : fmt::ostream_formatter {};
+struct fmt::formatter<cinderx::jit::hir::StateMap> : fmt::ostream_formatter {};
 
-namespace jit::hir {
+namespace cinderx::jit::hir {
 
 namespace {
 
 // Global state used by the analysis.
 struct Env {
   explicit Env(Function& func) : func{func}, liveness{func} {
-    liveness.Run();
-    last_uses = liveness.GetLastUses();
+    liveness.run();
+    last_uses = liveness.getLastUses();
 
     // Visit each Phi to collect some metadata:
     // - Assign a borrow support bit to any Register that is a Phi input or
@@ -391,10 +384,10 @@ struct Env {
       block.forEachPhi([&](Phi& phi) {
         auto output = phi.output();
         add_support_bit(output);
-        for (int i = 0, n = phi.NumOperands(); i < n; ++i) {
-          auto model = modelReg(phi.GetOperand(i));
+        for (int i = 0, n = phi.numOperands(); i < n; ++i) {
+          auto model = modelReg(phi.getOperand(i));
           add_support_bit(model);
-          phi_uses[model][phi.basic_blocks()[i]].emplace_back(output);
+          phi_uses[model][phi.basicBlocks()[i]].emplace_back(output);
         }
       });
     }
@@ -459,7 +452,7 @@ struct PredState {
 // sorted by block id.
 std::vector<PredState> collectPredStates(Env& env, BasicBlock* block) {
   std::vector<PredState> preds;
-  for (auto edge : block->in_edges()) {
+  for (auto edge : block->inEdges()) {
     auto pred = edge->from();
     auto it = env.blocks.find(pred);
     if (it == env.blocks.end()) {
@@ -490,7 +483,7 @@ void insertIncref(Env& env, Register* reg, Instr& cursor) {
     incref = XIncref::create(reg);
   }
   incref->copyBytecodeOffset(cursor);
-  incref->InsertBefore(cursor);
+  incref->insertBefore(cursor);
   TRACE(
       "Inserted '{}' before '{}' in bb {}",
       *incref,
@@ -509,7 +502,7 @@ void insertDecref(Env& env, Register* reg, Instr& cursor) {
     decref = XDecref::create(reg);
   }
   decref->copyBytecodeOffset(cursor);
-  decref->InsertBefore(cursor);
+  decref->insertBefore(cursor);
   TRACE(
       "Inserted '{}' before '{}' in bb {}",
       *decref,
@@ -524,6 +517,19 @@ void registerBorrowSupport(Env& env, RegState& rstate) {
   }
   env.borrow_support.add(rstate.support());
   env.borrowed_regs.emplace(&rstate);
+}
+
+// Mark the given RegState Uncounted, dropping any registration it had in
+// env.borrowed_regs. An uncounted value never needs promoting to owned, so
+// leaving it registered would trip the invariant in invalidateBorrowSupport().
+//
+// env.borrow_support is deliberately left alone: it's the union of the support
+// of every borrowed value, so bits can't be cleared for one value in
+// isolation, and an over-approximation there only costs a scan that finds
+// nothing to promote.
+void setUncounted(Env& env, RegState& rstate) {
+  env.borrowed_regs.erase(&rstate);
+  rstate.setUncounted();
 }
 
 // Invalidate the borrow support represented by either a bit index or an
@@ -582,9 +588,13 @@ void killRegisterImpl(
     //    destructor.
     // 2. The value we're losing a reference to could be a container supporting
     //    a borrowed value.
-    // It's possible to do better in the future on both of these points, with
-    // more complexity.
-    invalidateBorrowSupport(env, cursor, AManagedHeapAny);
+    // Neither reason applies to exact builtin scalars, so for those we skip the
+    // blanket invalidation and avoid promoting (then decref-ing) every live
+    // heap borrow across the decref.  This mirrors memoryEffects(), which
+    // already models a Decref of such a value as writing only AOther.
+    if (!model->type().isLeafScalar()) {
+      invalidateBorrowSupport(env, cursor, AManagedHeapAny);
+    }
     if (env.mutate) {
       insertDecref(env, copy, cursor);
     }
@@ -643,46 +653,46 @@ void useInState(Env& env, const StateMap& state) {
 // of the predecessor's out-state with adjustments for a CondBranch* in the
 // predecessor and/or registers that died across the edge.
 void useSimpleInState(Env& env, BasicBlock* block) {
-  if (block->in_edges().empty()) {
+  if (block->inEdges().empty()) {
     useInState(env, StateMap{});
     return;
   }
 
   JIT_DCHECK(
-      block->in_edges().size() == 1,
+      block->inEdges().size() == 1,
       "Only blocks with <= 1 predecessors are supported");
   JIT_DCHECK(
-      !block->front().IsPhi(),
+      !block->front().isPhi(),
       "Phis in a single-predecessor block are unsupported");
 
-  BasicBlock* pred = (*block->in_edges().begin())->from();
+  BasicBlock* pred = (*block->inEdges().begin())->from();
   useInState(env, map_get(env.blocks, pred).out);
 
   // First, adjust for a conditional branch, if any, in the predecessor.
-  Instr* term = pred->GetTerminator();
-  if (term->IsCondBranch() || term->IsCondBranchIterNotDone()) {
+  Instr* term = pred->getTerminator();
+  if (term->isCondBranch() || term->isCondBranchIterNotDone()) {
     auto cond = static_cast<CondBranchBase*>(term);
     // The operand of the CondBranch is uncounted coming out of the false edge:
     // for CondBranch it's nullptr, and for CondBranchIterNotDone it's an
     // immortal sentinel.
     if (block == cond->false_bb()) {
-      Register* reg = cond->GetOperand(0);
-      map_get(env.live_regs, reg).setUncounted();
+      Register* reg = cond->getOperand(0);
+      setUncounted(env, map_get(env.live_regs, reg));
     }
-  } else if (term->IsCondBranchCheckType()) {
+  } else if (term->isCondBranchCheckType()) {
     // Ci_PyWaitHandleObject is an uncounted singleton, so we adjust its
     // reference state here to avoid refcounting it.
     auto cond = static_cast<CondBranchCheckType*>(term);
     if (cond->type() == TWaitHandle) {
       if (block == cond->true_bb()) {
-        Register* reg = cond->GetOperand(0);
-        map_get(env.live_regs, reg).setUncounted();
+        Register* reg = cond->getOperand(0);
+        setUncounted(env, map_get(env.live_regs, reg));
       }
     }
   }
 
   // Second, kill any registers that die across the edge.
-  RegisterSet live_in = env.liveness.GetIn(block);
+  RegisterSet live_in = env.liveness.getIn(block);
   std::vector<Register*> dying_values;
   for (auto& pair : env.live_regs) {
     RegState& rstate = pair.second;
@@ -740,7 +750,7 @@ void initializeInState(
 // given in-state. Phi outputs are not live into the block they're defined in,
 // even though they appear in the in-state.
 bool isLiveIn(BasicBlock* block, Register* reg, const StateMap& in_state) {
-  if (reg->instr()->IsPhi() && reg->instr()->block() == block) {
+  if (reg->instr()->isPhi() && reg->instr()->block() == block) {
     return false;
   }
   return in_state.countModel(reg);
@@ -765,11 +775,11 @@ std::vector<PhiInput> collectPhiInputs(
   auto preds_it = preds.begin();
   for (std::size_t phi_idx = 0; preds_it != preds.end(); ++phi_idx) {
     auto& pred = *preds_it;
-    if (phi.basic_blocks().at(phi_idx) != pred.block) {
+    if (phi.basicBlocks().at(phi_idx) != pred.block) {
       // This predecessor hasn't been processed yet.
       continue;
     }
-    auto input = phi.GetOperand(phi_idx);
+    auto input = phi.getOperand(phi_idx);
     inputs.emplace_back(pred.block, &map_get(*pred.state, input));
     ++preds_it;
   }
@@ -802,7 +812,7 @@ PhiSupport processPhis(
   PhiSupport support_info(env.num_support_bits);
 
   for (auto& instr : *block) {
-    if (!instr.IsPhi()) {
+    if (!instr.isPhi()) {
       break;
     }
 
@@ -866,13 +876,13 @@ PhiSupport processPhis(
 // Update the in-state for the given block, leaving the result in both
 // env.live_regs and env.blocks[block].in.
 void updateInState(Env& env, BasicBlock* block) {
-  if (block->in_edges().size() <= 1) {
+  if (block->inEdges().size() <= 1) {
     useSimpleInState(env, block);
     return;
   }
 
   auto preds = collectPredStates(env, block);
-  auto live_in = env.liveness.GetIn(block);
+  auto live_in = env.liveness.getIn(block);
   auto block_pair = env.blocks.emplace(
       std::piecewise_construct,
       std::forward_as_tuple(block),
@@ -893,7 +903,7 @@ void updateInState(Env& env, BasicBlock* block) {
       continue;
     }
 
-    if (!(model->instr()->IsPhi() && model->instr()->block() == block)) {
+    if (!(model->instr()->isPhi() && model->instr()->block() == block)) {
       for (auto& pred : preds) {
         rstate.merge(pred.state->getModel(model));
         if (rstate.isOwned()) {
@@ -924,7 +934,7 @@ void fillDeoptLiveRegs(const StateMap& live_regs, Instr& instr) {
     return;
   }
 
-  JIT_CHECK(deopt->live_regs().empty(), "Instruction should have no live regs");
+  JIT_CHECK(deopt->liveRegs().empty(), "Instruction should have no live regs");
   for (auto& pair : live_regs) {
     auto& rstate = pair.second;
     auto ref_kind = rstate.kind();
@@ -970,21 +980,21 @@ void stealInputs(
     Instr& instr,
     const util::BitVector& stolen_inputs,
     const RegisterSet& dying_regs) {
-  if (stolen_inputs.GetPopCount() == 0) {
+  if (stolen_inputs.getPopCount() == 0) {
     return;
   }
 
-  for (int i = 0, n = instr.NumOperands(); i < n; ++i) {
-    if (!stolen_inputs.GetBit(i)) {
+  for (int i = 0, n = instr.numOperands(); i < n; ++i) {
+    if (!stolen_inputs.getBit(i)) {
       continue;
     }
 
-    auto reg = instr.GetOperand(i);
+    auto reg = instr.getOperand(i);
     auto& rstate = map_get(env.live_regs, reg);
     if (rstate.isOwned() && dying_regs.count(reg)) {
       // This instruction is the last use of reg and we own a reference to it.
       // Normally we let ownership for the input pass to the instruction's
-      // reciever.
+      // receiver.
       //
       // However, for yield instructions, if the register is also in the
       // FrameState (localsplus/stack), we need to keep a strong reference even
@@ -998,9 +1008,6 @@ void stealInputs(
       // NOLINTNEXTLINE(clang-diagnostic-switch-enum)
       switch (instr.opcode()) {
         case Opcode::kYieldValue:
-        case Opcode::kYieldFrom:
-        case Opcode::kYieldAndYieldFrom:
-        case Opcode::kYieldFromHandleStopAsyncIteration:
         case Opcode::kInitialYield: {
           if (isInFrameState(instr.asDeoptBase()->frameState(), reg)) {
             if (env.mutate) {
@@ -1036,17 +1043,17 @@ void processOutput(Env& env, const Instr& instr, const MemoryEffects& effects) {
   // Even though GuardIs is a passthrough, it verifies that a runtime value is a
   // specific object, breaking the dependency on the instruction that produced
   // the runtime value
-  if (isPassthrough(instr) && !instr.IsGuardIs()) {
+  if (isPassthrough(instr) && !instr.isGuardIs()) {
     auto& rstate = map_get(env.live_regs, output);
     rstate.addCopy(output);
     if (isUncounted(output)) {
-      rstate.setUncounted();
+      setUncounted(env, rstate);
     }
     return;
   }
 
   auto pair = env.live_regs.emplace(output, output);
-  JIT_DCHECK(pair.second, "Register {} already defined", output->name());
+  JIT_DCHECK(pair.second, "Register {} already defined", *output);
   auto& rstate = pair.first->second;
   if (isUncounted(output)) {
     // Do nothing. rstate is already Uncounted by default.
@@ -1063,8 +1070,8 @@ void processOutput(Env& env, const Instr& instr, const MemoryEffects& effects) {
 // output, and any registers that die after it.
 void processInstr(Env& env, Instr& instr) {
   JIT_DCHECK(
-      !instr.IsIncref() && !instr.IsDecref() && !instr.IsXDecref() &&
-          !instr.IsSnapshot(),
+      !instr.isIncref() && !instr.isDecref() && !instr.isXDecref() &&
+          !instr.isSnapshot(),
       "Unsupported instruction {}",
       instr.opname());
 
@@ -1082,7 +1089,7 @@ void processInstr(Env& env, Instr& instr) {
     TRACE("dying_regs: {}", fmt::streamed(dying_regs));
   }
 
-  if (instr.IsPhi()) {
+  if (instr.isPhi()) {
     // If a Phi output is unused, it will die immediately after the Phi that
     // defines it. It's illegal to insert a Decref between Phis, so we collect
     // any such Registers to Decref together after the last Phi in the block.
@@ -1095,7 +1102,7 @@ void processInstr(Env& env, Instr& instr) {
     }
 
     auto& next = *std::next(instr.block()->iterator_to(instr));
-    if (!next.IsPhi() && !env.deferred_deaths.empty()) {
+    if (!next.isPhi() && !env.deferred_deaths.empty()) {
       killRegisters(env, env.deferred_deaths, next);
       env.deferred_deaths.clear();
     }
@@ -1106,14 +1113,14 @@ void processInstr(Env& env, Instr& instr) {
   invalidateBorrowSupport(env, instr, effects.may_store);
   stealInputs(env, instr, effects.stolen_inputs, dying_regs);
 
-  if (instr.IsReturn()) {
+  if (instr.isReturn()) {
     JIT_DCHECK(
         env.live_regs.size() == 1 &&
             env.live_regs.begin()->second.numCopies() == 1,
         "Unexpected live value(s) at Return, with state:\n{}",
         env.live_regs);
     JIT_DCHECK(
-        !map_get(env.live_regs, instr.GetOperand(0)).isOwned(),
+        !map_get(env.live_regs, instr.getOperand(0)).isOwned(),
         "Return operand should not be owned at exit");
     return;
   }
@@ -1122,7 +1129,7 @@ void processInstr(Env& env, Instr& instr) {
     fillDeoptLiveRegs(env.live_regs, instr);
   }
 
-  if (instr.IsTerminator()) {
+  if (instr.isTerminator()) {
     return;
   }
 
@@ -1137,7 +1144,7 @@ void processInstr(Env& env, Instr& instr) {
 void exitBlock(Env& env, const Edge* out_edge) {
   auto block = out_edge->from();
   auto succ = out_edge->to();
-  if (succ->in_edges().size() == 1) {
+  if (succ->inEdges().size() == 1) {
     // No reconciliation is needed on 1:1 edges.
     return;
   }
@@ -1156,12 +1163,8 @@ void exitBlock(Env& env, const Edge* out_edge) {
       continue;
     }
 
-    bool to_owned = [&] {
-      if (!isLiveIn(succ, model, to_regs)) {
-        return false;
-      }
-      return to_regs.getModel(model).isOwned();
-    }();
+    bool to_owned =
+        isLiveIn(succ, model, to_regs) && to_regs.getModel(model).isOwned();
 
     // Start by calculating the number of increfs needed to reconcile the out
     // state to the in state. This may begin as -1 if the out state is Owned
@@ -1210,13 +1213,13 @@ void bindGuards(Function& irfunc) {
   for (auto& block : irfunc.cfg.blocks) {
     FrameState* fs = nullptr;
     for (auto& instr : block) {
-      if (instr.IsSnapshot()) {
+      if (instr.isSnapshot()) {
         auto& snapshot = static_cast<const Snapshot&>(instr);
         fs = snapshot.frameState();
         snapshots.emplace_back(&instr);
       } else if (
-          instr.IsGuard() || instr.IsGuardIs() || instr.IsGuardType() ||
-          instr.IsDeopt() || instr.IsDeoptPatchpoint()) {
+          instr.isGuard() || instr.isGuardIs() || instr.isGuardType() ||
+          instr.isDeopt() || instr.isDeoptPatchpoint()) {
         JIT_DCHECK(
             fs != nullptr,
             "No dominating snapshot for '{}' in function:\n{}",
@@ -1233,7 +1236,7 @@ void bindGuards(Function& irfunc) {
     snapshot->unlink();
     delete snapshot;
   }
-  DeadCodeElimination{}.Run(irfunc);
+  DeadCodeElimination{}.run(irfunc);
 }
 
 void optimizeLongDecrefRuns(Function& irfunc) {
@@ -1242,7 +1245,7 @@ void optimizeLongDecrefRuns(Function& irfunc) {
   auto get_number_of_decrefs = [](auto block, auto cur_iter) {
     int result = 0;
     while (cur_iter != block->end()) {
-      if (!cur_iter->IsDecref()) {
+      if (!(cur_iter->isDecref() || cur_iter->isXDecref())) {
         break;
       }
       result++;
@@ -1251,11 +1254,11 @@ void optimizeLongDecrefRuns(Function& irfunc) {
     return result;
   };
 
-  for (auto& block : irfunc.cfg.GetRPOTraversal()) {
+  for (auto& block : irfunc.cfg.getRPOTraversal()) {
     auto cur_iter = block->begin();
 
     while (cur_iter != block->end()) {
-      if (!cur_iter->IsDecref()) {
+      if (!cur_iter->isDecref() && !cur_iter->isXDecref()) {
         ++cur_iter;
         continue;
       }
@@ -1268,15 +1271,15 @@ void optimizeLongDecrefRuns(Function& irfunc) {
 
       auto batch_decref = BatchDecref::create(num);
       batch_decref->copyBytecodeOffset(*cur_iter);
-      batch_decref->InsertBefore(*cur_iter);
+      batch_decref->insertBefore(*cur_iter);
 
       constexpr size_t kDecrefOperandIndex = 0;
       for (int i = 0; i < num; i++) {
         JIT_CHECK(
-            cur_iter->IsDecref(),
+            cur_iter->isDecref() || cur_iter->isXDecref(),
             "An unexpected non-decref instruction in a decref run.");
 
-        batch_decref->SetOperand(i, cur_iter->GetOperand(kDecrefOperandIndex));
+        batch_decref->setOperand(i, cur_iter->getOperand(kDecrefOperandIndex));
         auto old_instr = cur_iter++;
         old_instr->unlink();
         delete &(*old_instr);
@@ -1287,18 +1290,18 @@ void optimizeLongDecrefRuns(Function& irfunc) {
 
 } // namespace
 
-void RefcountInsertion::Run(Function& func) {
-  PhiElimination{}.Run(func);
+void RefcountInsertion::run(Function& func) {
+  PhiElimination{}.run(func);
   bindGuards(func);
   func.cfg.splitCriticalEdges();
 
   TRACE(
       "Starting refcount insertion for '{}':\n{}",
       func.fullname,
-      HIRPrinter{}.setFullSnapshots(true).ToString(func));
+      HIRPrinter{}.setFullSnapshots(true).toString(func));
   Env env{func};
 
-  auto rpo_blocks = func.cfg.GetRPOTraversal();
+  auto rpo_blocks = func.cfg.getRPOTraversal();
   Worklist<BasicBlock*> worklist;
   for (auto block : rpo_blocks) {
     worklist.push(block);
@@ -1319,7 +1322,7 @@ void RefcountInsertion::Run(Function& func) {
     auto& block_state = env.blocks[block];
     if (env.live_regs != block_state.out) {
       block_state.out = std::move(env.live_regs);
-      for (auto edge : block->out_edges()) {
+      for (auto edge : block->outEdges()) {
         worklist.push(edge->to());
       }
     }
@@ -1331,7 +1334,7 @@ void RefcountInsertion::Run(Function& func) {
     // Remember first_instr here to skip any (Inc|Dec)Refs inserted by
     // useSimpleInState().
     auto& first_instr = block->front();
-    if (block->in_edges().size() <= 1) {
+    if (block->inEdges().size() <= 1) {
       useSimpleInState(env, block);
     } else {
       useInState(env, map_get(env.blocks, block).in);
@@ -1348,18 +1351,18 @@ void RefcountInsertion::Run(Function& func) {
     }
 
     TRACE("Leaving bb {} with state:\n{}", block->id, env.live_regs);
-    if (block->out_edges().size() == 1) {
-      exitBlock(env, *block->out_edges().begin());
+    if (block->outEdges().size() == 1) {
+      exitBlock(env, *block->outEdges().begin());
     }
   }
 
   // Clean up any trampoline blocks that weren't necessary.
   //
   // Consider having a separate run of CleanCFG between passes clean this up.
-  removeTrampolineBlocks(&func.cfg);
+  mergeLinearBlocks(func);
 
   // Optimize long decref runs
   optimizeLongDecrefRuns(func);
 }
 
-} // namespace jit::hir
+} // namespace cinderx::jit::hir

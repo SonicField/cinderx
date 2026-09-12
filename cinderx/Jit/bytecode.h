@@ -9,11 +9,12 @@
 #include "cinderx/Common/opcode_stubs.h"
 #include "cinderx/Interpreter/cinder_opcode.h"
 #include "cinderx/Jit/bytecode_offsets.h"
+#include "cinderx/Jit/threaded_compile.h"
 
 #include <iterator>
 #include <limits>
 
-namespace jit {
+namespace cinderx::jit {
 
 // A structured, immutable representation of a CPython bytecode.
 //
@@ -46,6 +47,7 @@ class BytecodeInstruction {
   // Check if this instruction is a branch, a return, or a general basic block
   // terminator.
   bool isBranch() const;
+  bool isBackwardBranch() const;
   bool isReturn() const;
   bool isTerminator() const;
 
@@ -92,6 +94,11 @@ class BytecodeInstruction {
 //
 // Extended args are handled automatically when iterating over the bytecode;
 // they will not appear in the stream of `BytecodeInstruction`s.
+//
+// BytecodeInstructionBlock borrows the code object - it does NOT keep it alive.
+// Callers must ensure the code object outlives the block, which is true for
+// all current uses (HIR building holds a Ref<> to the code
+// object in Preloader / Function).
 class BytecodeInstructionBlock {
  public:
   explicit BytecodeInstructionBlock(BorrowedRef<PyCodeObject> code);
@@ -100,6 +107,14 @@ class BytecodeInstructionBlock {
       BorrowedRef<PyCodeObject> code,
       BCIndex start,
       BCIndex end);
+
+  ~BytecodeInstructionBlock() = default;
+
+  BytecodeInstructionBlock(BytecodeInstructionBlock&&) = default;
+  BytecodeInstructionBlock& operator=(BytecodeInstructionBlock&&) = default;
+
+  BytecodeInstructionBlock(const BytecodeInstructionBlock&) = delete;
+  BytecodeInstructionBlock& operator=(const BytecodeInstructionBlock&) = delete;
 
   class Iterator {
    public:
@@ -143,22 +158,6 @@ class BytecodeInstructionBlock {
       return bci_ == other.bci_;
     }
 
-    bool operator!=(const Iterator& other) const {
-      return !(*this == other);
-    }
-
-    // Count the number of remaining bytecode indices in the block.
-    //
-    // This isn't useful in 3.11+ as instructions are variable length.  So this
-    // doesn't tell you anything meaningful. Fortunately, we don't need it
-    // beyond 3.10.
-    Py_ssize_t remainingIndices() const {
-      if constexpr (PY_VERSION_HEX >= 0x030B0000) {
-        JIT_ABORT("remainingIndices() not supported in 3.11+");
-      }
-      return end_idx_ - bci_.opcodeIndex() - 1;
-    }
-
    private:
     BytecodeInstruction bci_;
     BCIndex end_idx_;
@@ -182,7 +181,7 @@ class BytecodeInstructionBlock {
   BorrowedRef<PyCodeObject> code() const;
 
  private:
-  ThreadedRef<PyCodeObject> code_;
+  BorrowedRef<PyCodeObject> code_;
   BCIndex start_idx_;
   BCIndex end_idx_;
 };
@@ -191,4 +190,4 @@ class BytecodeInstructionBlock {
 #define EXTENDED_OPCODE_FLAG 0
 #endif
 
-} // namespace jit
+} // namespace cinderx::jit

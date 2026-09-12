@@ -2,26 +2,20 @@
 
 #include "cinderx/Jit/codegen/gen_asm.h"
 
-#include "internal/pycore_pystate.h"
-
-#if PY_VERSION_HEX < 0x030C0000
-#include "cinder/exports.h"
-#include "internal/pycore_shadow_frame.h"
-#endif
-
-#if PY_VERSION_HEX >= 0x030C0000
 #include "internal/pycore_ceval.h"
-#endif
+#include "internal/pycore_pystate.h"
 
 #include "cinderx/Common/extra-py-flags.h"
 #include "cinderx/Common/log.h"
 #include "cinderx/Common/py-portability.h"
 #include "cinderx/Common/util.h"
 #include "cinderx/Interpreter/interpreter.h"
+#include "cinderx/Jit/bytecode.h"
 #include "cinderx/Jit/codegen/arch.h"
 #include "cinderx/Jit/codegen/autogen.h"
 #include "cinderx/Jit/codegen/code_section.h"
 #include "cinderx/Jit/codegen/gen_asm_utils.h"
+#include "cinderx/Jit/compilation_lock.h"
 #include "cinderx/Jit/compiled_function.h"
 #include "cinderx/Jit/config.h"
 #include "cinderx/Jit/context.h"
@@ -35,10 +29,13 @@
 #include "cinderx/Jit/jit_rt.h"
 #include "cinderx/Jit/lir/dce.h"
 #include "cinderx/Jit/lir/generator.h"
+#include "cinderx/Jit/lir/linear_scan.h"
 #include "cinderx/Jit/lir/postalloc.h"
 #include "cinderx/Jit/lir/postgen.h"
 #include "cinderx/Jit/lir/printer.h"
 #include "cinderx/Jit/lir/regalloc.h"
+#include "cinderx/Jit/lir/spill_alloc.h"
+#include "cinderx/Jit/lir/target_select.h"
 #include "cinderx/Jit/lir/verify.h"
 #include "cinderx/Jit/perf_jitdump.h"
 #include "cinderx/UpstreamBorrow/borrowed.h"
@@ -49,18 +46,27 @@
 #include <cstdint>
 #include <iostream>
 #include <iterator>
+#include <limits>
+#include <optional>
 #include <stdexcept>
 #include <vector>
 
 using namespace asmjit;
-using namespace jit;
-using namespace jit::hir;
-using namespace jit::lir;
-using namespace jit::util;
+using namespace cinderx::jit;
+using namespace cinderx::jit::hir;
+using namespace cinderx::jit::lir;
+using namespace cinderx::jit::util;
 
-namespace jit::codegen {
+namespace cinderx::jit::codegen {
 
 namespace {
+
+// prepareForDeopt packs both the reified frame pointer and the
+// is_instrumentation_deopt flag into a single uintptr_t returned in RAX/X0.
+// The flag is encoded in bit 0 (frame pointers are always >= 8-byte aligned).
+// This avoids returning a multi-field struct whose Windows x64 ABI
+// hidden-pointer return semantics would conflict with the hand-rolled deopt
+// trampoline.  Callers unpack with: frame = result & ~1, flag = result & 1.
 
 #define ASM_CHECK_THROW(exp)                         \
   {                                                  \
@@ -84,32 +90,40 @@ namespace {
 // Scratch register used by the various deopt trampolines.
 [[maybe_unused]] const auto deopt_scratch_reg = arch::reg_scratch_deopt;
 
-// Set the frame pointer to "original frame pointer" value when called in the
-// context of a generator.
-void RestoreOriginalGeneratorFramePointer(arch::Builder* as) {
-#if defined(CINDER_X86_64)
-  size_t original_frame_pointer_offset =
-      offsetof(GenDataFooter, originalFramePointer);
-  as->mov(x86::rbp, x86::ptr(x86::rbp, original_frame_pointer_offset));
-#elif defined(CINDER_AARCH64)
-  size_t original_frame_pointer_offset =
-      offsetof(GenDataFooter, originalFramePointer);
-  as->ldr(
-      arch::fp,
-      arch::ptr_resolve(
-          as, arch::fp, original_frame_pointer_offset, arch::reg_scratch_0));
-#else
-  CINDER_UNSUPPORTED
-#endif
+// Raise an exception if an LIR function exceeds a reasonable size.
+void checkLirSize(const lir::Function& func) {
+  auto name = [&] {
+    auto hir_func = func.hirFunc();
+    return hir_func != nullptr ? hir_func->fullname : "<unknown func>";
+  };
+
+  auto num_blocks = func.getNumBasicBlocks();
+  auto max_blocks = getConfig().max_lir_blocks;
+  if (num_blocks > max_blocks) {
+    throw std::runtime_error{fmt::format(
+        "LIR function '{}' has too many basic blocks ({}, max={})",
+        name(),
+        num_blocks,
+        max_blocks)};
+  }
+
+  auto num_instrs = func.getNumInstrs();
+  auto max_instrs = getConfig().max_lir_instrs;
+  if (num_instrs > max_instrs) {
+    throw std::runtime_error{fmt::format(
+        "LIR function '{}' has too many instructions ({}, max={})",
+        name(),
+        num_instrs,
+        max_instrs)};
+  }
 }
 
 void raiseUnboundLocalError(BorrowedRef<> name) {
   // name is converted into a `char*` in format_exc_check_arg
 
-  const char* msg = PY_VERSION_HEX >= 0x030C0000
-      ? "cannot access local variable '%.200s' where it is not associated with "
-        "a value"
-      : "local variable '%.200s' referenced before assignment";
+  const char* msg =
+      "cannot access local variable '%.200s' where it is not associated with "
+      "a value";
 
   _PyEval_FormatExcCheckArg(
       _PyThreadState_GET(), PyExc_UnboundLocalError, msg, name);
@@ -118,11 +132,9 @@ void raiseUnboundLocalError(BorrowedRef<> name) {
 void raiseUnboundFreevarError(BorrowedRef<> name) {
   // name is converted into a `char*` in format_exc_check_arg
 
-  const char* msg = PY_VERSION_HEX >= 0x030C0000
-      ? "cannot access free variable '%.200s' where it is not associated with a"
-        " value in enclosing scope"
-      : "free variable '%.200s' referenced before assignment in enclosing "
-        "scope";
+  const char* msg =
+      "cannot access free variable '%.200s' where it is not associated with a"
+      " value in enclosing scope";
 
   _PyEval_FormatExcCheckArg(_PyThreadState_GET(), PyExc_NameError, msg, name);
 }
@@ -134,8 +146,6 @@ void raiseAttributeError(BorrowedRef<> receiver, BorrowedRef<> name) {
       Py_TYPE(receiver)->tp_name,
       name);
 }
-
-#if PY_VERSION_HEX >= 0x030C0000
 
 // Helper to recursively reify the lightweight frames. We need to reify the
 // outermost lightweight frame first and work inwards to have the frames
@@ -168,70 +178,96 @@ _PyInterpreterFrame* reifyLightweightFrames(
   return cur_frame;
 }
 
-#endif
-
-CiPyFrameObjType* prepareForDeopt(
+uintptr_t prepareForDeopt(
     const uint64_t* regs,
     CodeRuntime* code_runtime,
     std::size_t deopt_idx) {
   JIT_CHECK(deopt_idx != -1ull, "deopt_idx must be valid");
   const DeoptMetadata& deopt_meta = code_runtime->getDeoptMetadata(deopt_idx);
   PyThreadState* tstate = _PyThreadState_UncheckedGet();
-#if PY_VERSION_HEX < 0x030C0000
-  Ref<PyFrameObject> f = materializePyFrameForDeopt(tstate);
-
-  PyFrameObject* frame = f.release();
-  PyFrameObject* frame_iter = frame;
-  _PyShadowFrame* sf_iter = tstate->shadow_frame;
-  // Iterate one past the inline depth because that is the caller frame.
-  for (int i = deopt_meta.inline_depth(); i >= 0; i--) {
-    // Transfer ownership of shadow frame to the interpreter. The associated
-    // Python frame will be ignored during future attempts to materialize the
-    // stack.
-    _PyShadowFrame_SetOwner(sf_iter, PYSF_INTERP);
-    reifyFrame(frame_iter, deopt_meta, deopt_meta.frame_meta.at(i), regs);
-    frame_iter = frame_iter->f_back;
-    sf_iter = sf_iter->prev;
-  }
-#else
+  bool is_instrumentation_deopt = false;
   _PyInterpreterFrame* frame = interpFrameFromThreadState(tstate);
 
-  if (getConfig().frame_mode == FrameMode::kLightweight) {
-    frame = reifyLightweightFrames(
-        tstate, deopt_meta, deopt_meta.inline_depth(), frame);
-    if (frame == nullptr) {
-      Py_FatalError("Cannot recover from OOM");
+  // Check JIT_FRAME_DEOPT_PATCHED on the outermost frame's header before
+  // reification destroys it. Walk past inlined frames to find the outer one.
+#ifdef ENABLE_LIGHTWEIGHT_FRAMES
+  {
+    _PyInterpreterFrame* outer = frame;
+    for (size_t i = 0; i < deopt_meta.inline_depth(); i++) {
+      outer = outer->previous;
     }
-    setCurrentFrame(tstate, frame);
+    is_instrumentation_deopt =
+        (jitFrameGetHeader(outer)->frame_status & JIT_FRAME_DEOPT_PATCHED) != 0;
   }
+#endif
+
+  frame = reifyLightweightFrames(
+      tstate, deopt_meta, deopt_meta.inline_depth(), frame);
+  if (frame == nullptr) {
+    Py_FatalError("Cannot recover from OOM");
+  }
+  setCurrentFrame(tstate, frame);
 
   _PyInterpreterFrame* frame_iter = frame;
+
+  // Shared by every frame of this deopt so that a live value referenced by
+  // more than one of them is only boxed once.
+  MemoryView mem{regs};
 
   // Iterate one past the inline depth because that is the caller frame.
   for (int i = deopt_meta.inline_depth(); i >= 0; i--) {
     // Transfer ownership of a light weight frame to the interpreter. The
     // associated Python frame will be ignored during future attempts to
     // materialize the stack.
-    reifyFrame(frame_iter, deopt_meta, deopt_meta.frame_meta.at(i), regs);
+    reifyFrame(
+        frame_iter,
+        deopt_meta,
+        deopt_meta.frame_meta.at(i),
+        mem,
+        is_instrumentation_deopt);
     frame_iter = frame_iter->previous;
   }
 
+  // For instrumentation deopts where the bytecode's C call completed
+  // (reason != kPeriodicTaskFailure), push its return value onto the
+  // operand stack on top of the pre-instruction state restored by reifyStack.
+  if (is_instrumentation_deopt) {
+    if (deopt_meta.reason != DeoptReason::kPeriodicTaskFailure &&
+        !PyErr_Occurred()) {
+      PyObject* retval = reinterpret_cast<PyObject*>(
+          regs[codegen::arch::reg_general_return_loc.loc]);
+      if (retval != nullptr) {
+#if PY_VERSION_HEX >= 0x030E0000
+        *(frame->stackpointer) = PyStackRef_FromPyObjectSteal(retval);
+        frame->stackpointer++;
+#else
+        frame->localsplus[frame->stacktop] = Ci_STACK_STEAL(retval);
+        frame->stacktop++;
 #endif
+      } else {
+        PyErr_SetString(
+            PyExc_SystemError,
+            "JIT instrumentation deopt: call returned NULL without "
+            "setting an exception");
+      }
+    }
+  }
   // Clear our references now that we've transferred them to the frame
-  MemoryView mem{regs};
-  Ref<> deopt_obj = profileDeopt(deopt_meta, mem);
+  Ref<> deopt_obj;
+  if (!is_instrumentation_deopt) {
+    // TODO(T262342844): Add USDT support for instrumentation-related deopts.
+    deopt_obj = profileDeopt(deopt_meta, mem);
+  }
   auto ctx = getContext();
   ctx->recordDeopt(code_runtime, deopt_idx, deopt_obj);
   releaseRefs(deopt_meta, mem);
-#if PY_VERSION_HEX >= 0x030C0000
   if (_PyFrame_GetCode(frame)->co_flags & kCoFlagsAnyGenerator) {
     BorrowedRef<PyGenObject> base_gen = _PyGen_GetGeneratorFromFrame(frame);
     JitGenObject* gen = JitGenObject::cast(base_gen.get());
     JIT_CHECK(gen != nullptr, "Not a JIT generator");
     deopt_jit_gen_object_only(gen);
   }
-#endif
-  if (!PyErr_Occurred()) {
+  if (!PyErr_Occurred() && !is_instrumentation_deopt) {
     auto reason = deopt_meta.reason;
     switch (reason) {
       case DeoptReason::kGuardFailure: {
@@ -252,86 +288,50 @@ CiPyFrameObjType* prepareForDeopt(
         raiseUnboundFreevarError(deopt_meta.eh_name);
         break;
       case DeoptReason::kUnhandledException:
+      case DeoptReason::kPeriodicTaskFailure:
         JIT_ABORT("unhandled exception without error set");
       case DeoptReason::kRaiseStatic:
         JIT_ABORT("Lost exception when raising static exception");
     }
   }
-  return frame;
+  // Pack the frame pointer and the instrumentation-deopt flag into a single
+  // register-width value.  Bit 0 carries the flag; the remaining bits carry
+  // the pointer (which is always at least 8-byte aligned, so bit 0 is free).
+  return reinterpret_cast<uintptr_t>(frame) |
+      static_cast<uintptr_t>(is_instrumentation_deopt);
 }
 
-#if PY_VERSION_HEX < 0x030C0000
-PyObject* resumeInInterpreter(
-    PyFrameObject* frame,
-    CodeRuntime* code_runtime,
-    std::size_t deopt_idx) {
-  if (frame->f_gen) {
-    auto gen = reinterpret_cast<PyGenObject*>(frame->f_gen);
-    // It's safe to call jitgen_data_free directly here, rather than
-    // through _PyJIT_GenDealloc. Ownership of all references have been
-    // transferred to the frame.
-    jitgen_data_free(gen);
-  }
-  PyThreadState* tstate = PyThreadState_Get();
-  PyObject* result = nullptr;
-  // Resume all of the inlined frames and the caller
-  const DeoptMetadata& deopt_meta = code_runtime->getDeoptMetadata(deopt_idx);
-  int inline_depth = deopt_meta.inline_depth();
-  int err_occurred =
-      (deopt_meta.reason != DeoptReason::kGuardFailure &&
-       deopt_meta.reason != DeoptReason::kRaise);
-  while (inline_depth >= 0) {
-    // Consider skipping resuming frames that do not have try/catch. Will
-    // require re-adding _PyShadowFrame_Pop back for non-generators and
-    // unlinking the frame manually.
-
-    // We need to maintain the invariant that there is at most one shadow frame
-    // on the shadow stack for each frame on the Python stack. Unless we are a
-    // a generator, the interpreter will insert a new entry on the shadow stack
-    // when execution resumes there, so we remove our entry.
-    if (!frame->f_gen) {
-      _PyShadowFrame_Pop(tstate, tstate->shadow_frame);
-    }
-    // Resume one frame.
-    PyFrameObject* prev_frame = frame->f_back;
-    // Delegate management of `tstate->frame` to the interpreter loop. On
-    // entry, it expects that tstate->frame points to the frame for the calling
-    // function.
-    JIT_CHECK(tstate->frame == frame, "unexpected frame at top of stack");
-    tstate->frame = prev_frame;
-    result = PyEval_EvalFrameEx(frame, err_occurred);
-    JITRT_DecrefFrame(frame);
-    frame = prev_frame;
-
-    err_occurred = result == nullptr;
-    // Push the previous frame's result onto the value stack. We can't push
-    // after resuming because f_stacktop is nullptr during execution of a frame.
-    if (!err_occurred) {
-      if (inline_depth > 0) {
-        // The caller is at inline depth 0, so we only attempt to push the
-        // result onto the stack in the deeper (> 0) frames. Otherwise, we
-        // should just return the value from the native code in the way our
-        // native calling convention requires.
-        frame->f_valuestack[frame->f_stackdepth++] = result;
+// Set up f_trace/f_trace_lines for sys.settrace compatibility on deopted
+// frames. CPython normally sets these during the RESUME opcode at function
+// entry, but deopted frames resume mid-function and skip RESUME.
+void setupTraceForDeoptedFrame(
+    _PyInterpreterFrame* frame,
+    PyThreadState* tstate) {
+  if (tstate->c_tracefunc != nullptr &&
+      frame->owner != FRAME_OWNED_BY_GENERATOR) {
+    PyFrameObject* fobj = _PyFrame_GetFrameObject(frame);
+    if (fobj != nullptr) {
+      fobj->f_trace_lines = 1;
+      if (fobj->f_trace == nullptr && tstate->c_traceobj != nullptr) {
+        fobj->f_trace = Py_NewRef(tstate->c_traceobj);
       }
     }
-    inline_depth--;
   }
-  return result;
 }
-
-#else
 
 PyObject* resumeInInterpreter(
     _PyInterpreterFrame* frame,
     CodeRuntime* code_runtime,
-    std::size_t deopt_idx) {
+    std::size_t deopt_idx,
+    [[maybe_unused]] bool is_instrumentation_deopt) {
   JIT_CHECK(code_runtime != nullptr, "CodeRuntime cannot be a nullptr");
 
   PyThreadState* tstate = PyThreadState_Get();
 
   const DeoptMetadata& deopt_meta = code_runtime->getDeoptMetadata(deopt_idx);
-  int err_occurred = shouldResumeInterpreterInErrorHandler(deopt_meta.reason);
+
+  // For instrumentation deopts, only enter error handler if actually excepted.
+  int err_occurred = PyErr_Occurred() != nullptr;
 
   PyObject* result = nullptr;
   // Resume all of the inlined frames and the caller
@@ -368,15 +368,35 @@ PyObject* resumeInInterpreter(
     // exception state, so we don't need to do any cleanup after
     // _PyEval_EvalFrame. Note: We only set this up if it's not already set
     // (e.g., jitgen_am_send may have already set it up before we got here).
+    //
+    // Additionally, if the generator was never returned to the caller (i.e.,
+    // exception occurred before RETURN_GENERATOR), we need to decref the
+    // generator since nobody owns the reference. We detect this by checking
+    // if gi_frame_state was FRAME_CREATED before executing.
+    PyGenObject* gen_to_cleanup = nullptr;
     if (frame->owner == FRAME_OWNED_BY_GENERATOR) {
       PyGenObject* gen = _PyGen_GetGeneratorFromFrame(frame);
+      if (gen->gi_frame_state == FRAME_CREATED) {
+        // This generator was never returned to the caller (before
+        // RETURN_GENERATOR). If an exception occurs, we need to clean it up.
+        gen_to_cleanup = gen;
+      }
       if (tstate->exc_info != &gen->gi_exc_state) {
         gen->gi_exc_state.previous_item = tstate->exc_info;
         tstate->exc_info = &gen->gi_exc_state;
       }
     }
 
+    setupTraceForDeoptedFrame(frame, tstate);
+
     result = _PyEval_EvalFrame(tstate, frame, err_occurred);
+
+    // If exception occurred before RETURN_GENERATOR, the generator was never
+    // returned to anyone. The JIT created the generator early, but the caller
+    // never received it. We need to decref it to avoid a memory leak.
+    if (result == nullptr && gen_to_cleanup != nullptr) {
+      Py_DECREF(gen_to_cleanup);
+    }
 
     frame = prev_frame;
 
@@ -399,8 +419,6 @@ PyObject* resumeInInterpreter(
   return result;
 }
 
-#endif
-
 void* finalizeCode(arch::Builder& builder, std::string_view name) {
   if (auto err = builder.finalize(); err != kErrorOk) {
     throw std::runtime_error{fmt::format(
@@ -409,7 +427,8 @@ void* finalizeCode(arch::Builder& builder, std::string_view name) {
         DebugUtils::errorAsString(err))};
   }
 
-  ICodeAllocator* code_allocator = cinderx::getModuleState()->codeAllocator();
+  ICodeAllocator* code_allocator =
+      cinderx::getModuleState()->code_allocator.get();
   AllocateResult result = code_allocator->addCode(builder.code());
   if (result.error != kErrorOk) {
     throw std::runtime_error{fmt::format(
@@ -421,222 +440,96 @@ void* finalizeCode(arch::Builder& builder, std::string_view name) {
   return result.addr;
 }
 
-// Generate the final stage trampoline that is responsible for finishing
-// execution in the interpreter and then returning the result to the caller.
-void* generateDeoptTrampoline(bool generator_mode) {
+// Emit machine code from LIR blocks by translating each instruction via the
+// AutoTranslator.  Populates env->block_label_map and records annotations.
+//
+// When |code| and |metadata| are non-null, CodeSectionOverride is applied per
+// block (for multi-section support in normal JIT functions).  When they are
+// null the section override is skipped (standalone trampolines).
+void emitLIRBlocks(
+    Environ* env,
+    lir::Function* lir_func,
+    const asmjit::CodeHolder* code = nullptr,
+    CodeHolderMetadata* metadata = nullptr) {
+  auto* as = env->as;
+  auto& blocks = lir_func->basicBlocks();
+
+  for (auto& basicblock : blocks) {
+    env->block_label_map.emplace(basicblock, as->newLabel());
+  }
+
+  std::string pending_annotation;
+  asmjit::BaseNode* annotation_cursor = nullptr;
+
+  for (lir::BasicBlock* basicblock : blocks) {
+    // Optional section override for multi-section code layout.
+    std::optional<CodeSectionOverride> section_override;
+    if (code != nullptr && metadata != nullptr) {
+      section_override.emplace(as, code, metadata, basicblock->section());
+    }
+
+    as->bind(env->block_label_map[basicblock]);
+    for (auto& instr : basicblock->instructions()) {
+      asmjit::BaseNode* cursor = as->cursor();
+
+      // Check for annotation BEFORE translating so cursor captures the
+      // position before the instruction's code is emitted.
+      auto* annot_text = lir_func->getAnnotation(instr.get());
+      if (annot_text) {
+        // Close any previous pending annotation.
+        if (!pending_annotation.empty()) {
+          JIT_DCHECK(annotation_cursor != nullptr, "should be set");
+          env->addAnnotation(std::move(pending_annotation), annotation_cursor);
+        }
+        // Start new annotation range from current cursor position.
+        pending_annotation = *annot_text;
+        annotation_cursor = cursor;
+      }
+
+      env->suppress_annotations = !pending_annotation.empty();
+      autogen::AutoTranslator::getInstance().translateInstr(env, instr.get());
+      env->suppress_annotations = false;
+
+      if (!pending_annotation.empty()) {
+        // Under an active annotation — don't emit per-instruction annotations.
+      } else if (instr->origin() != nullptr) {
+        env->addAnnotation(instr.get(), cursor);
+      }
+    }
+    // Close pending annotation at block boundary.
+    if (!pending_annotation.empty()) {
+      env->addAnnotation(std::move(pending_annotation), annotation_cursor);
+      pending_annotation.clear();
+    }
+  }
+}
+
+// Emit LIR blocks to machine code, finalize, register debug/perf symbols, and
+// return the entry address.  Shared by all standalone trampoline generators.
+static void* emitAndRegisterTrampoline(
+    lir::Function* lir_func,
+    const char* name) {
   auto mod_state = cinderx::getModuleState();
   if (mod_state == nullptr) {
     throw std::runtime_error{
-        "CinderX not initialized, cannot generate deopt trampolines"};
+        fmt::format("CinderX not initialized, cannot generate {}", name)};
   }
-
-  auto name =
-      generator_mode ? "deopt_trampoline_generators" : "deopt_trampoline";
 
   CodeHolder code;
-  ICodeAllocator* code_allocator = mod_state->codeAllocator();
+  ICodeAllocator* code_allocator = mod_state->code_allocator.get();
   ASM_CHECK(code.init(code_allocator->asmJitEnvironment()), name);
   arch::Builder a(&code);
-  Annotations annot;
 
-#if defined(CINDER_X86_64)
-  auto annot_cursor = a.cursor();
-  // When we get here the stack has the following layout. The space on the
-  // stack for the call arg buffer / LOAD_METHOD scratch space is always safe
-  // to read, but its contents will depend on the function being compiled as
-  // well as the program point at which deopt occurs. We pass a pointer to it
-  // into the frame reification code so that it can properly reconstruct the
-  // interpreter's stack when the the result of a LOAD_METHOD is on the
-  // stack. See the comments in reifyStack in deopt.cpp for more details.
-  //
-  // +-------------------------+
-  // | ...                     |
-  // | ? call arg buffer       |
-  // | ^ LOAD_METHOD scratch   |
-  // +-------------------------+ <-- end of JIT's fixed frame
-  // | index of deopt metadata |
-  // | saved rip               |
-  // | padding                 |
-  // | padding                 |
-  // | address of CodeRuntime  |
-  // | address of epilogue     |
-  // | r15                     | <-- rsp
-  // +-------------------------+
-  //
-  // Save registers for use in frame reification. Once these are saved we're
-  // free to clobber any caller-saved registers.
-  //
-  // IF YOU USE CALLEE-SAVED REGISTERS YOU HAVE TO RESTORE THEM MANUALLY BEFORE
-  // THE EXITING THE TRAMPOLINE.
-  a.push(x86::r14);
-  a.push(x86::r13);
-  a.push(x86::r12);
-  a.push(x86::r11);
-  a.push(x86::r10);
-  a.push(x86::r9);
-  a.push(x86::r8);
-  a.push(x86::rdi);
-  a.push(x86::rsi);
-  a.push(x86::rbp);
-  a.push(x86::rsp);
-  a.push(x86::rbx);
-  a.push(x86::rdx);
-  a.push(x86::rcx);
-  a.push(x86::rax);
-
-  if (generator_mode) {
-    // Restore the original frame pointer for use in epilogue.
-    RestoreOriginalGeneratorFramePointer(&a);
-  }
-
-  annot.add("Save registers", &a, annot_cursor);
-
-  // Set up a stack frame for the trampoline so that:
-  //
-  // 1. Runtime code in the JIT that is used to update PyFrameObjects can find
-  //    the saved rip at the expected location immediately following the end of
-  //    the JIT's fixed frame.  See getIP().
-  //
-  // 2. The JIT-compiled function shows up in C stack straces when it is
-  //    deopting. Only the deopt trampoline will appear in the trace if
-  //    we don't open a frame.
-  //
-  // Right now the stack has the following layout:
-  //
-  // +-------------------------+ <-- end of JIT's fixed frame
-  // | index of deopt metadata |
-  // | saved rip               |
-  // | padding                 |
-  // | padding                 |
-  // | address of CodeRuntime  |
-  // | address of epilogue     |
-  // | r15                     |
-  // | ...                     |
-  // | rax                     | <-- rsp
-  // +-------------------------+
-  //
-  // We want our frame to look like:
-  //
-  // +-------------------------+ <-- end of JIT's fixed frame
-  // | saved rip               |
-  // | saved rbp               | <-- rbp
-  // | padding                 |
-  // | index of deopt metadata |
-  // | address of CodeRuntime  |
-  // | address of epilogue     |
-  // | r15                     |
-  // | ...                     |
-  // | rax                     | <-- rsp
-  // +-------------------------+
-
-  annot_cursor = a.cursor();
-
-  // Setting up first argument to prepareForDeopt, the address of the saved
-  // registers.
-  a.mov(x86::rdi, x86::rsp);
-
-  // Load the saved rip passed to us from the JIT-compiled function, which
-  // resides where we're supposed to save rbp.
-  auto saved_rip = x86::rcx;
-  auto saved_rbp_addr = x86::ptr(x86::rsp, (NUM_GP_REGS + 4) * kPointerSize);
-  a.mov(saved_rip, saved_rbp_addr);
-
-  // Save rbp and set up our frame.
-  a.mov(saved_rbp_addr, x86::rbp);
-  a.lea(x86::rbp, saved_rbp_addr);
-
-  // Load the index of the deopt metadata, which resides where we're supposed to
-  // save rip.
-  auto deopt_idx = x86::rdx;
-  auto saved_rip_addr = x86::ptr(x86::rbp, kPointerSize);
-  a.mov(deopt_idx, saved_rip_addr);
-  a.mov(saved_rip_addr, saved_rip);
-
-  // Save the deopt metadata index to the lower padding slot.
-  auto deopt_idx_addr = x86::ptr(x86::rbp, -2 * kPointerSize);
-  a.mov(deopt_idx_addr, deopt_idx);
-
-  // Fetch the CodeRuntime address from the stack.
-  auto code_rt_addr = x86::ptr(x86::rbp, -3 * kPointerSize);
-  auto code_rt = x86::rsi;
-  a.mov(code_rt, code_rt_addr);
-
-  annot.add("Shuffle rip, rbp, and deopt index", &a, annot_cursor);
-
-  // Prep the frame for evaluation in the interpreter.
-  //
-  // We pass the array of saved registers, a pointer to the code runtime, and
-  // the index of the deopt metadata.
-  annot_cursor = a.cursor();
-
-  static_assert(
-      std::is_same_v<
-          decltype(prepareForDeopt),
-          CiPyFrameObjType*(const uint64_t*, CodeRuntime*, std::size_t)>,
-      "prepareForDeopt has unexpected signature");
-  a.call(reinterpret_cast<uint64_t>(prepareForDeopt));
-
-  // Clean up saved registers.
-  //
-  // This isn't strictly necessary but saves 128 bytes on the stack if we end
-  // up resuming in the interpreter.
-  a.add(x86::rsp, (NUM_GP_REGS - 1) * kPointerSize);
-
-  // We have to restore our scratch register manually since it's callee-saved
-  // and the stage 2 trampoline used it to hold the address of this
-  // trampoline. We can't rely on the JIT epilogue to restore it for us, as the
-  // JIT-compiled code may not have spilled it.
-  a.pop(deopt_scratch_reg);
-
-  annot.add("prepareForDeopt", &a, annot_cursor);
-
-  // Resume execution in the interpreter.
-  annot_cursor = a.cursor();
-
-  // First argument: frame returned from prepareForDeopt.
-  a.mov(x86::rdi, x86::rax);
-  // Second argument: CodeRuntime, restored from the stack after
-  // prepareForDeopt.
-  a.mov(code_rt, code_rt_addr);
-  // Third argument: DeoptMetadata index, restored from the stack after
-  // prepareForDeopt.
-  a.mov(deopt_idx, deopt_idx_addr);
-  static_assert(
-      std::is_same_v<
-          decltype(resumeInInterpreter),
-          PyObject*(CiPyFrameObjType*, CodeRuntime*, std::size_t)>,
-      "resumeInInterpreter has unexpected signature");
-  a.call(reinterpret_cast<uint64_t>(resumeInInterpreter));
-
-  // If we return a primitive and prepareForDeopt returned null, we need that
-  // null in edx/xmm1 to signal error to our caller. Since this trampoline is
-  // shared, we do this move unconditionally, but even if not needed, it's
-  // harmless. (To eliminate it, we'd need another trampoline specifically for
-  // deopt of primitive-returning functions, just to do this one move.)
-  a.mov(x86::edx, x86::eax);
-  a.movq(x86::xmm1, x86::eax);
-
-  annot.add("resumeInInterpreter", &a, annot_cursor);
-
-  // Now we're done. Get the address of the epilogue and jump there.
-  annot_cursor = a.cursor();
-
-  auto epilogue_addr = x86::ptr(x86::rbp, -4 * kPointerSize);
-  a.mov(x86::rdi, epilogue_addr);
-  // Remove our frame from the stack
-  a.leave();
-  // Clear the saved rip. Normally this would be handled by a `ret`; we must
-  // clear it manually because we're jumping directly to the epilogue.
-  a.sub(x86::rsp, -kPointerSize);
-  a.jmp(x86::rdi);
-  annot.add("Jump to real epilogue", &a, annot_cursor);
+  Environ env;
+  env.as = &a;
+  emitLIRBlocks(&env, lir_func);
 
   void* result = finalizeCode(a, name);
   JIT_LOGIF(
       getConfig().log.dump_asm,
       "Disassembly for {}\n{}",
       name,
-      annot.disassemble(result, code));
+      env.annotations.disassemble(result, code));
 
   auto code_size = code.codeSize();
   register_raw_debug_symbol(name, __FILE__, __LINE__, result, code_size, 0);
@@ -644,322 +537,109 @@ void* generateDeoptTrampoline(bool generator_mode) {
   std::vector<std::pair<void*, std::size_t>> code_sections;
   populateCodeSections(code_sections, code, result);
   code_sections.emplace_back(result, code_size);
-  perf::registerFunction(code_sections, name);
-  return result;
-#elif defined(CINDER_AARCH64)
-  auto annot_cursor = a.cursor();
-  // When we get here the stack has the following layout. The space on the
-  // stack for the call arg buffer / LOAD_METHOD scratch space is always safe
-  // to read, but its contents will depend on the function being compiled as
-  // well as the program point at which deopt occurs. We pass a pointer to it
-  // into the frame reification code so that it can properly reconstruct the
-  // interpreter's stack when the the result of a LOAD_METHOD is on the
-  // stack. See the comments in reifyStack in deopt.cpp for more details.
-  //
-  // +-------------------------+
-  // | ...                     |
-  // | ? call arg buffer       |
-  // | ^ LOAD_METHOD scratch   |
-  // +-------------------------+ <-- end of JIT's fixed frame
-  // | index of deopt metadata |
-  // | saved pc                |
-  // | padding (8 bytes)       |
-  // | padding (8 bytes)       |
-  // | address of CodeRuntime  |
-  // | address of epilogue     |
-  // | fp                      |
-  // | x28                     | <-- sp
-  // +-------------------------+
-  //
-  // Save registers for use in frame reification. Once these are saved we're
-  // free to clobber any caller-saved registers.
-  //
-  // IF YOU USE CALLEE-SAVED REGISTERS YOU HAVE TO RESTORE THEM MANUALLY BEFORE
-  // THE EXITING THE TRAMPOLINE.
-  a.stp(a64::x0, a64::x1, a64::ptr_pre(a64::sp, -16 * 14));
-  a.stp(a64::x2, a64::x3, a64::ptr(a64::sp, 16 * 1));
-  a.stp(a64::x4, a64::x5, a64::ptr(a64::sp, 16 * 2));
-  a.stp(a64::x6, a64::x7, a64::ptr(a64::sp, 16 * 3));
-  a.stp(a64::x8, a64::x9, a64::ptr(a64::sp, 16 * 4));
-  a.stp(a64::x10, a64::x11, a64::ptr(a64::sp, 16 * 5));
-  a.stp(a64::x12, a64::x13, a64::ptr(a64::sp, 16 * 6));
-  a.stp(a64::x14, a64::x15, a64::ptr(a64::sp, 16 * 7));
-  a.stp(a64::x16, a64::x17, a64::ptr(a64::sp, 16 * 8));
-  a.stp(a64::x18, a64::x19, a64::ptr(a64::sp, 16 * 9));
-  a.stp(a64::x20, a64::x21, a64::ptr(a64::sp, 16 * 10));
-  a.stp(a64::x22, a64::x23, a64::ptr(a64::sp, 16 * 11));
-  a.stp(a64::x24, a64::x25, a64::ptr(a64::sp, 16 * 12));
-  a.stp(a64::x26, a64::x27, a64::ptr(a64::sp, 16 * 13));
-
-  if (generator_mode) {
-    // Restore original frame pointer for use in epilogue.
-    RestoreOriginalGeneratorFramePointer(&a);
-  }
-
-  annot.add("Save registers", &a, annot_cursor);
-
-  // Set up a stack frame for the trampoline so that:
-  //
-  // 1. Runtime code in the JIT that is used to update PyFrameObjects can find
-  //    the saved pc at the expected location immediately following the end of
-  //    the JIT's fixed frame.  See getIP().
-  //
-  // 2. The JIT-compiled function shows up in C stack traces when it is
-  //    deopting. Only the deopt trampoline will appear in the trace if
-  //    we don't open a frame.
-  //
-  // Right now the stack has the following layout:
-  //
-  // +-------------------------+ <-- end of JIT's fixed frame
-  // | index of deopt metadata |
-  // | saved pc                |
-  // | padding (8 bytes)       |
-  // | padding (8 bytes)       |
-  // | address of CodeRuntime  |
-  // | address of epilogue     |
-  // | fp                      |
-  // | x28                     |
-  // | ...                     |
-  // | x0                      | <-- sp
-  // +-------------------------+
-  //
-  // We want our frame to look like:
-  //
-  // +-------------------------+ <-- end of JIT's fixed frame
-  // | saved pc                |
-  // | saved fp                | <-- fp
-  // | padding (8 bytes)       |
-  // | index of deopt metadata |
-  // | address of CodeRuntime  |
-  // | address of epilogue     |
-  // | fp                      |
-  // | x28                     |
-  // | ...                     |
-  // | x0                      | <-- sp
-  // +-------------------------+
-
-  annot_cursor = a.cursor();
-
-  // Setting up first argument to prepareForDeopt, the address of the saved
-  // registers.
-  a.mov(a64::x0, a64::sp);
-
-  // Load the saved pc passed to us from the JIT-compiled function, which
-  // resides where we're supposed to save the frame pointer.
-  const int saved_regs_slots = 30;
-  const int saved_metadata_slots = 4;
-
-  auto saved_pc = a64::x3;
-  auto saved_fp_offset =
-      (saved_regs_slots + saved_metadata_slots) * kPointerSize;
-  a.ldr(
-      saved_pc,
-      arch::ptr_resolve(&a, a64::sp, saved_fp_offset, arch::reg_scratch_0));
-
-  // Save the frame pointer and set up our frame.
-  a.str(
-      arch::fp,
-      arch::ptr_resolve(&a, a64::sp, saved_fp_offset, arch::reg_scratch_0));
-  a.add(arch::fp, a64::sp, saved_fp_offset);
-
-  // Load the index of the deopt metadata, which resides where we're supposed to
-  // save the pc.
-  auto deopt_idx = a64::x2;
-  a.ldr(
-      deopt_idx,
-      arch::ptr_resolve(&a, arch::fp, kPointerSize, arch::reg_scratch_0));
-  a.str(
-      saved_pc,
-      arch::ptr_resolve(&a, arch::fp, kPointerSize, arch::reg_scratch_0));
-
-  // Save the deopt metadata index to the lower padding slot.
-  auto deopt_idx_addr =
-      arch::ptr_resolve(&a, arch::fp, -2 * kPointerSize, arch::reg_scratch_0);
-  a.str(deopt_idx, deopt_idx_addr);
-
-  // Fetch the CodeRuntime address from the stack.
-  auto code_rt_addr =
-      arch::ptr_resolve(&a, arch::fp, -3 * kPointerSize, arch::reg_scratch_0);
-  auto code_rt = a64::x1;
-  a.ldr(code_rt, code_rt_addr);
-
-  annot.add("Shuffle pc, fp, and deopt index", &a, annot_cursor);
-
-  // Prep the frame for evaluation in the interpreter.
-  //
-  // We pass the array of saved registers, a pointer to the code runtime, and
-  // the index of the deopt metadata.
-  annot_cursor = a.cursor();
-
-  static_assert(
-      std::is_same_v<
-          decltype(prepareForDeopt),
-          CiPyFrameObjType*(const uint64_t*, CodeRuntime*, std::size_t)>,
-      "prepareForDeopt has unexpected signature");
-  a.mov(arch::reg_scratch_br, prepareForDeopt);
-  a.blr(arch::reg_scratch_br);
-
-  // Clean up saved registers.
-  //
-  // This isn't strictly necessary but saves 128 bytes on the stack if we end
-  // up resuming in the interpreter.
-  a.add(a64::sp, a64::sp, (saved_regs_slots - 2) * kPointerSize);
-
-  // We have to restore our scratch register manually since it's callee-saved
-  // and the stage 2 trampoline used it to hold the address of this
-  // trampoline. We can't rely on the JIT epilogue to restore it for us, as the
-  // JIT-compiled code may not have spilled it.
-  a.ldr(deopt_scratch_reg, a64::ptr(a64::sp));
-
-  annot.add("prepareForDeopt", &a, annot_cursor);
-
-  // Resume execution in the interpreter.
-  annot_cursor = a.cursor();
-
-  // First argument: frame returned from prepareForDeopt.
-  // already in x0
-  // Second argument: CodeRuntime, restored from the stack after
-  // prepareForDeopt.
-  a.ldr(code_rt, code_rt_addr);
-  // Third argument: DeoptMetadata index, restored from the stack after
-  // prepareForDeopt.
-  a.ldr(deopt_idx, deopt_idx_addr);
-  static_assert(
-      std::is_same_v<
-          decltype(resumeInInterpreter),
-          PyObject*(CiPyFrameObjType*, CodeRuntime*, std::size_t)>,
-      "resumeInInterpreter has unexpected signature");
-  a.mov(arch::reg_scratch_br, resumeInInterpreter);
-  a.blr(arch::reg_scratch_br);
-
-  // If we return a primitive and prepareForDeopt returned null, we need that
-  // null in w2/d1 to signal error to our caller. Since this trampoline is
-  // shared, we do this move unconditionally, but even if not needed, it's
-  // harmless. (To eliminate it, we'd need another trampoline specifically for
-  // deopt of primitive-returning functions, just to do this one move.)
-  a.mov(a64::w2, a64::w0);
-  a.fmov(a64::d1, a64::x0);
-
-  annot.add("resumeInInterpreter", &a, annot_cursor);
-
-  // Now we're done. Get the address of the epilogue and jump there.
-  annot_cursor = a.cursor();
-
-  auto epilogue_addr =
-      arch::ptr_resolve(&a, arch::fp, -4 * kPointerSize, arch::reg_scratch_0);
-  a.ldr(arch::reg_scratch_br, epilogue_addr);
-  // Remove our frame from the stack
-  a.mov(a64::sp, arch::fp);
-  a.ldp(arch::fp, arch::lr, a64::ptr_post(a64::sp, 16));
-  a.br(arch::reg_scratch_br);
-  annot.add("Jump to real epilogue", &a, annot_cursor);
-
-  void* result = finalizeCode(a, name);
-  JIT_LOGIF(
-      getConfig().log.dump_asm,
-      "Disassembly for {}\n{}",
-      name,
-      annot.disassemble(result, code));
-
-  auto code_size = code.codeSize();
-  register_raw_debug_symbol(name, __FILE__, __LINE__, result, code_size, 0);
-
-  std::vector<std::pair<void*, std::size_t>> code_sections;
-  populateCodeSections(code_sections, code, result);
-  code_sections.emplace_back(result, code_size);
-  perf::registerFunction(code_sections, name);
-  return result;
-#else
-  CINDER_UNSUPPORTED
-  return nullptr;
+#ifndef WIN32
+  perf::registerFunction(code_sections, name, perf::kInternalSymbolPrefix);
 #endif
+  return result;
+}
+
+void* generateDeoptTrampoline(bool generator_mode) {
+  lir::Function lir_func;
+  lir::GenerateDeoptTrampolineBlocks(
+      &lir_func,
+      generator_mode,
+      reinterpret_cast<void*>(prepareForDeopt),
+      reinterpret_cast<void*>(resumeInInterpreter));
+
+  return emitAndRegisterTrampoline(
+      &lir_func,
+      generator_mode ? "deopt_trampoline_generators" : "deopt_trampoline");
 }
 
 void* generateFailedDeferredCompileTrampoline() {
-  auto mod_state = cinderx::getModuleState();
-  if (mod_state == nullptr) {
-    throw std::runtime_error{
-        "CinderX not initialized, cannot generate deopt trampolines"};
-  }
-  CodeHolder code;
-  ICodeAllocator* code_allocator = mod_state->codeAllocator();
-  code.init(code_allocator->asmJitEnvironment());
-  arch::Builder a(&code);
-  Annotations annot;
+  lir::Function lir_func;
+  lir::GenerateFailedDeferredCompileBlocks(
+      &lir_func, reinterpret_cast<void*>(rt::failedDeferredCompileShim));
 
-#if defined(CINDER_X86_64)
-  auto annot_cursor = a.cursor();
-
-  a.push(x86::rbp);
-  a.mov(x86::rbp, x86::rsp);
-
-  // save incoming arg registers
-  a.push(x86::r9);
-  a.push(x86::r8);
-  a.push(x86::rcx);
-  a.push(x86::rdx);
-  a.push(x86::rsi);
-  a.push(x86::rdi);
-
-  annot.add("saveRegisters", &a, annot_cursor);
-
-  // r10 contains the function object from our stub
-  a.mov(x86::rdi, x86::r10);
-  a.mov(x86::rsi, x86::rsp);
-  a.call(reinterpret_cast<uint64_t>(JITRT_FailedDeferredCompileShim));
-  a.leave();
-  a.ret();
-#elif defined(CINDER_AARCH64)
-  auto annot_cursor = a.cursor();
-
-  a.stp(arch::fp, arch::lr, a64::ptr_pre(a64::sp, -16));
-  a.mov(arch::fp, a64::sp);
-
-  // save incoming arg registers
-  a.stp(a64::x0, a64::x1, a64::ptr_pre(a64::sp, -64));
-  a.stp(a64::x2, a64::x3, a64::ptr(a64::sp, 16));
-  a.stp(a64::x4, a64::x5, a64::ptr(a64::sp, 32));
-  a.stp(a64::x6, a64::x7, a64::ptr(a64::sp, 48));
-
-  annot.add("saveRegisters", &a, annot_cursor);
-
-  // x10 contains the function object from our stub
-  a.mov(a64::x0, a64::x10);
-  a.mov(a64::x1, a64::sp);
-  a.mov(arch::reg_scratch_br, JITRT_FailedDeferredCompileShim);
-  a.blr(arch::reg_scratch_br);
-  a.mov(a64::sp, arch::fp);
-  a.ldp(arch::fp, arch::lr, a64::ptr_post(a64::sp, 16));
-  a.ret(arch::lr);
-#else
-  CINDER_UNSUPPORTED
-#endif
-
-  const char* name = "failedDeferredCompileTrampoline";
-  void* result = finalizeCode(a, name);
-
-  JIT_LOGIF(
-      getConfig().log.dump_asm,
-      "Disassembly for {}\n{}",
-      name,
-      annot.disassemble(result, code));
-
-  auto code_size = code.textSection()->realSize();
-  register_raw_debug_symbol(name, __FILE__, __LINE__, result, code_size, 0);
-  std::vector<std::pair<void*, std::size_t>> code_sections;
-  forEachSection([&](CodeSection section) {
-    auto asmjit_section = code.sectionByName(codeSectionName(section));
-    if (asmjit_section == nullptr || asmjit_section->realSize() == 0) {
-      return;
-    }
-    auto section_start = static_cast<char*>(result) + asmjit_section->offset();
-    code_sections.emplace_back(
-        reinterpret_cast<void*>(section_start), asmjit_section->realSize());
-  });
-  perf::registerFunction(code_sections, name);
-
-  return result;
+  return emitAndRegisterTrampoline(
+      &lir_func, "failedDeferredCompileTrampoline");
 }
+
+// Helper template implementing double-checked locking for lazy trampoline
+// initialization. |slot| is the atomic cache, |generator| is a callable that
+// creates the trampoline when it has not yet been initialized.
+template <typename Generator>
+void* getOrCreateTrampoline(std::atomic<void*>& slot, Generator&& generator) {
+  void* trampoline = slot.load(std::memory_order_acquire);
+  if (trampoline == nullptr) {
+    JITCompilationLock lock;
+    trampoline = slot.load(std::memory_order_relaxed);
+    if (trampoline == nullptr) {
+      trampoline = generator();
+      slot.store(trampoline, std::memory_order_release);
+    }
+  }
+  return trampoline;
+}
+
+#if defined(_WIN32) && defined(CINDER_X86_64)
+// Bridges the Microsoft x64 sret ABI to the JIT's internal reentry ABI.
+//
+// The JIT "reentry with processed args" entry point expects the plain
+// vectorcall convention (RCX=callable, RDX=args, R8=nargsf, R9=kwnames) and
+// returns its two result values in RAX:RDX (or XMM0:XMM1 for functions which
+// return a primitive double).  The C++ runtime helpers that re-dispatch through
+// the reentry (e.g. rt::callWithIncorrectArgcount) are typed to return the
+// 16-byte rt::StaticCallReturn / rt::StaticCallFPReturn structs.  On the MS
+// x64 ABI a struct larger than 8 bytes is returned via a hidden sret pointer in
+// RCX, which shifts every argument by one register -- so without this bridge
+// the reentry would read the callable (in RDX) as its args array and crash.
+//
+// This trampoline is itself invoked as a 16-byte-struct-returning function, so
+// at entry the registers are:
+//   RCX        = hidden sret buffer pointer
+//   RDX        = reentry entry point
+//   R8         = callable (PyObject*)
+//   R9         = args (PyObject**)
+//   [RSP+0x28] = nargsf
+//   [RSP+0x30] = kwnames
+// It rearranges these into the plain vectorcall ABI, calls the reentry, stores
+// the two return values into the sret buffer, and returns the buffer in RAX (as
+// required for an sret return on the MS x64 ABI).
+void* generateStaticReentryTrampoline(bool fp) {
+  CodeHolder code;
+  ICodeAllocator* code_allocator =
+      cinderx::getModuleState()->code_allocator.get();
+  const char* name =
+      fp ? "static_reentry_trampoline_fp" : "static_reentry_trampoline";
+  ASM_CHECK(code.init(code_allocator->asmJitEnvironment()), name);
+  arch::Builder a(&code);
+
+  a.push(x86::rbx); // preserve callee-saved RBX; holds the sret buffer
+  a.mov(x86::rbx, x86::rcx); // RBX = sret buffer (survives the call)
+  a.mov(x86::rax, x86::rdx); // RAX = reentry target (scratch)
+  a.mov(x86::rcx, x86::r8); // RCX = callable (vectorcall arg 0)
+  a.mov(x86::rdx, x86::r9); // RDX = args (vectorcall arg 1)
+  // The two stack args are 8 bytes higher than at entry due to the pushed RBX.
+  a.mov(x86::r8, x86::ptr(x86::rsp, 0x30)); // R8 = nargsf (vectorcall arg 2)
+  a.mov(x86::r9, x86::ptr(x86::rsp, 0x38)); // R9 = kwnames (vectorcall arg 3)
+  a.sub(x86::rsp, 0x20); // shadow space (keeps RSP 16-byte aligned at the call)
+  a.call(x86::rax);
+  a.add(x86::rsp, 0x20);
+  if (fp) {
+    a.movsd(x86::ptr(x86::rbx, 0), x86::xmm0);
+    a.movsd(x86::ptr(x86::rbx, 8), x86::xmm1);
+  } else {
+    a.mov(x86::ptr(x86::rbx, 0), x86::rax);
+    a.mov(x86::ptr(x86::rbx, 8), x86::rdx);
+  }
+  a.mov(x86::rax, x86::rbx); // return the sret buffer pointer in RAX
+  a.pop(x86::rbx);
+  a.ret();
+
+  return finalizeCode(a, name);
+}
+#endif
 
 class AsmJitException : public std::exception {
  public:
@@ -982,124 +662,31 @@ class ThrowableErrorHandler : public ErrorHandler {
   }
 };
 
-#if defined(CINDER_AARCH64)
-// Save a set of callee-saved registers to the stack, properly handling both
-// GP (x) and VecD (d) registers. GP and VecD registers must not be mixed in
-// a single stp instruction.
-void saveCalleeSavedRegsAarch64(arch::Builder* as, PhyRegisterSet saved_regs) {
-  auto gp_regs = saved_regs & ALL_GP_REGISTERS;
-  auto vecd_regs = saved_regs & ALL_VECD_REGISTERS;
-
-  // Save GP registers first (they will be at higher addresses, restored last).
-  if (!gp_regs.Empty()) {
-    if (gp_regs.count() % 2 == 1) {
-      as->str(a64::x(gp_regs.GetFirst().loc), a64::ptr_pre(a64::sp, -16));
-      gp_regs.RemoveFirst();
-    }
-    while (!gp_regs.Empty()) {
-      auto first = a64::x(gp_regs.GetFirst().loc);
-      gp_regs.RemoveFirst();
-      auto second = a64::x(gp_regs.GetFirst().loc);
-      gp_regs.RemoveFirst();
-      as->stp(first, second, a64::ptr_pre(a64::sp, -16));
-    }
-  }
-
-  // Save VecD registers (they will be at lower addresses, restored first).
-  if (!vecd_regs.Empty()) {
-    if (vecd_regs.count() % 2 == 1) {
-      as->str(
-          a64::d(vecd_regs.GetFirst().loc - VECD_REG_BASE),
-          a64::ptr_pre(a64::sp, -16));
-      vecd_regs.RemoveFirst();
-    }
-    while (!vecd_regs.Empty()) {
-      auto first = a64::d(vecd_regs.GetFirst().loc - VECD_REG_BASE);
-      vecd_regs.RemoveFirst();
-      auto second = a64::d(vecd_regs.GetFirst().loc - VECD_REG_BASE);
-      vecd_regs.RemoveFirst();
-      as->stp(first, second, a64::ptr_pre(a64::sp, -16));
-    }
-  }
-}
-
-// Restore a set of callee-saved registers from the stack, in reverse order
-// of saveCalleeSavedRegsAarch64.
-void restoreCalleeSavedRegsAarch64(
-    arch::Builder* as,
-    PhyRegisterSet saved_regs) {
-  auto gp_regs = saved_regs & ALL_GP_REGISTERS;
-  auto vecd_regs = saved_regs & ALL_VECD_REGISTERS;
-
-  // Restore VecD registers first (they were saved last, so they're at the
-  // lowest addresses).
-  if (!vecd_regs.Empty()) {
-    // Restore in reverse order (GetLast first).
-    // If odd count, the first-saved was a single str, so it's the last to
-    // restore and will be a single ldr.
-    bool odd = vecd_regs.count() % 2 == 1;
-    // First restore the pairs (from the paired stps).
-    // The pairs were saved GetFirst-first, so we restore GetLast-first.
-    PhyRegisterSet vecd_pairs = vecd_regs;
-    if (odd) {
-      vecd_pairs.RemoveFirst(); // skip the odd one for now
-    }
-    while (!vecd_pairs.Empty()) {
-      auto second = a64::d(vecd_pairs.GetLast().loc - VECD_REG_BASE);
-      vecd_pairs.RemoveLast();
-      auto first = a64::d(vecd_pairs.GetLast().loc - VECD_REG_BASE);
-      vecd_pairs.RemoveLast();
-      as->ldp(first, second, a64::ptr_post(a64::sp, 16));
-    }
-    if (odd) {
-      as->ldr(
-          a64::d(vecd_regs.GetFirst().loc - VECD_REG_BASE),
-          a64::ptr_post(a64::sp, 16));
-    }
-  }
-
-  // Restore GP registers (they were saved first, so they're at higher
-  // addresses).
-  if (!gp_regs.Empty()) {
-    bool odd = gp_regs.count() % 2 == 1;
-    PhyRegisterSet gp_pairs = gp_regs;
-    if (odd) {
-      gp_pairs.RemoveFirst();
-    }
-    while (!gp_pairs.Empty()) {
-      auto second = a64::x(gp_pairs.GetLast().loc);
-      gp_pairs.RemoveLast();
-      auto first = a64::x(gp_pairs.GetLast().loc);
-      gp_pairs.RemoveLast();
-      as->ldp(first, second, a64::ptr_post(a64::sp, 16));
-    }
-    if (odd) {
-      as->ldr(a64::x(gp_regs.GetFirst().loc), a64::ptr_post(a64::sp, 16));
-    }
-  }
-}
-#endif
-
 } // namespace
 
-NativeGenerator::NativeGenerator(const hir::Function* func)
-    : NativeGenerator{
-          func,
-          generateDeoptTrampoline(false),
-          generateDeoptTrampoline(true),
-          generateFailedDeferredCompileTrampoline()} {}
+void* getStaticReentryTrampoline(bool fp) {
+#if defined(_WIN32) && defined(CINDER_X86_64)
+  // Lazily generate and cache once.  Magic-static initialization is
+  // thread-safe, and the code allocator is always ready by the time
+  // JIT-compiled code (which is the only caller) runs.
+  if (fp) {
+    static void* trampoline = generateStaticReentryTrampoline(true);
+    return trampoline;
+  }
+  static void* trampoline = generateStaticReentryTrampoline(false);
+  return trampoline;
+#else
+  (void)fp;
+  JIT_ABORT("static reentry trampoline is only needed on Windows x64");
+#endif
+}
 
 NativeGenerator::NativeGenerator(
     const hir::Function* func,
-    void* deopt_trampoline,
-    void* deopt_trampoline_generators,
-    void* failed_deferred_compile_trampoline)
+    NativeGeneratorFactory& factory)
     : func_{func},
-      deopt_trampoline_{deopt_trampoline},
-      deopt_trampoline_generators_{deopt_trampoline_generators},
-      failed_deferred_compile_trampoline_{failed_deferred_compile_trampoline},
-      frame_asm_{func, env_},
-      inline_stack_size_{calcInlineStackSize(func)} {
+      inline_stack_size_{calcInlineStackSize(func)},
+      factory_(factory) {
   env_.has_inlined_functions = inline_stack_size_ > 0;
 }
 
@@ -1115,7 +702,6 @@ PhyLocation get_arg_location_phy_location(int arg) {
   }
 
   JIT_ABORT("only six first registers should be used");
-  return 0;
 }
 
 std::span<const std::byte> NativeGenerator::getCodeBuffer() const {
@@ -1132,12 +718,13 @@ void* NativeGenerator::getVectorcallEntry() {
   JIT_CHECK(as_ == nullptr, "Builder should not have been initialized.");
 
   CodeHolder code;
-  ICodeAllocator* code_allocator = cinderx::getModuleState()->codeAllocator();
+  ICodeAllocator* code_allocator =
+      cinderx::getModuleState()->code_allocator.get();
   code.init(code_allocator->asmJitEnvironment());
   ThrowableErrorHandler eh;
   code.setErrorHandler(&eh);
 
-  if (getConfig().multiple_code_sections) {
+  if (getConfig().mem.multiple_code_sections) {
     Section* cold_text;
     ASM_CHECK_THROW(code.newSection(
         &cold_text,
@@ -1148,22 +735,22 @@ void* NativeGenerator::getVectorcallEntry() {
   }
 
   as_ = new arch::Builder(&code);
-  frame_asm_.setAssembler(as_);
 
   env_.as = as_;
   env_.hard_exit_label = as_->newLabel();
   env_.gen_resume_entry_label = as_->newLabel();
+  env_.is_generator = isGen();
 
   // Prepare the location for where our arguments will go.  This just
   // uses general purpose registers while available for non-floating
   // point values, and floating point values while available for fp
   // arguments.
-  const std::vector<TypedArgument>& checks = GetFunction()->typed_args;
+  const std::vector<TypedArgument>& checks = getFunction()->typed_args;
 
   // gp_index starts at 1 because the first argument is reserved for the
   // function
   for (size_t i = 0, check_index = 0, gp_index = 1, fp_index = 0;
-       i < static_cast<size_t>(GetFunction()->numArgs());
+       i < static_cast<size_t>(getFunction()->numArgs());
        i++) {
     auto add_gp = [&]() {
       if (gp_index < ARGUMENT_REGS.size()) {
@@ -1193,89 +780,131 @@ void* NativeGenerator::getVectorcallEntry() {
     add_gp();
   }
 
-  auto func = GetFunction();
+  auto func = getFunction();
 
   env_.ctx = getContext();
+  env_.reifier = func->env.reifier;
   env_.code_rt = env_.ctx->allocateCodeRuntime(
       func->code.get(), func->builtins.get(), func->globals.get());
-#if defined(ENABLE_LIGHTWEIGHT_FRAMES) && PY_VERSION_HEX >= 0x030E0000
-  env_.code_rt->setReifier(func->reifier);
-#endif
 
+  env_.addReference(func->code.getObj());
+  env_.addReference(func->builtins.getObj());
+  env_.addReference(func->globals.getObj());
   for (auto& ref : func->env.references()) {
-    env_.code_rt->addReference(ref);
+    env_.addReference(ref);
   }
 
-  lir::LIRGenerator lirgen(GetFunction(), &env_);
+  lir::LIRGenerator lirgen(getFunction(), &env_);
   std::unique_ptr<lir::Function> lir_func;
 
+#if defined(CINDER_X86_64) && defined(_WIN32)
+  {
+    int fh_size = jit::frameHeaderSize(func_->code) + sizeof(void*);
+    env_.win_struct_ret_offset = -(fh_size + inline_stack_size_ + 16);
+  }
+#endif
+
   COMPILE_TIMER(
-      GetFunction()->compilation_phase_timer,
+      getFunction()->compilation_phase_timer,
       "Lowering into LIR",
-      lir_func = lirgen.TranslateFunction())
+      lir_func = lirgen.translateFunction())
+  checkLirSize(*lir_func);
 
   JIT_LOGIF(
       getConfig().log.dump_lir,
       "LIR for {} after generation:\n{}",
-      GetFunction()->fullname,
+      getFunction()->fullname,
       *lir_func);
 
   PostGenerationRewrite post_gen(lir_func.get(), &env_);
   COMPILE_TIMER(
-      GetFunction()->compilation_phase_timer,
+      getFunction()->compilation_phase_timer,
       "LIR transformations",
       post_gen.run())
 
   JIT_LOGIF(
       getConfig().log.dump_lir,
       "LIR for {} after postgen rewrites:\n{}",
-      GetFunction()->fullname,
+      getFunction()->fullname,
       *lir_func);
 
   COMPILE_TIMER(
-      GetFunction()->compilation_phase_timer,
+      getFunction()->compilation_phase_timer,
       "DeadCodeElimination",
       eliminateDeadCode(lir_func.get()))
 
-  LinearScanAllocator lsalloc(
-      lir_func.get(), frame_asm_.frameHeaderSize() + inline_stack_size_);
+  COMPILE_TIMER(
+      getFunction()->compilation_phase_timer,
+      "Target Selection and Legalization",
+      selectTargetOpcodes(lir_func.get()))
+
+  JIT_LOGIF(
+      getConfig().log.dump_lir,
+      "LIR for {} after target selection and legalization:\n{}",
+      getFunction()->fullname,
+      *lir_func);
+
+  int frame_header_size = frameHeaderSize(func_->code);
+  frame_header_size += sizeof(void*);
+
+  int reserved_stack_space = frame_header_size + inline_stack_size_;
+  if constexpr (kBuildArch == Arch::kX86_64 && kOS == OS::kWindows) {
+    reserved_stack_space += 16;
+  }
+
+  std::unique_ptr<RegisterAllocator> allocator;
+  switch (getConfig().reg_alloc) {
+    case RegAllocKind::kLinearScan:
+      allocator = std::make_unique<LinearScanAllocator>(
+          lir_func.get(), reserved_stack_space);
+      break;
+    case RegAllocKind::kSpill:
+      allocator = std::make_unique<SpillAllocator>(
+          lir_func.get(), reserved_stack_space);
+      break;
+  }
 
   COMPILE_TIMER(
-      GetFunction()->compilation_phase_timer,
+      getFunction()->compilation_phase_timer,
       "Register Allocation",
-      lsalloc.run())
+      allocator->run())
 
-  env_.shadow_frames_and_spill_size = lsalloc.getFrameSize();
-  env_.changed_regs = lsalloc.getChangedRegs();
+  env_.shadow_frames_and_spill_size = allocator->getFrameSize();
+  env_.changed_regs = allocator->getChangedRegs();
   env_.exit_label = as_->newLabel();
-  env_.exit_for_yield_label = as_->newLabel();
-  env_.frame_mode = GetFunction()->frameMode;
-  if (GetFunction()->code->co_flags & kCoFlagsAnyGenerator) {
-    env_.initial_yield_spill_size_ = lsalloc.initialYieldSpillSize();
-  }
+  env_.can_deopt = getFunction()->canDeopt();
 
   JIT_LOGIF(
       getConfig().log.dump_lir,
       "LIR for {} after register allocation:\n{}",
-      GetFunction()->fullname,
+      getFunction()->fullname,
       *lir_func);
 
   PostRegAllocRewrite post_rewrite(lir_func.get(), &env_);
   COMPILE_TIMER(
-      GetFunction()->compilation_phase_timer,
+      getFunction()->compilation_phase_timer,
       "Post Reg Alloc Rewrite",
       post_rewrite.run())
+
+#if defined(CINDER_AARCH64)
+  // Peepholes go last, once nothing else will add to or remove from the
+  // instruction stream.
+  COMPILE_TIMER(
+      getFunction()->compilation_phase_timer,
+      "Post Reg Alloc Peephole",
+      runPostRegAllocPeephole(lir_func.get()))
+#endif
 
   JIT_LOGIF(
       getConfig().log.dump_lir,
       "LIR for {} after postalloc rewrites:\n{}",
-      GetFunction()->fullname,
+      getFunction()->fullname,
       *lir_func);
 
   if (!verifyPostRegAllocInvariants(lir_func.get(), std::cerr)) {
     JIT_ABORT(
         "LIR for {} failed verification:\n{}",
-        GetFunction()->fullname,
+        getFunction()->fullname,
         *lir_func);
   }
 
@@ -1283,17 +912,18 @@ void* NativeGenerator::getVectorcallEntry() {
 
   try {
     COMPILE_TIMER(
-        GetFunction()->compilation_phase_timer,
+        getFunction()->compilation_phase_timer,
         "Code Generation",
-        generateCode(code))
+        generateCode(code, lirgen.frameSetupBlock()))
   } catch (const AsmJitException& ex) {
     String s;
     FormatOptions formatOptions;
+    formatOptions.setFlags(FormatFlags::kHexImms);
     Formatter::formatNodeList(s, formatOptions, as_);
     JIT_ABORT(
         "Failed to emit code for '{}': '{}' failed with '{}'\n\n"
         "Builder contents on failure:\n{}",
-        GetFunction()->fullname,
+        getFunction()->fullname,
         ex.expr,
         ex.message,
         s.data());
@@ -1306,7 +936,17 @@ void* NativeGenerator::getVectorcallEntry() {
 
   JIT_DCHECK(code.codeSize() < INT_MAX, "Code size is larger than INT_MAX");
   compiled_size_ = code.codeSize();
-  env_.code_rt->setFrameSize(env_.stack_frame_size);
+  JIT_THROW_IF(
+      env_.stack_frame_size > std::numeric_limits<int16_t>::max(),
+      "Frame size {} is too large",
+      env_.stack_frame_size);
+  env_.code_rt->setFrameSize(static_cast<int16_t>(env_.stack_frame_size));
+  if (getFunction()->code->co_flags & kCoFlagsAnyGenerator) {
+    JIT_DCHECK(
+        env_.shadow_frames_and_spill_size % kPointerSize == 0,
+        "Bad spill alignment");
+    env_.code_rt->setSpillSize(env_.shadow_frames_and_spill_size);
+  }
   return vectorcall_entry_;
 }
 
@@ -1321,11 +961,11 @@ void* NativeGenerator::getStaticEntry() {
       JITRT_STATIC_ENTRY_OFFSET);
 }
 
-int NativeGenerator::GetCompiledFunctionStackSize() const {
+int NativeGenerator::getCompiledFunctionStackSize() const {
   return env_.stack_frame_size;
 }
 
-int NativeGenerator::GetCompiledFunctionSpillStackSize() const {
+int NativeGenerator::getCompiledFunctionSpillStackSize() const {
   return spill_stack_size_;
 }
 
@@ -1334,7 +974,7 @@ void NativeGenerator::generateFunctionEntry() {
   as_->push(x86::rbp);
   as_->mov(x86::rbp, x86::rsp);
 #elif defined(CINDER_AARCH64)
-  as_->stp(arch::fp, arch::lr, a64::ptr_pre(a64::sp, -16));
+  as_->stp(arch::fp, arch::lr, a64::ptr_pre(a64::sp, -arch::kFrameRecordSize));
   as_->mov(arch::fp, a64::sp);
 #else
   CINDER_UNSUPPORTED
@@ -1347,7 +987,7 @@ void NativeGenerator::generateFunctionExit() {
   as_->ret();
 #elif defined(CINDER_AARCH64)
   as_->mov(a64::sp, arch::fp);
-  as_->ldp(arch::fp, arch::lr, a64::ptr_post(a64::sp, 16));
+  as_->ldp(arch::fp, arch::lr, a64::ptr_post(a64::sp, arch::kFrameRecordSize));
   as_->ret(arch::lr);
 #else
   CINDER_UNSUPPORTED
@@ -1385,7 +1025,7 @@ NativeGenerator::FrameInfo NativeGenerator::computeFrameInfo() {
       .header_and_spill_size =
           std::max(env_.shadow_frames_and_spill_size, kPointerSize),
       .saved_regs = env_.changed_regs & CALLEE_SAVE_REGS,
-      .arg_buffer_size = env_.max_arg_buffer_size,
+      .arg_buffer_size = env_.max_arg_buffer_size + env_.reserve_stack_size,
   };
   if ((info.header_and_spill_size + info.saved_regs_size() +
        info.arg_buffer_size) %
@@ -1399,85 +1039,17 @@ NativeGenerator::FrameInfo NativeGenerator::computeFrameInfo() {
   return info;
 }
 
-int NativeGenerator::allocateHeaderAndSpillSpace(const FrameInfo& frame_info) {
-#if defined(CINDER_X86_64)
-  int padding = frame_info.header_and_spill_size % kStackAlign;
-  as_->sub(x86::rsp, frame_info.header_and_spill_size + padding);
-  return padding;
-#elif defined(CINDER_AARCH64)
-  int modulo = frame_info.header_and_spill_size % kStackAlign;
-  int padding = modulo == 0 ? 0 : kStackAlign - modulo;
-  as_->sub(a64::sp, a64::sp, frame_info.header_and_spill_size + padding);
-
-  // There is a difference here from x86-64, because the aarch64 stack cannot be
-  // misaligned. Here we are returning the amount of space that we have added to
-  // keep the stack aligned, as opposed to the amount of space that we have gone
-  // over the stack alignment.
-  return padding;
-#else
-  CINDER_UNSUPPORTED
-  return 0;
-#endif
-}
-
-void NativeGenerator::saveCallerRegisters(
-    const FrameInfo& frame_info,
-    [[maybe_unused]] arch::Gp tstate_reg) {
-#if defined(CINDER_X86_64)
-#ifdef ENABLE_SHADOW_FRAMES
-  frame_asm_.initializeFrameHeader(tstate_reg, x86::rax);
-#endif
-  // Push used callee-saved registers.
-  auto saved_regs = frame_info.saved_regs;
-  while (!saved_regs.Empty()) {
-    as_->push(x86::gpq(saved_regs.GetFirst().loc));
-    saved_regs.RemoveFirst();
-  }
-
-  if (frame_info.arg_buffer_size > 0) {
-    as_->sub(x86::rsp, frame_info.arg_buffer_size);
-  }
-#elif defined(CINDER_AARCH64)
-#ifdef ENABLE_SHADOW_FRAMES
-  frame_asm_.initializeFrameHeader(tstate_reg, a64::x0);
-#endif
-  // Push used callee-saved registers.
-  saveCalleeSavedRegsAarch64(as_, frame_info.saved_regs);
-
-  if (frame_info.arg_buffer_size > 0) {
-    JIT_CHECK(frame_info.arg_buffer_size % kStackAlign == 0, "unaligned");
-    as_->sub(a64::sp, a64::sp, frame_info.arg_buffer_size);
-  }
-#else
-  CINDER_UNSUPPORTED
-#endif
-}
-
-void NativeGenerator::setupFrameAndSaveCallerRegisters(
-    const FrameInfo& frame_info,
-    arch::Gp tstate_reg) {
-#if defined(CINDER_X86_64)
-  as_->sub(x86::rsp, frame_info.header_and_spill_size);
-#elif defined(CINDER_AARCH64)
-  JIT_CHECK(frame_info.header_and_spill_size % kStackAlign == 0, "unaligned");
-  as_->sub(a64::sp, a64::sp, frame_info.header_and_spill_size);
-#else
-  CINDER_UNSUPPORTED
-#endif
-  saveCallerRegisters(frame_info, tstate_reg);
-}
-
 arch::Gp get_arg_location(int arg) {
 #if defined(CINDER_X86_64)
   auto phyloc = get_arg_location_phy_location(arg);
 
-  if (phyloc.is_register()) {
+  if (phyloc.isRegister()) {
     return x86::gpq(phyloc.loc);
   }
 #elif defined(CINDER_AARCH64)
   auto phyloc = get_arg_location_phy_location(arg);
 
-  if (phyloc.is_register()) {
+  if (phyloc.isRegister()) {
     return a64::x(phyloc.loc);
   }
 #else
@@ -1485,867 +1057,6 @@ arch::Gp get_arg_location(int arg) {
 #endif
 
   JIT_ABORT("should only be used with first six args");
-}
-
-bool NativeGenerator::linkFrameNeedsSpill() {
-  if (!isGen()) {
-    return true;
-  }
-
-  // On 3.12 we link the frame immediately so we need to preserve the
-  // arguments for generators as well.
-  if constexpr (PY_VERSION_HEX < 0x030C0000) {
-    return false;
-  }
-  return true;
-}
-
-void NativeGenerator::generatePrologue(
-    const FrameInfo& frame_info,
-    Label correct_arg_count,
-    Label finish_frame_setup) {
-#if defined(CINDER_X86_64)
-  // The boxed return wrapper gets generated first, if it is necessary.
-  auto [generic_entry_cursor, box_entry_cursor] = generateBoxedReturnWrapper();
-
-  generateFunctionEntry();
-
-  // Verify arguments have been passed in correctly.
-  if (func_->has_primitive_args) {
-    generatePrimitiveArgsPrologue();
-  } else {
-    generateArgcountCheckPrologue(correct_arg_count);
-  }
-  as_->bind(correct_arg_count);
-
-  Label setup_frame = as_->newLabel();
-
-  if (hasStaticEntry()) {
-    if (!func_->has_primitive_args) {
-      // We weren't called statically, but we've now resolved all arguments to
-      // fixed offsets.  Validate that the arguments are correctly typed.
-      generateStaticMethodTypeChecks(setup_frame);
-    } else if (func_->has_primitive_first_arg) {
-      as_->mov(x86::rdx, 0);
-    }
-  }
-
-  env_.addAnnotation("Generic entry", generic_entry_cursor);
-
-  if (box_entry_cursor) {
-    env_.addAnnotation(
-        "Generic entry (box primitive return)", box_entry_cursor);
-  }
-
-  // Args are now validated, setup frame.
-  constexpr auto kFuncPtrReg = x86::gpq(INITIAL_FUNC_REG.loc);
-  constexpr auto kArgsReg = x86::gpq(INITIAL_EXTRA_ARGS_REG.loc);
-  constexpr auto kArgsPastSixReg = kArgsReg;
-
-  asmjit::BaseNode* frame_cursor = as_->cursor();
-  as_->bind(setup_frame);
-  std::vector<std::pair<const arch::Reg&, const arch::Reg&>> save_regs;
-
-  save_regs.emplace_back(x86::rsi, kArgsReg);
-  if (GetFunction()->uses_runtime_func) {
-    save_regs.emplace_back(x86::rdi, kFuncPtrReg);
-  }
-
-  // Ensure that rsp is below the fields in the stack allocated interpreter
-  // frame that may be initialized in the `generateLinkFrame` call below,
-  // preventing the signal handling routine in the kernel from overwriting
-  // them.
-  int padding = allocateHeaderAndSpillSpace(frame_info);
-
-  frame_asm_.generateLinkFrame(
-      kFuncPtrReg, x86::gpq(INITIAL_TSTATE_REG.loc), save_regs);
-
-  env_.addAnnotation("Link frame", frame_cursor);
-
-  asmjit::BaseNode* load_args_cursor = as_->cursor();
-  // Move arguments into their expected registers and then set a register as the
-  // base for additional args.
-  bool has_extra_args = false;
-  for (size_t i = 0; i < env_.arg_locations.size(); i++) {
-    PhyLocation arg = env_.arg_locations[i];
-    if (arg == PhyLocation::REG_INVALID) {
-      has_extra_args = true;
-      continue;
-    }
-    if (arg.is_gp_register()) {
-      as_->mov(x86::gpq(arg.loc), x86::ptr(kArgsReg, i * sizeof(void*)));
-    } else {
-      as_->movsd(x86::xmm(arg.loc), x86::ptr(kArgsReg, i * sizeof(void*)));
-    }
-  }
-  if (has_extra_args) {
-    // Load the location of the remaining args, the backend will deal with
-    // loading them from here...
-    as_->lea(
-        kArgsPastSixReg,
-        x86::ptr(kArgsReg, (ARGUMENT_REGS.size() - 1) * sizeof(void*)));
-  }
-  env_.addAnnotation("Load arguments", load_args_cursor);
-
-  // We already allocated stack space for the header and spill data, clean
-  // up any alignment padding we added
-  if (padding) {
-    as_->add(x86::rsp, padding);
-  }
-
-  // Finally allocate the saved space required for the actual function.
-  auto finish_frame_setup_cursor = as_->cursor();
-  as_->bind(finish_frame_setup);
-  saveCallerRegisters(frame_info, x86::r11);
-
-  env_.addAnnotation("Finish frame setup", finish_frame_setup_cursor);
-#elif defined(CINDER_AARCH64)
-  // The boxed return wrapper gets generated first, if it is necessary.
-  auto [generic_entry_cursor, box_entry_cursor] = generateBoxedReturnWrapper();
-
-  generateFunctionEntry();
-
-  // Verify arguments have been passed in correctly.
-  if (func_->has_primitive_args) {
-    generatePrimitiveArgsPrologue();
-  } else {
-    generateArgcountCheckPrologue(correct_arg_count);
-  }
-  as_->bind(correct_arg_count);
-
-  Label setup_frame = as_->newLabel();
-
-  if (hasStaticEntry()) {
-    if (!func_->has_primitive_args) {
-      // We weren't called statically, but we've now resolved all arguments to
-      // fixed offsets.  Validate that the arguments are correctly typed.
-      generateStaticMethodTypeChecks(setup_frame);
-    } else if (func_->has_primitive_first_arg) {
-      as_->mov(a64::x2, 0);
-    }
-  }
-
-  env_.addAnnotation("Generic entry", generic_entry_cursor);
-
-  if (box_entry_cursor) {
-    env_.addAnnotation(
-        "Generic entry (box primitive return)", box_entry_cursor);
-  }
-
-  // Args are now validated, setup frame.
-  constexpr auto kFuncPtrReg = a64::x(INITIAL_FUNC_REG.loc);
-  constexpr auto kArgsReg = a64::x(INITIAL_EXTRA_ARGS_REG.loc);
-  constexpr auto kArgsPastEightReg = kArgsReg;
-
-  asmjit::BaseNode* frame_cursor = as_->cursor();
-  as_->bind(setup_frame);
-  std::vector<std::pair<const arch::Reg&, const arch::Reg&>> save_regs;
-
-  save_regs.emplace_back(a64::x1, kArgsReg);
-  if (GetFunction()->uses_runtime_func) {
-    save_regs.emplace_back(a64::x0, kFuncPtrReg);
-  }
-
-  // Ensure that sp is below the fields in the stack allocated interpreter
-  // frame that may be initialized in the `generateLinkFrame` call below,
-  // preventing the signal handling routine in the kernel from overwriting
-  // them. Note that we do not need to worry about the padding here, as the
-  // stack is already aligned by that allocation function.
-  (void)allocateHeaderAndSpillSpace(frame_info);
-
-  frame_asm_.generateLinkFrame(
-      kFuncPtrReg, a64::x(INITIAL_TSTATE_REG.loc), save_regs);
-
-  env_.addAnnotation("Link frame", frame_cursor);
-
-  asmjit::BaseNode* load_args_cursor = as_->cursor();
-  // Move arguments into their expected registers and then set a register as the
-  // base for additional args.
-  bool has_extra_args = false;
-  for (size_t i = 0; i < env_.arg_locations.size(); i++) {
-    PhyLocation arg = env_.arg_locations[i];
-    if (arg == PhyLocation::REG_INVALID) {
-      has_extra_args = true;
-      continue;
-    }
-    if (arg.is_gp_register()) {
-      as_->ldr(
-          a64::x(arg.loc),
-          arch::ptr_resolve(
-              as_, kArgsReg, i * sizeof(void*), arch::reg_scratch_0));
-    } else {
-      as_->ldr(
-          a64::d(arg.loc),
-          arch::ptr_resolve(
-              as_, kArgsReg, i * sizeof(void*), arch::reg_scratch_0));
-    }
-  }
-  if (has_extra_args) {
-    // Load the location of the remaining args, the backend will deal with
-    // loading them from here...
-    as_->add(
-        kArgsPastEightReg,
-        kArgsReg,
-        (ARGUMENT_REGS.size() - 1) * sizeof(void*));
-  }
-  env_.addAnnotation("Load arguments", load_args_cursor);
-
-  // Finally allocate the saved space required for the actual function.
-  auto finish_frame_setup_cursor = as_->cursor();
-  as_->bind(finish_frame_setup);
-  saveCallerRegisters(frame_info, a64::x11);
-
-  env_.addAnnotation("Finish frame setup", finish_frame_setup_cursor);
-#else
-  CINDER_UNSUPPORTED
-#endif
-}
-
-static void
-emitCompare(arch::Builder* as, arch::Gp lhs, void* rhs, arch::Gp scratch) {
-#if defined(CINDER_X86_64)
-  uint64_t rhsi = reinterpret_cast<uint64_t>(rhs);
-
-  if (!fitsSignedInt<32>(rhsi)) {
-    // in shared mode type can be in a high address
-    as->mov(scratch, rhsi);
-    as->cmp(lhs, scratch);
-  } else {
-    as->cmp(lhs, rhsi);
-  }
-#elif defined(CINDER_AARCH64)
-  uint64_t rhsi = reinterpret_cast<uint64_t>(rhs);
-
-  if (!a64::Utils::isAddSubImm(rhsi)) {
-    as->mov(scratch, rhsi);
-    as->cmp(lhs, scratch);
-  } else {
-    as->cmp(lhs, rhsi);
-  }
-#else
-  CINDER_UNSUPPORTED
-#endif
-}
-
-void NativeGenerator::generateStaticMethodTypeChecks(Label setup_frame) {
-  // JITRT_CallWithIncorrectArgcount uses the fact that our checks are set up
-  // from last to first argument - we order the jumps so that the common case of
-  // no defaulted arguments comes first, and end up with the following
-  // structure: generic entry: compare defaulted arg count to 0 if zero: go to
-  // first check compare defaulted arg count to 1 if zero: go to second check
-  // ...
-  // This is complicated a bit by the fact that not every argument will have a
-  // check, as we elide the dynamic ones. For that, we do bookkeeping and assign
-  // all defaulted arg counts up to the next local to the same label.
-  const std::vector<TypedArgument>& checks = GetFunction()->typed_args;
-  env_.static_arg_typecheck_failed_label = as_->newLabel();
-  if (!checks.size()) {
-    return;
-  }
-
-#if defined(CINDER_X86_64)
-  // We build a vector of labels corresponding to [first_check, second_check,
-  // ..., setup_frame] which will have |checks| + 1 elements, and the
-  // first_check label will precede the first check.
-  auto table_label = as_->newLabel();
-  as_->lea(x86::r8, x86::ptr(table_label));
-  as_->lea(x86::r8, x86::ptr(x86::r8, x86::rcx, 3));
-  as_->jmp(x86::r8);
-  auto jump_table_cursor = as_->cursor();
-  as_->align(AlignMode::kCode, 8);
-  as_->bind(table_label);
-  std::vector<Label> arg_labels;
-  int defaulted_arg_count = 0;
-  Py_ssize_t check_index = checks.size() - 1;
-  // Each check might be a label that hosts multiple arguments, as dynamic
-  // arguments aren't checked. We need to account for this in our bookkeeping.
-  auto next_arg = as_->newLabel();
-  arg_labels.emplace_back(next_arg);
-  while (defaulted_arg_count < GetFunction()->numArgs()) {
-    as_->align(AlignMode::kCode, 8);
-    as_->jmp(next_arg);
-
-    if (check_index >= 0) {
-      long local = checks.at(check_index).locals_idx;
-      if (GetFunction()->numArgs() - defaulted_arg_count - 1 == local) {
-        if (check_index == 0) {
-          next_arg = setup_frame;
-        } else {
-          check_index--;
-          next_arg = as_->newLabel();
-        }
-        arg_labels.emplace_back(next_arg);
-      }
-    }
-
-    defaulted_arg_count++;
-  }
-  env_.addAnnotation(
-      fmt::format("Jump to first non-defaulted argument"), jump_table_cursor);
-
-  as_->align(AlignMode::kCode, 8);
-  as_->bind(arg_labels[0]);
-  for (Py_ssize_t i = checks.size() - 1; i >= 0; i--) {
-    auto check_cursor = as_->cursor();
-    const TypedArgument& arg = checks.at(i);
-    env_.code_rt->addReference(BorrowedRef(arg.pytype));
-    next_arg = arg_labels[checks.size() - i];
-
-    as_->mov(x86::r8, x86::ptr(x86::rsi, arg.locals_idx * 8)); // load local
-    as_->mov(
-        x86::r8, x86::ptr(x86::r8, offsetof(PyObject, ob_type))); // load type
-    if (arg.optional) {
-      // check if the value is None
-      emitCompare(as_, x86::r8, Py_TYPE(Py_None), x86::rax);
-      as_->je(next_arg);
-    }
-
-    // common case: check if we have the exact right type
-    emitCompare(as_, x86::r8, arg.pytype, x86::rax);
-    as_->je(next_arg);
-
-    if (!arg.exact && (arg.threadSafeTpFlags() & Py_TPFLAGS_BASETYPE)) {
-      // We need to check the object's MRO and see if the declared type
-      // is present in it.  Technically we don't need to check the last
-      // entry that will be object but the code gen is a little bit simpler
-      // if we include it.
-      Label arg_loop = as_->newLabel();
-      as_->mov(x86::r10, reinterpret_cast<uint64_t>(arg.pytype.get()));
-
-      // PyObject *r8 = r8->tp_mro;
-      as_->mov(x86::r8, x86::ptr(x86::r8, offsetof(PyTypeObject, tp_mro)));
-      // Py_ssize_t r11 = r8->ob_size;
-      as_->mov(x86::r11, x86::ptr(x86::r8, offsetof(PyVarObject, ob_size)));
-      // PyObject *r8 = &r8->ob_item[0];
-      as_->add(x86::r8, offsetof(PyTupleObject, ob_item));
-      // PyObject *r11 = &r8->ob_item[r11];
-      as_->lea(x86::r11, x86::ptr(x86::r8, x86::r11, 3));
-
-      as_->bind(arg_loop);
-      as_->cmp(x86::ptr(x86::r8), x86::r10);
-      as_->je(next_arg);
-      as_->add(x86::r8, sizeof(PyObject*));
-      as_->cmp(x86::r8, x86::r11);
-      as_->jne(arg_loop);
-    }
-
-    // no args match, bail to normal vector call to report error
-    as_->jmp(env_.static_arg_typecheck_failed_label);
-    bool last_check = i == 0;
-    if (!last_check) {
-      as_->bind(next_arg);
-    }
-    env_.addAnnotation(
-        fmt::format("StaticTypeCheck[{}]", arg.pytype->tp_name), check_cursor);
-  }
-#elif defined(CINDER_AARCH64)
-  // We build a vector of labels corresponding to [first_check, second_check,
-  // ..., setup_frame] which will have |checks| + 1 elements, and the
-  // first_check label will precede the first check.
-  auto table_label = as_->newLabel();
-  as_->adr(a64::x8, table_label);
-  as_->add(a64::x8, a64::x8, a64::x3, a64::lsl(2));
-  as_->br(a64::x8);
-  auto jump_table_cursor = as_->cursor();
-  as_->align(AlignMode::kCode, 8);
-  as_->bind(table_label);
-  std::vector<Label> arg_labels;
-  int defaulted_arg_count = 0;
-  Py_ssize_t check_index = checks.size() - 1;
-  // Each check might be a label that hosts multiple arguments, as dynamic
-  // arguments aren't checked. We need to account for this in our bookkeeping.
-  auto next_arg = as_->newLabel();
-  arg_labels.emplace_back(next_arg);
-  while (defaulted_arg_count < GetFunction()->numArgs()) {
-    as_->b(next_arg);
-
-    if (check_index >= 0) {
-      long local = checks.at(check_index).locals_idx;
-      if (GetFunction()->numArgs() - defaulted_arg_count - 1 == local) {
-        if (check_index == 0) {
-          next_arg = setup_frame;
-        } else {
-          check_index--;
-          next_arg = as_->newLabel();
-        }
-        arg_labels.emplace_back(next_arg);
-      }
-    }
-
-    defaulted_arg_count++;
-  }
-  env_.addAnnotation(
-      fmt::format("Jump to first non-defaulted argument"), jump_table_cursor);
-
-  as_->align(AlignMode::kCode, 8);
-  as_->bind(arg_labels[0]);
-  for (Py_ssize_t i = checks.size() - 1; i >= 0; i--) {
-    auto check_cursor = as_->cursor();
-    const TypedArgument& arg = checks.at(i);
-    env_.code_rt->addReference(BorrowedRef(arg.pytype));
-    next_arg = arg_labels[checks.size() - i];
-
-    as_->ldr(
-        a64::x8,
-        arch::ptr_resolve(
-            as_,
-            a64::x1,
-            arg.locals_idx * 8,
-            arch::reg_scratch_0)); // load local
-    as_->ldr(
-        a64::x8,
-        arch::ptr_resolve(
-            as_,
-            a64::x8,
-            offsetof(PyObject, ob_type),
-            arch::reg_scratch_0)); // load type
-    if (arg.optional) {
-      // check if the value is None
-      emitCompare(as_, a64::x8, Py_TYPE(Py_None), arch::reg_scratch_0);
-      as_->b_eq(next_arg);
-    }
-
-    // common case: check if we have the exact right type
-    emitCompare(as_, a64::x8, arg.pytype, arch::reg_scratch_0);
-    as_->b_eq(next_arg);
-
-    if (!arg.exact && (arg.threadSafeTpFlags() & Py_TPFLAGS_BASETYPE)) {
-      // We need to check the object's MRO and see if the declared type
-      // is present in it.  Technically we don't need to check the last
-      // entry that will be object but the code gen is a little bit simpler
-      // if we include it.
-      Label arg_loop = as_->newLabel();
-      as_->mov(a64::x10, reinterpret_cast<uint64_t>(arg.pytype.get()));
-
-      // PyObject *r8 = r8->tp_mro;
-      as_->ldr(
-          a64::x8,
-          arch::ptr_resolve(
-              as_,
-              a64::x8,
-              offsetof(PyTypeObject, tp_mro),
-              arch::reg_scratch_0));
-      // Py_ssize_t r11 = r8->ob_size;
-      as_->ldr(
-          a64::x11,
-          arch::ptr_resolve(
-              as_,
-              a64::x8,
-              offsetof(PyVarObject, ob_size),
-              arch::reg_scratch_0));
-      // PyObject *r8 = &r8->ob_item[0];
-      as_->add(a64::x8, a64::x8, offsetof(PyTupleObject, ob_item));
-      // PyObject *r11 = &r8->ob_item[r11];
-      as_->add(a64::x11, a64::x8, a64::x11, a64::lsl(3));
-
-      as_->bind(arg_loop);
-      as_->ldr(arch::reg_scratch_0, a64::ptr(a64::x8));
-      as_->cmp(arch::reg_scratch_0, a64::x10);
-      as_->b_eq(next_arg);
-      as_->add(a64::x8, a64::x8, sizeof(PyObject*));
-      as_->cmp(a64::x8, a64::x11);
-      as_->b_ne(arg_loop);
-    }
-
-    // no args match, bail to normal vector call to report error
-    as_->b(env_.static_arg_typecheck_failed_label);
-    bool last_check = i == 0;
-    if (!last_check) {
-      as_->bind(next_arg);
-    }
-    env_.addAnnotation(
-        fmt::format("StaticTypeCheck[{}]", arg.pytype->tp_name), check_cursor);
-  }
-#else
-  CINDER_UNSUPPORTED
-#endif
-}
-
-void NativeGenerator::generateEpilogue(BaseNode* epilogue_cursor) {
-  as_->setCursor(epilogue_cursor);
-
-  // now we can use all the caller save registers except for RAX
-  as_->bind(env_.exit_label);
-
-#if defined(CINDER_X86_64)
-  bool is_gen = GetFunction()->code->co_flags & kCoFlagsAnyGenerator;
-  if (is_gen) {
-#if PY_VERSION_HEX < 0x030C0000
-    // Set generator state to "completed". We access the state via RBP which
-    // points to the of spill data and bottom of GenDataFooter.
-    auto state_offs = offsetof(GenDataFooter, state);
-    as_->mov(
-        x86::ptr(x86::rbp, state_offs, sizeof(GenDataFooter::state)),
-        Ci_JITGenState_Completed);
-#else
-    // ((GenDataFooter*)rbp)->gen->gi_frame_state = FRAME_COMPLETED
-    // RDX is an arbitrary scratch register - any caller saved reg is fine.
-    auto gen_offs = offsetof(GenDataFooter, gen);
-    as_->mov(x86::rdx, x86::ptr(x86::rbp, gen_offs));
-    as_->mov(
-        x86::ptr(
-            x86::rdx,
-            offsetof(PyGenObject, gi_frame_state),
-            sizeof(PyGenObject::gi_frame_state)),
-#if PY_VERSION_HEX >= 0x030F0000
-        FRAME_CLEARED);
-#else
-        FRAME_COMPLETED);
-#endif
-#endif
-    as_->bind(env_.exit_for_yield_label);
-    RestoreOriginalGeneratorFramePointer(as_);
-  }
-
-#if PY_VERSION_HEX >= 0x030C0000
-  // Generator frame linkage for resumed generators is handled by the generator
-  // object i.e. in generators_rt. For the initial yield unlinking happens as
-  // part of the YieldInitial LIR instruction.
-  if (!is_gen) {
-    frame_asm_.generateUnlinkFrame(false);
-  }
-#else
-  // Ideally this would also be the same in 3.10 as well but I spent maybe half
-  // a day trying to change things and gave up. Our implementation is really
-  // wonky and a clear ownership model is made difficult by shadow frames. It's
-  // probably subtly broken somewhere.
-  frame_asm_.generateUnlinkFrame(is_gen);
-#endif
-
-  // If we return a primitive, set edx/xmm1 to 1 to indicate no error (in case
-  // of error, deopt will set it to 0 and jump to hard_exit_label, skipping
-  // this.)
-  if (func_->returnsPrimitive()) {
-    JIT_CHECK(!is_gen, "generators can't return primitives");
-    if (func_->returnsPrimitiveDouble()) {
-      // Loads an *integer* 1 in XMM1.. value doesn't matter,
-      // but it needs to be non-zero. See pg 124,
-      // https://www.agner.org/optimize/optimizing_assembly.pdf
-      as_->pcmpeqw(x86::xmm1, x86::xmm1);
-      as_->psrlq(x86::xmm1, 63);
-    } else {
-      as_->mov(x86::edx, 1);
-    }
-  }
-
-  as_->bind(env_.hard_exit_label);
-  asmjit::BaseNode* epilogue_error_cursor = as_->cursor();
-
-  auto saved_regs = env_.changed_regs & CALLEE_SAVE_REGS;
-  if (!saved_regs.Empty()) {
-    // Reset rsp to point at our callee-saved registers and restore them.
-    JIT_CHECK(
-        env_.last_callee_saved_reg_off != -1,
-        "offset to callee saved regs not initialized");
-    as_->lea(x86::rsp, x86::ptr(x86::rbp, -env_.last_callee_saved_reg_off));
-
-    while (!saved_regs.Empty()) {
-      as_->pop(x86::gpq(saved_regs.GetLast().loc));
-      saved_regs.RemoveLast();
-    }
-  }
-
-  generateFunctionExit();
-
-  env_.addAnnotation(
-      "Epilogue (restore regs; pop native frame; error exit)",
-      epilogue_error_cursor);
-  env_.addAnnotation("Epilogue", epilogue_cursor);
-  if (env_.function_indirections.size()) {
-    auto jit_helpers = as_->cursor();
-    for (auto& x : env_.function_indirections) {
-      Label trampoline = as_->newLabel();
-      as_->bind(trampoline);
-      as_->mov(x86::r10, reinterpret_cast<uint64_t>(x.first));
-      as_->jmp(reinterpret_cast<uint64_t>(failed_deferred_compile_trampoline_));
-      x.second.trampoline = trampoline;
-    }
-    env_.addAnnotation("JitHelpers", jit_helpers);
-  }
-#elif defined(CINDER_AARCH64)
-  bool is_gen = GetFunction()->code->co_flags & kCoFlagsAnyGenerator;
-  if (is_gen) {
-#if PY_VERSION_HEX < 0x030C0000
-    CINDER_UNSUPPORTED
-#else
-    // ((GenDataFooter*) fp)->gen->gi_frame_state = FRAME_COMPLETED
-    // X2 is an arbitrary scratch register - any caller saved reg is fine.
-    auto gen_offs = offsetof(GenDataFooter, gen);
-    as_->ldr(
-        a64::x2,
-        arch::ptr_resolve(as_, arch::fp, gen_offs, arch::reg_scratch_0));
-    as_->mov(
-        arch::reg_scratch_0,
-#if PY_VERSION_HEX >= 0x030F0000
-        FRAME_CLEARED
-#else
-        FRAME_COMPLETED
-#endif
-    );
-
-    static_assert(sizeof(PyGenObject::gi_frame_state) == 1);
-    as_->strb(
-        arch::reg_scratch_0.w(),
-        arch::ptr_resolve(
-            as_,
-            a64::x2,
-            offsetof(PyGenObject, gi_frame_state),
-            arch::reg_scratch_1,
-            arch::AccessSize::k8));
-#endif
-    as_->bind(env_.exit_for_yield_label);
-    RestoreOriginalGeneratorFramePointer(as_);
-  }
-
-#if PY_VERSION_HEX >= 0x030C0000
-  // Generator frame linkage for resumed generators is handled by the generator
-  // object i.e. in generators_rt. For the initial yield unlinking happens as
-  // part of the YieldInitial LIR instruction.
-  if (!is_gen) {
-    frame_asm_.generateUnlinkFrame(false);
-  }
-#else
-  CINDER_UNSUPPORTED
-#endif
-
-  // If we return a primitive, set w2/d0 to 1 to indicate no error (in case
-  // of error, deopt will set it to 0 and jump to hard_exit_label, skipping
-  // this.)
-  if (func_->returnsPrimitive()) {
-    JIT_CHECK(!is_gen, "generators can't return primitives");
-    if (func_->returnsPrimitiveDouble()) {
-      // Loads an *integer* 1 in D0.. value doesn't matter,
-      // but it needs to be non-zero.
-      as_->movi(a64::d0, 1);
-    } else {
-      as_->mov(a64::w2, 1);
-    }
-  }
-
-  as_->bind(env_.hard_exit_label);
-  asmjit::BaseNode* epilogue_error_cursor = as_->cursor();
-
-  auto saved_regs = env_.changed_regs & CALLEE_SAVE_REGS;
-  if (!saved_regs.Empty()) {
-    // Reset the stack pointer to point at our callee-saved registers and
-    // restore them.
-    JIT_CHECK(
-        env_.last_callee_saved_reg_off != -1,
-        "offset to callee saved regs not initialized");
-
-    JIT_CHECK(env_.last_callee_saved_reg_off % kStackAlign == 0, "unaligned");
-
-    if (env_.last_callee_saved_reg_off >= 0) {
-      as_->sub(a64::sp, arch::fp, env_.last_callee_saved_reg_off);
-    } else {
-      as_->add(a64::sp, arch::fp, -env_.last_callee_saved_reg_off);
-    }
-
-    restoreCalleeSavedRegsAarch64(as_, saved_regs);
-  }
-
-  generateFunctionExit();
-
-  env_.addAnnotation(
-      "Epilogue (restore regs; pop native frame; error exit)",
-      epilogue_error_cursor);
-  env_.addAnnotation("Epilogue", epilogue_cursor);
-  if (env_.function_indirections.size()) {
-    auto jit_helpers = as_->cursor();
-    for (auto& x : env_.function_indirections) {
-      Label trampoline = as_->newLabel();
-      as_->bind(trampoline);
-      as_->mov(a64::x10, reinterpret_cast<uint64_t>(x.first));
-      as_->mov(arch::reg_scratch_br, failed_deferred_compile_trampoline_);
-      as_->blr(arch::reg_scratch_br);
-      x.second.trampoline = trampoline;
-    }
-    env_.addAnnotation("JitHelpers", jit_helpers);
-  }
-#else
-  CINDER_UNSUPPORTED
-#endif
-}
-
-void NativeGenerator::generateDeoptExits(const asmjit::CodeHolder& code) {
-  if (env_.deopt_exits.empty()) {
-    return;
-  }
-
-#if defined(CINDER_X86_64)
-  // Always place the deopt exit call to the cold section, and revert to the
-  // previous section at the end of this scope.
-  CodeSectionOverride override{as_, &code, &metadata_, CodeSection::kCold};
-
-  auto& deopt_exits = env_.deopt_exits;
-
-  auto deopt_cursor = as_->cursor();
-  auto deopt_exit = as_->newLabel();
-  std::sort(deopt_exits.begin(), deopt_exits.end(), [](auto& a, auto& b) {
-    return a.deopt_meta_index < b.deopt_meta_index;
-  });
-  // Generate stage 1 trampolines (one per guard). These push the index of the
-  // appropriate `DeoptMetadata` and then jump to the stage 2 trampoline.
-  for (const auto& exit : deopt_exits) {
-    as_->bind(exit.label);
-    as_->push(exit.deopt_meta_index);
-    emitCall(env_, deopt_exit, exit.instr);
-  }
-  // Generate the stage 2 trampoline (one per function). This saves the address
-  // of the final part of the JIT-epilogue that is responsible for restoring
-  // callee-saved registers and returning, our scratch register, whose original
-  // contents may be needed during frame reification, and jumps to the final
-  // trampoline.
-  //
-  // Right now the top of the stack looks like:
-  //
-  // +-------------------------+ <-- end of JIT's fixed frame
-  // | index of deopt metadata |
-  // | saved rip               |
-  // +-------------------------+
-  //
-  // and we need to pass our scratch register and the address of the epilogue
-  // to the global deopt trampoline. The code below leaves the stack with the
-  // following layout:
-  //
-  // +-------------------------+ <-- end of JIT's fixed frame
-  // | index of deopt metadata |
-  // | saved rip               |
-  // | padding                 |
-  // | padding                 |
-  // | address of CodeRuntime  |
-  // | address of epilogue     |
-  // | r15                     |
-  // +-------------------------+
-  //
-  // The global deopt trampoline expects that our scratch register is at the
-  // top of the stack so that it can save the remaining registers immediately
-  // after it, forming a contiguous array of all registers.
-  //
-  // If you change this make sure you update that code!
-  as_->bind(deopt_exit);
-
-  // Two slots for padding.  One of them will get the deopt metadata index
-  // shuffled in, making space to save RBP before calling prepareForDeopt.
-  as_->push(deopt_scratch_reg);
-  as_->push(deopt_scratch_reg);
-
-  // Save space for the CodeRuntime.
-  as_->push(deopt_scratch_reg);
-
-  // Save space for the epilogue.
-  as_->push(deopt_scratch_reg);
-
-  // Save our scratch register.
-  as_->push(deopt_scratch_reg);
-
-  // Save the address of the CodeRuntime.
-  as_->mov(deopt_scratch_reg, reinterpret_cast<uintptr_t>(env_.code_rt));
-  as_->mov(x86::ptr(x86::rsp, kPointerSize * 2), deopt_scratch_reg);
-
-  // Save the address of the epilogue.
-  as_->lea(deopt_scratch_reg, x86::ptr(env_.hard_exit_label));
-  as_->mov(x86::ptr(x86::rsp, kPointerSize), deopt_scratch_reg);
-
-  auto trampoline = GetFunction()->code->co_flags & kCoFlagsAnyGenerator
-      ? deopt_trampoline_generators_
-      : deopt_trampoline_;
-  as_->mov(deopt_scratch_reg, reinterpret_cast<uint64_t>(trampoline));
-  as_->jmp(deopt_scratch_reg);
-
-  env_.addAnnotation("Deoptimization exits", deopt_cursor);
-#elif defined(CINDER_AARCH64)
-  // Always place the deopt exit call to the cold section, and revert to the
-  // previous section at the end of this scope.
-  CodeSectionOverride override{as_, &code, &metadata_, CodeSection::kCold};
-
-  auto& deopt_exits = env_.deopt_exits;
-
-  auto deopt_cursor = as_->cursor();
-  auto deopt_exit = as_->newLabel();
-  std::sort(deopt_exits.begin(), deopt_exits.end(), [](auto& a, auto& b) {
-    return a.deopt_meta_index < b.deopt_meta_index;
-  });
-
-  // Generate stage 1 trampolines (one per guard). These push the index of the
-  // appropriate `DeoptMetadata` and then jump to the stage 2 trampoline.
-  for (const auto& exit : deopt_exits) {
-    // On x86-64, when you emit a call instruction to a label, it pushes the
-    // return address onto the stack. In order to replicate that behavior on
-    // aarch64, we manually add a label and use adr to determine its offset.
-    auto after = as_->newLabel();
-
-    as_->bind(exit.label);
-    as_->mov(arch::reg_scratch_0, exit.deopt_meta_index);
-    as_->adr(arch::reg_scratch_1, after);
-    as_->stp(
-        arch::reg_scratch_1, arch::reg_scratch_0, a64::ptr_pre(a64::sp, -16));
-    emitCall(env_, deopt_exit, exit.instr);
-    as_->bind(after);
-  }
-  // Generate the stage 2 trampoline (one per function). This saves the address
-  // of the final part of the JIT-epilogue that is responsible for restoring
-  // callee-saved registers and returning, our scratch register, whose original
-  // contents may be needed during frame reification, and jumps to the final
-  // trampoline.
-  //
-  // Right now the top of the stack looks like:
-  //
-  // +-------------------------+ <-- end of JIT's fixed frame
-  // | index of deopt metadata |
-  // | saved pc                | <-- sp
-  // +-------------------------+
-  //
-  // and we need to pass our scratch register and the address of the epilogue
-  // to the global deopt trampoline. The code below leaves the stack with the
-  // following layout:
-  //
-  // +-------------------------+ <-- end of JIT's fixed frame
-  // | index of deopt metadata |
-  // | saved pc                |
-  // | padding (8 bytes)       |
-  // | padding (8 bytes)       |
-  // | address of CodeRuntime  |
-  // | address of epilogue     |
-  // | fp                      |
-  // | x28                     | <-- sp
-  // +-------------------------+
-  //
-  // The global deopt trampoline expects that our scratch register is at the
-  // top of the stack so that it can save the remaining registers immediately
-  // after it, forming a contiguous array of all registers.
-  //
-  // If you change this make sure you update that code!
-  as_->bind(deopt_exit);
-
-  // Two slots for padding, then the address of the CodeRuntime and the address
-  // of the epilogue, then the first of the registers to get stored (fp and
-  // x28). One of the slots of padding will get the deopt metadata index
-  // shuffled in, making space to save fp before calling prepareForDeopt.
-  as_->stp(deopt_scratch_reg, arch::fp, a64::ptr_pre(a64::sp, -0x30));
-
-  // Save the address of the CodeRuntime.
-  as_->mov(deopt_scratch_reg, reinterpret_cast<uintptr_t>(env_.code_rt));
-  as_->str(
-      deopt_scratch_reg,
-      arch::ptr_resolve(as_, a64::sp, kPointerSize * 3, arch::reg_scratch_0));
-
-  // Save the address of the epilogue.
-  as_->adr(deopt_scratch_reg, env_.hard_exit_label);
-  as_->str(
-      deopt_scratch_reg,
-      arch::ptr_resolve(as_, a64::sp, kPointerSize * 2, arch::reg_scratch_0));
-
-  auto trampoline = GetFunction()->code->co_flags & kCoFlagsAnyGenerator
-      ? deopt_trampoline_generators_
-      : deopt_trampoline_;
-  as_->mov(deopt_scratch_reg, trampoline);
-  as_->br(deopt_scratch_reg);
-
-  env_.addAnnotation("Deoptimization exits", deopt_cursor);
-#else
-  CINDER_UNSUPPORTED
-#endif
 }
 
 void NativeGenerator::linkDeoptPatchers(const asmjit::CodeHolder& code) {
@@ -2358,7 +1069,19 @@ void NativeGenerator::linkDeoptPatchers(const asmjit::CodeHolder& code) {
 
     // Register patcher with the runtime if it is type-based.
     if (auto typed_patcher = dynamic_cast<TypeDeoptPatcher*>(udp.patcher)) {
-      env_.ctx->watchType(typed_patcher->type(), typed_patcher);
+      // The watch is installed in finalizeMultiThreadedCompile() for threaded
+      // compiles, by which time the type may have changed without the watch
+      // firing. Re-validate the patcher's assumptions before watching,
+      // preferring a validator attached at the patchpoint's creation site.
+      Context::TypeWatchValidator validator =
+          func_->env.watchValidator(typed_patcher);
+      if (validator == nullptr) {
+        validator = [typed_patcher] {
+          return typed_patcher->assumptionsStillValid();
+        };
+      }
+      env_.ctx->watchType(
+          typed_patcher->type(), typed_patcher, std::move(validator));
     }
   }
 
@@ -2372,500 +1095,286 @@ void NativeGenerator::linkDeoptPatchers(const asmjit::CodeHolder& code) {
 }
 
 Py_ssize_t NativeGenerator::giJITDataOffset() {
-#if PY_VERSION_HEX < 0x030C0000
-  return static_cast<Py_ssize_t>(offsetof(PyGenObject, gi_jit_data));
-#else
   Py_ssize_t python_frame_slots =
-      _PyFrame_NumSlotsForCodeObject(GetFunction()->code);
+      _PyFrame_NumSlotsForCodeObject(getFunction()->code);
   return _PyObject_VAR_SIZE(
-      cinderx::getModuleState()->genType(), python_frame_slots);
-#endif
-}
-
-void NativeGenerator::generateResumeEntry(const FrameInfo& frame_info) {
-#if defined(CINDER_X86_64)
-  // Arbitrary scratch register for use throughout this function. Can be changed
-  // to pretty much anything which doesn't conflict with arg registers.
-  const auto scratch_r = x86::r8;
-
-  // arg #1 - rdi = PyGenObject/JitGenObject* generator
-  // arg #2 - rsi = PyObject* sent_value
-  // arg #3 - rdx = finish_yield_from
-  // arg #4 - rcx = tstate
-  // Arg regs must not be modified as they may be used by the next resume stage.
-  auto cursor = as_->cursor();
-  as_->bind(env_.gen_resume_entry_label);
-
-  generateFunctionEntry();
-  setupFrameAndSaveCallerRegisters(frame_info, x86::rcx);
-
-  // Setup RBP to use storage in generator rather than stack.
-
-  // Pointer to GenDataFooter. Could be any conflict-free register.
-  const auto jit_data_r = x86::r9;
-
-  // jit_data_r = gen->gi_jit_data
-  as_->mov(jit_data_r, x86::ptr(x86::rdi, giJITDataOffset()));
-
-  // Store linked frame address
-  size_t link_address_offset = offsetof(GenDataFooter, linkAddress);
-  as_->mov(scratch_r, x86::ptr(x86::rbp));
-  as_->mov(x86::ptr(jit_data_r, link_address_offset), scratch_r);
-
-  // Store return address
-  size_t return_address_offset = offsetof(GenDataFooter, returnAddress);
-  as_->mov(scratch_r, x86::ptr(x86::rbp, 8));
-  as_->mov(x86::ptr(jit_data_r, return_address_offset), scratch_r);
-
-  // Store "original" RBP
-  size_t original_frame_pointer_offset =
-      offsetof(GenDataFooter, originalFramePointer);
-  as_->mov(x86::ptr(jit_data_r, original_frame_pointer_offset), x86::rbp);
-
-  // RBP = gen->gi_jit_data
-  as_->mov(x86::rbp, jit_data_r);
-
-  // Resume generator execution: load and clear yieldPoint, then jump to the
-  // resume target.
-  size_t yield_point_offset = offsetof(GenDataFooter, yieldPoint);
-  as_->mov(scratch_r, x86::ptr(x86::rbp, yield_point_offset));
-  as_->mov(x86::qword_ptr(x86::rbp, yield_point_offset), 0);
-  size_t resume_target_offset = GenYieldPoint::resumeTargetOffset();
-  as_->jmp(x86::ptr(scratch_r, resume_target_offset));
-
-  env_.addAnnotation("Resume entry point", cursor);
-#elif defined(CINDER_AARCH64)
-  // Arbitrary scratch register for use throughout this function. Can be changed
-  // to pretty much anything which doesn't conflict with arg registers and is
-  // not a callee-saved register.
-  const auto scratch_r = a64::x8;
-
-  // arg #1 - x0 = PyGenObject/JitGenObject* generator
-  // arg #2 - x1 = PyObject* sent_value
-  // arg #3 - x2 = finish_yield_from
-  // arg #4 - x3 = tstate
-  // Arg regs must not be modified as they may be used by the next resume stage.
-  auto cursor = as_->cursor();
-  as_->bind(env_.gen_resume_entry_label);
-
-  generateFunctionEntry();
-  setupFrameAndSaveCallerRegisters(frame_info, a64::x3);
-
-  // Setup X29 (FP) to use storage in generator rather than stack.
-
-  // Pointer to GenDataFooter. Could be any conflict-free register.
-  const auto jit_data_r = a64::x9;
-
-  // jit_data_r = gen->gi_jit_data
-  as_->ldr(
-      jit_data_r,
-      arch::ptr_resolve(as_, a64::x0, giJITDataOffset(), arch::reg_scratch_0));
-
-  // Store linked frame address
-  size_t link_address_offset = offsetof(GenDataFooter, linkAddress);
-  as_->ldr(scratch_r, a64::ptr(arch::fp));
-  as_->str(
-      scratch_r,
-      arch::ptr_resolve(
-          as_, jit_data_r, link_address_offset, arch::reg_scratch_0));
-
-  // Store return address
-  size_t return_address_offset = offsetof(GenDataFooter, returnAddress);
-  as_->ldr(scratch_r, arch::ptr_resolve(as_, arch::fp, 8, arch::reg_scratch_0));
-  as_->str(
-      scratch_r,
-      arch::ptr_resolve(
-          as_, jit_data_r, return_address_offset, arch::reg_scratch_0));
-
-  // Store "original" X29 (FP)
-  size_t original_frame_pointer_offset =
-      offsetof(GenDataFooter, originalFramePointer);
-  as_->str(
-      arch::fp,
-      arch::ptr_resolve(
-          as_, jit_data_r, original_frame_pointer_offset, arch::reg_scratch_0));
-
-  // X29 = gen->gi_jit_data
-  as_->mov(arch::fp, jit_data_r);
-
-  // Resume generator execution: load and clear yieldPoint, then jump to the
-  // resume target.
-  size_t yield_point_offset = offsetof(GenDataFooter, yieldPoint);
-  as_->ldr(
-      scratch_r,
-      arch::ptr_resolve(
-          as_, arch::fp, yield_point_offset, arch::reg_scratch_0));
-  as_->str(
-      a64::xzr,
-      arch::ptr_resolve(
-          as_, arch::fp, yield_point_offset, arch::reg_scratch_0));
-  size_t resume_target_offset = GenYieldPoint::resumeTargetOffset();
-  as_->ldr(
-      arch::reg_scratch_br,
-      arch::ptr_resolve(
-          as_, scratch_r, resume_target_offset, arch::reg_scratch_0));
-  as_->br(arch::reg_scratch_br);
-
-  env_.addAnnotation("Resume entry point", cursor);
-#else
-  CINDER_UNSUPPORTED
-#endif
+      cinderx::getModuleState()->gen_type, python_frame_slots);
 }
 
 void NativeGenerator::generateStaticEntryPoint(
-    const FrameInfo& frame_info,
     Label finish_frame_setup,
     Label static_jmp_location) {
 #if defined(CINDER_X86_64)
-  // Static entry point is the first thing in the method, we'll
-  // jump back to hit it so that we have a fixed offset to jump from
-  auto static_link_cursor = as_->cursor();
-  Label static_entry_point = as_->newLabel();
-  as_->bind(static_entry_point);
+  auto static_entry_cursor = as_->cursor();
+  as_->bind(static_jmp_location);
 
   generateFunctionEntry();
 
-  // Save incoming args across link call...
-  size_t total_args = (size_t)GetFunction()->numArgs();
+  size_t total_args = (size_t)getFunction()->numArgs();
 
-  const std::vector<TypedArgument>& checks = GetFunction()->typed_args;
-  std::vector<std::pair<const arch::Reg&, const arch::Reg&>> save_regs;
-
-  if (linkFrameNeedsSpill()) {
-    save_regs.emplace_back(x86::rdi, x86::rdi);
-    for (size_t i = 0, check_index = 0, arg_index = 0, fp_index = 0;
-         i < total_args;
-         i++) {
-      if (check_index < checks.size() &&
-          checks[check_index].locals_idx == static_cast<int>(i)) {
-        if (checks[check_index++].jit_type <= TCDouble &&
-            fp_index < FP_ARGUMENT_REGS.size()) {
-          switch (FP_ARGUMENT_REGS[fp_index++].loc) {
-            case XMM0.loc:
-              save_regs.emplace_back(x86::xmm0, x86::xmm0);
-              break;
-            case XMM1.loc:
-              save_regs.emplace_back(x86::xmm1, x86::xmm1);
-              break;
-            case XMM2.loc:
-              save_regs.emplace_back(x86::xmm2, x86::xmm2);
-              break;
-            case XMM3.loc:
-              save_regs.emplace_back(x86::xmm3, x86::xmm3);
-              break;
-            case XMM4.loc:
-              save_regs.emplace_back(x86::xmm4, x86::xmm4);
-              break;
-            case XMM5.loc:
-              save_regs.emplace_back(x86::xmm5, x86::xmm5);
-              break;
-            case XMM6.loc:
-              save_regs.emplace_back(x86::xmm6, x86::xmm6);
-              break;
-            case XMM7.loc:
-              save_regs.emplace_back(x86::xmm7, x86::xmm7);
-              break;
-            default:
-              break;
-          }
-          continue;
-        }
-      }
-
-      if (arg_index + 1 < ARGUMENT_REGS.size()) {
-        switch (ARGUMENT_REGS[++arg_index].loc) {
-          case RDI.loc:
-            save_regs.emplace_back(x86::rdi, x86::rdi);
-            break;
-          case RSI.loc:
-            save_regs.emplace_back(x86::rsi, x86::rsi);
-            break;
-          case RDX.loc:
-            save_regs.emplace_back(x86::rdx, x86::rdx);
-            break;
-          case RCX.loc:
-            save_regs.emplace_back(x86::rcx, x86::rcx);
-            break;
-          case R8.loc:
-            save_regs.emplace_back(x86::r8, x86::r8);
-            break;
-          case R9.loc:
-            save_regs.emplace_back(x86::r9, x86::r9);
-            break;
-          default:
-            break;
-        }
-      }
-    }
-  }
-
-  bool need_extra_args_load = total_args + 1 > ARGUMENT_REGS.size();
-  if constexpr (PY_VERSION_HEX >= 0x030C0000) {
-    if (need_extra_args_load && isGen()) {
-      // In 3.12 for generators we'll end up replacing rbp with a pointer
-      // into the generator object when we link the frame. We need to
-      // capture the incoming arguments first, which will mean we'll
-      // need to save and restore the register.
-      as_->lea(x86::r10, x86::ptr(x86::rbp, 16));
-      save_regs.emplace_back(x86::r10, x86::r10);
-      need_extra_args_load = false;
-    }
-  }
-
-  // Ensure that rsp is below the fields in the stack allocated interpreter
-  // frame that may be initialized in the `generateLinkFrame` call below,
-  // preventing the signal handling routine in the kernel from overwriting
-  // them.
-  int padding = allocateHeaderAndSpillSpace(frame_info);
-
-  frame_asm_.generateLinkFrame(
-      x86::gpq(INITIAL_FUNC_REG.loc),
-      x86::gpq(INITIAL_TSTATE_REG.loc),
-      save_regs);
-
-  // We already allocated stack space for the header and spill data, clean
-  // up any alignment padding we added
-  if (padding) {
-    as_->add(x86::rsp, padding);
-  }
-
-  if (need_extra_args_load) {
+  if (total_args + 1 > ARGUMENT_REGS.size()) {
+    // Capture the extra args pointer from the stack. For generators on 3.12+
+    // this must happen before frame linking replaces rbp.
     as_->lea(x86::r10, x86::ptr(x86::rbp, 16));
+  } else {
+    for (int i = 0; i < 4; i++) {
+      as_->nop();
+    }
   }
-  as_->jmp(finish_frame_setup);
-  env_.addAnnotation("StaticLinkFrame", static_link_cursor);
-  auto static_entry_point_cursor = as_->cursor();
 
-  as_->bind(static_jmp_location);
-  // force a long jump even if the static entry point is small so that we get
-  // a consistent offset for the static entry point from the normal entry point.
-  as_->long_().jmp(static_entry_point);
-  env_.addAnnotation("StaticEntryPoint", static_entry_point_cursor);
+  as_->jmp(finish_frame_setup);
+  env_.addAnnotation("StaticEntryPoint", static_entry_cursor);
 #elif defined(CINDER_AARCH64)
-  // Static entry point is the first thing in the method, we'll
-  // jump back to hit it so that we have a fixed offset to jump from
-  auto static_link_cursor = as_->cursor();
-  Label static_entry_point = as_->newLabel();
-  as_->bind(static_entry_point);
+  // Emit the static entry point inline at the fixed-offset location.
+  auto static_entry_cursor = as_->cursor();
+  as_->bind(static_jmp_location);
 
   generateFunctionEntry();
 
-  // Save incoming args across link call...
-  size_t total_args = (size_t)GetFunction()->numArgs();
+  size_t total_args = (size_t)getFunction()->numArgs();
 
-  const std::vector<TypedArgument>& checks = GetFunction()->typed_args;
-  std::vector<std::pair<const arch::Reg&, const arch::Reg&>> save_regs;
-
-  if (linkFrameNeedsSpill()) {
-    save_regs.emplace_back(a64::x0, a64::x0);
-    for (size_t i = 0, check_index = 0, arg_index = 0, fp_index = 0;
-         i < total_args;
-         i++) {
-      if (check_index < checks.size() &&
-          checks[check_index].locals_idx == static_cast<int>(i)) {
-        if (checks[check_index++].jit_type <= TCDouble &&
-            fp_index < FP_ARGUMENT_REGS.size()) {
-          switch (FP_ARGUMENT_REGS[fp_index++].loc) {
-            case D0.loc:
-              save_regs.emplace_back(a64::d0, a64::d0);
-              break;
-            case D1.loc:
-              save_regs.emplace_back(a64::d1, a64::d1);
-              break;
-            case D2.loc:
-              save_regs.emplace_back(a64::d2, a64::d2);
-              break;
-            case D3.loc:
-              save_regs.emplace_back(a64::d3, a64::d3);
-              break;
-            case D4.loc:
-              save_regs.emplace_back(a64::d4, a64::d4);
-              break;
-            case D5.loc:
-              save_regs.emplace_back(a64::d5, a64::d5);
-              break;
-            case D6.loc:
-              save_regs.emplace_back(a64::d6, a64::d6);
-              break;
-            case D7.loc:
-              save_regs.emplace_back(a64::d7, a64::d7);
-              break;
-            default:
-              break;
-          }
-          continue;
-        }
-      }
-
-      if (arg_index + 1 < ARGUMENT_REGS.size()) {
-        switch (ARGUMENT_REGS[++arg_index].loc) {
-          case X0.loc:
-            save_regs.emplace_back(a64::x0, a64::x0);
-            break;
-          case X1.loc:
-            save_regs.emplace_back(a64::x1, a64::x1);
-            break;
-          case X2.loc:
-            save_regs.emplace_back(a64::x2, a64::x2);
-            break;
-          case X3.loc:
-            save_regs.emplace_back(a64::x3, a64::x3);
-            break;
-          case X4.loc:
-            save_regs.emplace_back(a64::x4, a64::x4);
-            break;
-          case X5.loc:
-            save_regs.emplace_back(a64::x5, a64::x5);
-            break;
-          case X6.loc:
-            save_regs.emplace_back(a64::x6, a64::x6);
-            break;
-          case X7.loc:
-            save_regs.emplace_back(a64::x7, a64::x7);
-            break;
-          default:
-            break;
-        }
-      }
-    }
+  if (total_args + 1 > ARGUMENT_REGS.size()) {
+    // Capture the extra args pointer from the stack. For generators on 3.12+
+    // this must happen before frame linking replaces fp.
+    as_->add(a64::x10, arch::fp, arch::kFrameRecordSize);
+  } else {
+    as_->nop();
   }
 
-  bool need_extra_args_load = total_args + 1 > ARGUMENT_REGS.size();
-  if constexpr (PY_VERSION_HEX >= 0x030C0000) {
-    if (need_extra_args_load && isGen()) {
-      // In 3.12 for generators we'll end up replacing fp with a pointer
-      // into the generator object when we link the frame. We need to
-      // capture the incoming arguments first, which will mean we'll
-      // need to save and restore the register.
-      as_->add(a64::x10, arch::fp, 16);
-      save_regs.emplace_back(a64::x10, a64::x10);
-      need_extra_args_load = false;
-    }
-  }
-
-  // Ensure that sp is below the fields in the stack allocated interpreter
-  // frame that may be initialized in the `generateLinkFrame` call below,
-  // preventing the signal handling routine in the kernel from overwriting
-  // them.
-  allocateHeaderAndSpillSpace(frame_info);
-
-  frame_asm_.generateLinkFrame(
-      a64::x(INITIAL_FUNC_REG.loc), a64::x(INITIAL_TSTATE_REG.loc), save_regs);
-
-  if (need_extra_args_load) {
-    as_->add(a64::x10, arch::fp, 16);
-  }
   as_->b(finish_frame_setup);
-  env_.addAnnotation("StaticLinkFrame", static_link_cursor);
-  auto static_entry_point_cursor = as_->cursor();
-
-  as_->bind(static_jmp_location);
-  as_->b(static_entry_point);
-  env_.addAnnotation("StaticEntryPoint", static_entry_point_cursor);
+  env_.addAnnotation("StaticEntryPoint", static_entry_cursor);
 #else
   CINDER_UNSUPPORTED
 #endif
 }
 
 bool NativeGenerator::hasStaticEntry() const {
-  PyCodeObject* code = GetFunction()->code;
+  PyCodeObject* code = getFunction()->code;
   return (code->co_flags & CI_CO_STATICALLY_COMPILED);
 }
 
-void NativeGenerator::generateCode(CodeHolder& codeholder) {
-  // The body must be generated before the prologue to determine how much spill
-  // space to allocate.
-  auto prologue_cursor = as_->cursor();
-  generateAssemblyBody(codeholder);
+void NativeGenerator::generatePrologueBlocks(lir::BasicBlock* frameSetupBlock) {
+  // Pre-assign finish_frame_setup to the frame setup block so
+  // generateAssemblyBody binds it at the block's start.
+  env_.block_label_map[frameSetupBlock] = env_.finish_frame_setup;
 
-  auto epilogue_cursor = as_->cursor();
+  // Build pre-body LIR blocks in assembly order. Each Generate* call appends
+  // blocks to the end. The body blocks (from TranslateFunction) are already
+  // at the front.
+  //
+  // We pre-allocate the entry block (for arg loading), remove it from the
+  // list, generate all other prologue blocks (which append in the correct
+  // order), then push the entry block back at the end — right before the
+  // body blocks. A single rotate then moves the entire prologue prefix to
+  // the front.
+  //
+  // Final block order:
+  //   [wrapper?] [func_entry] [argcount/primitive] [typechecks?]
+  //   [entry(args)] [body...] [exit] [resume?] [deopt_exits]
+  auto& blocks = lir_func_->basicBlocks();
+  size_t body_end = blocks.size();
 
-  as_->setCursor(prologue_cursor);
+  auto* entry_block = lir_func_->allocateBasicBlock();
+  blocks.pop_back();
+  env_.block_label_map[entry_block] = env_.correct_arg_count;
 
-  Label correct_arg_count = as_->newLabel();
-  Label finish_frame_setup = as_->newLabel();
-  Label static_jmp_location = as_->newLabel();
-  auto frame_info = computeFrameInfo();
-
-  bool has_static_entry = hasStaticEntry();
-  if (has_static_entry) {
-    // Setup an entry point for direct static to static
-    // calls using the native calling convention
-    generateStaticEntryPoint(
-        frame_info, finish_frame_setup, static_jmp_location);
+  // Boxed-return wrapper (if needed) — comes first so the vectorcall entry
+  // falls through to it.
+  Label generic_entry;
+  if (func_->returnsPrimitive()) {
+    generic_entry = as_->newLabel();
+    env_.wrapper_exit = as_->newLabel();
+    lir::GenerateBoxedReturnWrapperBlocks(
+        lir_func_.get(), func_->return_type, generic_entry, env_.wrapper_exit);
   }
 
-  // Setup an entry for when we have the correct number of arguments
-  // This will be dispatched back to from JITRT_CallWithIncorrectArgcount and
-  // JITRT_CallWithKeywordArgs when we need to perform complicated
-  // argument binding.
+  // Function entry prologue (push rbp / mov rbp, rsp).
+  lir::GenerateFunctionEntryBlock(lir_func_.get());
+  if (generic_entry.isValid()) {
+    env_.block_label_map[lir_func_->basicBlocks().back()] = generic_entry;
+  }
+
+  // Argcount check or primitive-args prologue. The correct-args path
+  // branches to correct_arg_count, which is assigned below to either the
+  // typecheck dispatch block (if type checks exist) or the entry block.
+  env_.prologue_exit = as_->newLabel();
+  if (func_->has_primitive_args) {
+    BorrowedRef<_PyTypedArgsInfo> info = func_->prim_args_info;
+    env_.addReference(info);
+
+    lir::GeneratePrimitiveArgsPrologueBlock(
+        lir_func_.get(),
+        reinterpret_cast<PyObject*>(info.get()),
+        func_->returnsPrimitiveDouble(),
+        env_.prologue_exit);
+  } else {
+    lir::GenerateArgcountCheckBlocks(
+        lir_func_.get(),
+        getFunction(),
+        env_.correct_arg_count,
+        env_.prologue_exit);
+  }
+
+  // Static argument type checking (if applicable).
+  if (hasStaticEntry() && !func_->has_primitive_args &&
+      !getFunction()->typed_args.empty()) {
+    env_.static_arg_typecheck_failed_label = as_->newLabel();
+    auto jt = lir::GenerateStaticTypeCheckBlocks(
+        lir_func_.get(),
+        entry_block,
+        getFunction()->typed_args,
+        getFunction()->numArgs(),
+        &env_,
+        env_.static_arg_typecheck_failed_label);
+    env_.static_typecheck_table = jt.table;
+    env_.static_typecheck_jt_entries = std::move(jt.entries);
+    // Reassign correct_arg_count from entry_block to the dispatch block so
+    // the argcount correct path and reentry go through type checks before
+    // entry(args). entry_block gets a fresh label from emitLIRBlocks.
+    env_.block_label_map.erase(entry_block);
+    env_.block_label_map[jt.dispatch_block] = env_.correct_arg_count;
+  }
+
+  // Push entry_block back and populate it with arg loading.
+  blocks.push_back(entry_block);
+  lir::PopulateEntryBlock(entry_block, env_.arg_locations);
+
+  // Move the prologue blocks from [body_end, end) to the front.
+  std::rotate(blocks.begin(), blocks.begin() + body_end, blocks.end());
+}
+
+void NativeGenerator::generateCode(
+    CodeHolder& codeholder,
+    lir::BasicBlock* frameSetupBlock) {
+  // computeFrameInfo() is called before generateAssemblyBody() so that
+  // env_.last_callee_saved_reg_off is available to the exit block's custom
+  // translators. All of computeFrameInfo()'s inputs
+  // (shadow_frames_and_spill_size, changed_regs, max_arg_buffer_size) are set
+  // during register allocation, which completes before generateCode() is
+  // called.
+  auto frame_info = computeFrameInfo();
+
+  // Populate frame layout fields on Environ for the kSetupFrame autogen
+  // translator. These are computed from FrameInfo after register allocation.
+  env_.resume_frame_total_size = frame_info.size();
+  env_.resume_header_and_spill_size = frame_info.header_and_spill_size;
+  env_.resume_saved_regs = frame_info.saved_regs;
+
+  // --- Emit code in final assembly order ---
+  //
+  // The layout is:
+  //   [static entry point]        (optional, at fixed negative offset)
+  //   [reentry with processed args] (at fixed negative offset)
+  //   [vectorcall entry label]
+  //   [LIR blocks: wrapper → func_entry → argcount → typechecks → entry(args)
+  //                → body → exit → resume → deopt_exits]
+  //   [exit label]
+  //   [typecheck failure stub]    (optional)
+  //   [prologue exit stub]        (optional)
+  //   [wrapper exit stub]         (optional)
+  //   [aarch64 constant pool]     (optional)
+
+  // Create labels used by both the raw-asm entry points and the LIR
+  // prologue blocks. finish_frame_setup is bound by generatePrologueBlocks
+  // to the frame setup block; correct_arg_count is bound to the entry block.
+  env_.finish_frame_setup = as_->newLabel();
+  env_.correct_arg_count = as_->newLabel();
+
+  Label static_jmp_location = as_->newLabel();
+  bool has_static_entry = hasStaticEntry();
+  if (has_static_entry) {
+    generateStaticEntryPoint(env_.finish_frame_setup, static_jmp_location);
+  }
+
+  // Reentry point: dispatched to from rt::callWithIncorrectArgcount and
+  // rt::callWithKeywordArgs after argument binding. Must be exactly
+  // JITRT_CALL_REENTRY_OFFSET bytes before the vectorcall entry.
   auto arg_reentry_cursor = as_->cursor();
   Label correct_args_entry = as_->newLabel();
   as_->bind(correct_args_entry);
   generateFunctionEntry();
 
 #if defined(CINDER_X86_64)
-  as_->short_().jmp(correct_arg_count);
+  as_->short_().jmp(env_.correct_arg_count);
 #elif defined(CINDER_AARCH64)
-  as_->b(correct_arg_count);
+  as_->b(env_.correct_arg_count);
 #else
   CINDER_UNSUPPORTED
 #endif
 
   env_.addAnnotation("Reentry with processed args", arg_reentry_cursor);
 
-  // Setup the normal entry point that expects that implements the
-  // vectorcall convention
+  // Generate prologue LIR blocks (wrapper, func_entry, argcount, typechecks,
+  // entry with arg loading) and prepend them to the body block list.
+  generatePrologueBlocks(frameSetupBlock);
+
+  // Vectorcall entry point. The prologue LIR blocks are first in the block
+  // list, so the vectorcall entry falls through to them.
   Label vectorcall_entry_label = as_->newLabel();
   as_->bind(vectorcall_entry_label);
-  generatePrologue(frame_info, correct_arg_count, finish_frame_setup);
 
-  generateEpilogue(epilogue_cursor);
+  // Append suffix blocks to the block list. These come after the body's exit
+  // block but before code emission.
+  if (getFunction()->code->co_flags & kCoFlagsAnyGenerator) {
+    env_.gi_jit_data_offset = giJITDataOffset();
 
-  if (GetFunction()->code->co_flags & kCoFlagsAnyGenerator) {
-    generateResumeEntry(frame_info);
+    auto* bb = lir_func_->resumeEntryBlock();
+    JIT_CHECK(
+        bb != nullptr,
+        "Generator must have a resume entry block {}",
+        lir_func_->hirFunc()->fullname);
+    lir::PopulateResumeEntryBlock(bb, env_.gi_jit_data_offset);
+    env_.block_label_map[bb] = env_.gen_resume_entry_label;
+    lir_func_->basicBlocks().push_back(bb);
   }
+
+  // Generate deopt exit LIR blocks (stage 1 + stage 2). These must be
+  // appended before generateAssemblyBody because the body block translators
+  // (Guard, DeoptPatchpoint) reference the deopt_exit_blocks map.
+  env_.deopt_trampoline = getFunction()->code->co_flags & kCoFlagsAnyGenerator
+      ? factory_.deoptTrampolineGenerators()
+      : factory_.deoptTrampoline();
+  lir::GenerateDeoptExitBlocks(lir_func_.get(), &env_);
+
+  generateAssemblyBody(codeholder);
+
+  as_->bind(env_.exit_label);
 
   if (env_.static_arg_typecheck_failed_label.isValid()) {
     auto static_typecheck_cursor = as_->cursor();
     as_->bind(env_.static_arg_typecheck_failed_label);
 
 #if defined(CINDER_X86_64)
-    if (GetFunction()->returnsPrimitive()) {
-      if (GetFunction()->returnsPrimitiveDouble()) {
+    if (getFunction()->returnsPrimitive()) {
+      if (getFunction()->returnsPrimitiveDouble()) {
         as_->call(
             reinterpret_cast<uint64_t>(
-                JITRT_ReportStaticArgTypecheckErrorsWithDoubleReturn));
+                rt::reportStaticArgTypecheckErrorsWithDoubleReturn));
       } else {
         as_->call(
             reinterpret_cast<uint64_t>(
-                JITRT_ReportStaticArgTypecheckErrorsWithPrimitiveReturn));
+                rt::reportStaticArgTypecheckErrorsWithPrimitiveReturn));
       }
     } else {
-      as_->call(
-          reinterpret_cast<uint64_t>(JITRT_ReportStaticArgTypecheckErrors));
+      as_->call(reinterpret_cast<uint64_t>(rt::reportStaticArgTypecheckErrors));
     }
     as_->leave();
     as_->ret();
 #elif defined(CINDER_AARCH64)
-    if (GetFunction()->returnsPrimitive()) {
-      if (GetFunction()->returnsPrimitiveDouble()) {
-        as_->mov(
-            arch::reg_scratch_br,
-            JITRT_ReportStaticArgTypecheckErrorsWithDoubleReturn);
+    if (getFunction()->returnsPrimitive()) {
+      if (getFunction()->returnsPrimitiveDouble()) {
+        as_->bl(rt::reportStaticArgTypecheckErrorsWithDoubleReturn);
       } else {
-        as_->mov(
-            arch::reg_scratch_br,
-            JITRT_ReportStaticArgTypecheckErrorsWithPrimitiveReturn);
+        as_->bl(rt::reportStaticArgTypecheckErrorsWithPrimitiveReturn);
       }
     } else {
-      as_->mov(arch::reg_scratch_br, JITRT_ReportStaticArgTypecheckErrors);
+      as_->bl(rt::reportStaticArgTypecheckErrors);
     }
-    as_->blr(arch::reg_scratch_br);
 
     // leave + ret equivalent on aarch64
     as_->mov(a64::sp, arch::fp);
-    as_->ldp(arch::fp, arch::lr, a64::ptr_post(a64::sp, 16));
+    as_->ldp(
+        arch::fp, arch::lr, a64::ptr_post(a64::sp, arch::kFrameRecordSize));
     as_->ret(arch::lr);
 #else
     CINDER_UNSUPPORTED
@@ -2875,13 +1384,36 @@ void NativeGenerator::generateCode(CodeHolder& codeholder) {
         "Static argument typecheck failure stub", static_typecheck_cursor);
   }
 
-  generateDeoptExits(codeholder);
+  // Prologue exit stub: the argcount-check LIR blocks branch here after
+  // calling the keyword-args or incorrect-argcount helper. The helpers
+  // return the result in the ABI return register; we just tear down the
+  // minimal frame (push rbp / mov rbp, rsp) and return.
+  if (env_.prologue_exit.isValid()) {
+    as_->bind(env_.prologue_exit);
+    generateFunctionExit();
+  }
 
-  code_start_ = finalizeCode(*as_, GetFunction()->fullname);
+  // Boxed-return wrapper exit stub: the wrapper LIR blocks branch here
+  // after boxing (or on error). Tears down the wrapper's own minimal frame.
+  if (env_.wrapper_exit.isValid()) {
+    as_->bind(env_.wrapper_exit);
+    generateFunctionExit();
+  }
+
+#if defined(CINDER_AARCH64)
+  // Emit constant pool data for MovConstPool instructions. Each entry is an
+  // 8-byte value loaded via PC-relative ldr.
+  for (auto& [value, label] : env_.const_pool_labels) {
+    as_->bind(label);
+    as_->embed(&value, sizeof(value));
+  }
+#endif
+
+  code_start_ = finalizeCode(*as_, getFunction()->fullname);
 
   // ------------- code_start_
   // ^
-  // | JITRT_STATIC_ENTRY_OFFSET (2 bytes, optional)
+  // | JITRT_STATIC_ENTRY_OFFSET
   // | JITRT_CALL_REENTRY_OFFSET (6 bytes)
   // v
   // ------------- vectorcall_entry_
@@ -2904,7 +1436,20 @@ void NativeGenerator::generateCode(CodeHolder& codeholder) {
 
   linkDeoptPatchers(codeholder);
   env_.code_rt->debugInfo()->resolvePending(
-      env_.pending_debug_locs, *GetFunction(), codeholder);
+      env_.pending_debug_locs, *getFunction(), codeholder);
+
+  // Resolve callsite->deopt-exit label pairs (recorded in TranslateGuard)
+  // to addresses now that code is finalized.
+  {
+    uint64_t base = codeholder.baseAddress();
+    for (const auto& entry : env_.callsite_deopt_pending) {
+      uintptr_t return_addr =
+          base + codeholder.labelOffsetFromBase(entry.return_addr_label);
+      uintptr_t exit_addr =
+          base + codeholder.labelOffsetFromBase(entry.deopt_exit_label);
+      env_.code_rt->addCallsiteDeoptExit(return_addr, exit_addr);
+    }
+  }
 
   vectorcall_entry_ = static_cast<char*>(code_start_) +
       codeholder.labelOffsetFromBase(vectorcall_entry_label);
@@ -2913,6 +1458,25 @@ void NativeGenerator::generateCode(CodeHolder& codeholder) {
     entry.first->setResumeTarget(
         codeholder.labelOffsetFromBase(entry.second) +
         codeholder.baseAddress());
+  }
+
+  // allocateGenAndInterpreterFrame reads the resume entry out of the
+  // CodeRuntime rather than taking it as an argument, which keeps that call
+  // down to four arguments.
+  if (getFunction()->code->co_flags & kCoFlagsAnyGenerator) {
+    auto resume_entry = static_cast<uintptr_t>(
+        codeholder.baseAddress() +
+        codeholder.labelOffsetFromBase(env_.gen_resume_entry_label));
+    env_.code_rt->setGenResumeEntry(
+        reinterpret_cast<GenResumeFunc>(resume_entry));
+  }
+
+  // Resolve the static type check jump table entries now that block labels
+  // have been bound to code addresses.
+  for (auto& [index, block] : env_.static_typecheck_jt_entries) {
+    auto label = map_get(env_.block_label_map, block);
+    env_.static_typecheck_table[index] = reinterpret_cast<void*>(
+        codeholder.baseAddress() + codeholder.labelOffsetFromBase(label));
   }
 
   // After code generation CodeHolder->codeSize() *should* return the actual
@@ -2925,346 +1489,33 @@ void NativeGenerator::generateCode(CodeHolder& codeholder) {
   JIT_LOGIF(
       getConfig().log.dump_asm,
       "Disassembly for {}\n{}",
-      GetFunction()->fullname,
+      getFunction()->fullname,
       env_.annotations.disassemble(code_start_, codeholder));
   {
-    ThreadedCompileSerialize guard;
     for (auto& x : env_.function_indirections) {
-      Label trampoline = x.second.trampoline;
-      *x.second.indirect = reinterpret_cast<void*>(
-          codeholder.labelOffsetFromBase(trampoline) +
-          codeholder.baseAddress());
+      *x.second.indirect = factory_.failedDeferredCompileTrampoline();
     }
   }
 
-  const hir::Function* func = GetFunction();
-  std::string_view prefix = [&] {
-    switch (func->frameMode) {
-      case FrameMode::kNormal:
-        [[fallthrough]];
-      case FrameMode::kLightweight:
-        return perf::kFuncSymbolPrefix;
-      case FrameMode::kShadow:
-        return perf::kShadowFrameSymbolPrefix;
-    }
-    JIT_ABORT("Invalid frame mode");
-  }();
+  const hir::Function* func = getFunction();
   // For perf, we want only the size of the code, so we get that directly from
   // the text sections.
   std::vector<std::pair<void*, std::size_t>> code_sections;
   populateCodeSections(code_sections, codeholder, code_start_);
-  perf::registerFunction(code_sections, func->fullname, prefix);
+#ifndef WIN32
+  perf::registerFunction(
+      code_sections, func->fullname, perf::kFuncSymbolPrefix);
+#endif
 }
 
 #ifdef __ASM_DEBUG
-const char* NativeGenerator::GetPyFunctionName() const {
-  return PyUnicode_AsUTF8(GetFunction()->code->co_name);
+const char* NativeGenerator::getPyFunctionName() const {
+  return PyUnicode_AsUTF8(getFunction()->code->co_name);
 }
 #endif
 
 void NativeGenerator::generateAssemblyBody(const asmjit::CodeHolder& code) {
-  auto as = env_.as;
-  auto& blocks = lir_func_->basicblocks();
-  for (auto& basicblock : blocks) {
-    env_.block_label_map.emplace(basicblock, as->newLabel());
-  }
-
-  for (lir::BasicBlock* basicblock : blocks) {
-    CodeSection section = basicblock->section();
-    CodeSectionOverride section_override{as, &code, &metadata_, section};
-    as->bind(map_get(env_.block_label_map, basicblock));
-    for (auto& instr : basicblock->instructions()) {
-      asmjit::BaseNode* cursor = as->cursor();
-      autogen::AutoTranslator::getInstance().translateInstr(&env_, instr.get());
-      if (instr->origin() != nullptr) {
-        env_.addAnnotation(instr.get(), cursor);
-      }
-    }
-  }
-}
-
-void NativeGenerator::generatePrimitiveArgsPrologue() {
-  JIT_CHECK(
-      hasStaticEntry(),
-      "Functions with primitive arguments must have been statically compiled");
-
-  // If we've been invoked statically we can skip all of the argument checking
-  // because we know our args have been provided correctly.  But if we have
-  // primitives we need to unbox them.  We usually get to avoid this by doing
-  // direct invokes from JITed code.
-#if defined(CINDER_X86_64)
-  BorrowedRef<_PyTypedArgsInfo> info = func_->prim_args_info;
-  env_.code_rt->addReference(info);
-  as_->mov(x86::r8, reinterpret_cast<uint64_t>(info.get()));
-  auto helper = func_->returnsPrimitiveDouble()
-      ? reinterpret_cast<uint64_t>(JITRT_CallStaticallyWithPrimitiveSignatureFP)
-      : reinterpret_cast<uint64_t>(JITRT_CallStaticallyWithPrimitiveSignature);
-  as_->call(helper);
-#elif defined(CINDER_AARCH64)
-  BorrowedRef<_PyTypedArgsInfo> info = func_->prim_args_info;
-  env_.code_rt->addReference(info);
-  as_->mov(arch::reg_scratch_0, reinterpret_cast<uint64_t>(info.get()));
-  if (func_->returnsPrimitiveDouble()) {
-    as_->mov(
-        arch::reg_scratch_br, JITRT_CallStaticallyWithPrimitiveSignatureFP);
-  } else {
-    as_->mov(arch::reg_scratch_br, JITRT_CallStaticallyWithPrimitiveSignature);
-  }
-  as_->blr(arch::reg_scratch_br);
-#else
-  CINDER_UNSUPPORTED
-#endif
-
-  generateFunctionExit();
-}
-
-std::pair<asmjit::BaseNode*, asmjit::BaseNode*>
-NativeGenerator::generateBoxedReturnWrapper() {
-  asmjit::BaseNode* entry_cursor = as_->cursor();
-
-  if (!func_->returnsPrimitive()) {
-    return {entry_cursor, nullptr};
-  }
-
-  Label generic_entry = as_->newLabel();
-
-#if defined(CINDER_X86_64)
-  Label box_done = as_->newLabel();
-  Label error = as_->newLabel();
-  hir::Type ret_type = func_->return_type;
-  uint64_t box_func;
-
-  generateFunctionEntry();
-  as_->call(generic_entry);
-
-  // If there was an error, there's nothing to box.
-  bool returns_double = func_->returnsPrimitiveDouble();
-  if (returns_double) {
-    as_->ptest(x86::xmm1, x86::xmm1);
-    as_->je(error);
-  } else {
-    as_->test(x86::edx, x86::edx);
-    as_->je(box_done);
-  }
-
-  if (ret_type <= TCBool) {
-    as_->movzx(x86::edi, x86::al);
-    box_func = reinterpret_cast<uint64_t>(JITRT_BoxBool);
-  } else if (ret_type <= TCInt8) {
-    as_->movsx(x86::edi, x86::al);
-    box_func = reinterpret_cast<uint64_t>(JITRT_BoxI32);
-  } else if (ret_type <= TCUInt8) {
-    as_->movzx(x86::edi, x86::al);
-    box_func = reinterpret_cast<uint64_t>(JITRT_BoxU32);
-  } else if (ret_type <= TCInt16) {
-    as_->movsx(x86::edi, x86::ax);
-    box_func = reinterpret_cast<uint64_t>(JITRT_BoxI32);
-  } else if (ret_type <= TCUInt16) {
-    as_->movzx(x86::edi, x86::ax);
-    box_func = reinterpret_cast<uint64_t>(JITRT_BoxU32);
-  } else if (ret_type <= TCInt32) {
-    as_->mov(x86::edi, x86::eax);
-    box_func = reinterpret_cast<uint64_t>(JITRT_BoxI32);
-  } else if (ret_type <= TCUInt32) {
-    as_->mov(x86::edi, x86::eax);
-    box_func = reinterpret_cast<uint64_t>(JITRT_BoxU32);
-  } else if (ret_type <= TCInt64) {
-    as_->mov(x86::rdi, x86::rax);
-    box_func = reinterpret_cast<uint64_t>(JITRT_BoxI64);
-  } else if (ret_type <= TCUInt64) {
-    as_->mov(x86::rdi, x86::rax);
-    box_func = reinterpret_cast<uint64_t>(JITRT_BoxU64);
-  } else if (returns_double) {
-    // xmm0 already contains the return value
-    box_func = reinterpret_cast<uint64_t>(JITRT_BoxDouble);
-  } else {
-    JIT_ABORT("Unsupported primitive return type {}", ret_type.toString());
-  }
-
-  as_->call(box_func);
-
-  as_->bind(box_done);
-  generateFunctionExit();
-
-  if (returns_double) {
-    as_->bind(error);
-    as_->xor_(x86::rax, x86::rax);
-    as_->leave();
-    as_->ret();
-  }
-#elif defined(CINDER_AARCH64)
-  Label box_done = as_->newLabel();
-  Label error = as_->newLabel();
-  hir::Type ret_type = func_->return_type;
-  uint64_t box_func;
-
-  generateFunctionEntry();
-  as_->bl(generic_entry);
-
-  // If there was an error, there's nothing to box.
-  bool returns_double = func_->returnsPrimitiveDouble();
-  if (returns_double) {
-    as_->fmov(arch::reg_scratch_0, a64::d1);
-    as_->cbz(arch::reg_scratch_0, error);
-  } else {
-    as_->cmp(a64::w2, 0);
-    as_->b_eq(box_done);
-  }
-
-  if (ret_type <= TCBool) {
-    as_->uxtb(a64::w0, a64::w0);
-    box_func = reinterpret_cast<uint64_t>(JITRT_BoxBool);
-  } else if (ret_type <= TCInt8) {
-    as_->sxtb(a64::w0, a64::w0);
-    box_func = reinterpret_cast<uint64_t>(JITRT_BoxI32);
-  } else if (ret_type <= TCUInt8) {
-    as_->uxtb(a64::w0, a64::w0);
-    box_func = reinterpret_cast<uint64_t>(JITRT_BoxU32);
-  } else if (ret_type <= TCInt16) {
-    as_->sxth(a64::w0, a64::w0);
-    box_func = reinterpret_cast<uint64_t>(JITRT_BoxI32);
-  } else if (ret_type <= TCUInt16) {
-    as_->uxth(a64::w0, a64::w0);
-    box_func = reinterpret_cast<uint64_t>(JITRT_BoxU32);
-  } else if (ret_type <= TCInt32) {
-    box_func = reinterpret_cast<uint64_t>(JITRT_BoxI32);
-  } else if (ret_type <= TCUInt32) {
-    box_func = reinterpret_cast<uint64_t>(JITRT_BoxU32);
-  } else if (ret_type <= TCInt64) {
-    box_func = reinterpret_cast<uint64_t>(JITRT_BoxI64);
-  } else if (ret_type <= TCUInt64) {
-    box_func = reinterpret_cast<uint64_t>(JITRT_BoxU64);
-  } else if (returns_double) {
-    box_func = reinterpret_cast<uint64_t>(JITRT_BoxDouble);
-  } else {
-    JIT_ABORT("Unsupported primitive return type {}", ret_type.toString());
-  }
-
-  as_->mov(arch::reg_scratch_br, box_func);
-  as_->blr(arch::reg_scratch_br);
-
-  as_->bind(box_done);
-  generateFunctionExit();
-
-  if (returns_double) {
-    as_->bind(error);
-    as_->mov(a64::x0, 0);
-    as_->mov(a64::sp, arch::fp);
-    as_->ldp(arch::fp, arch::lr, a64::ptr_post(a64::sp, 16));
-    as_->ret(arch::lr);
-  }
-#else
-  CINDER_UNSUPPORTED
-#endif
-
-  // New generic entry is after the boxed wrapper.
-  as_->bind(generic_entry);
-  return {as_->cursor(), entry_cursor};
-}
-
-void NativeGenerator::generateArgcountCheckPrologue(Label correct_arg_count) {
-#if defined(CINDER_X86_64)
-  BorrowedRef<PyCodeObject> code = GetFunction()->code;
-
-  Label arg_check = as_->newLabel();
-  bool have_varargs = code->co_flags & (CO_VARARGS | CO_VARKEYWORDS);
-
-  // If the code object expects *args or **kwargs we need to dispatch
-  // through our helper regardless if they are provided to create the *args
-  // tuple and the **kwargs dict and free them on exit.
-  //
-  // Similarly, if the function expects keyword-only args, we dispatch
-  // through the helper to check that they were, in fact, passed via keyword
-  // arguments.
-  //
-  // There's a lot of other things that happen in the helper so there is
-  // potentially a lot of room for optimization here.
-  bool will_check_argcount = !have_varargs && code->co_kwonlyargcount == 0;
-  if (will_check_argcount) {
-    as_->test(x86::rcx, x86::rcx);
-    as_->je(arg_check);
-  }
-
-  // We don't check the length of the kwnames tuple here, normal callers will
-  // never pass the empty tuple.  It is possible for odd callers to still pass
-  // the empty tuple in which case we'll just go through the slow binding
-  // path.
-  as_->call(reinterpret_cast<uint64_t>(JITRT_CallWithKeywordArgs));
-  generateFunctionExit();
-
-  // Check that we have a valid number of args.
-  if (will_check_argcount) {
-    as_->bind(arg_check);
-    asmjit::BaseNode* arg_check_cursor = as_->cursor();
-    as_->cmp(x86::edx, GetFunction()->numArgs());
-
-    // We don't have the correct number of arguments. Call a helper to either
-    // fix them up with defaults or raise an approprate exception.
-    as_->jz(correct_arg_count);
-    as_->mov(x86::rcx, GetFunction()->numArgs());
-    auto helper = func_->returnsPrimitiveDouble()
-        ? reinterpret_cast<uint64_t>(JITRT_CallWithIncorrectArgcountFPReturn)
-        : reinterpret_cast<uint64_t>(JITRT_CallWithIncorrectArgcount);
-    as_->call(helper);
-    as_->leave();
-    as_->ret();
-    env_.addAnnotation(
-        "Check if called with correct argcount", arg_check_cursor);
-  }
-#elif defined(CINDER_AARCH64)
-  BorrowedRef<PyCodeObject> code = GetFunction()->code;
-
-  Label arg_check = as_->newLabel();
-  bool have_varargs = code->co_flags & (CO_VARARGS | CO_VARKEYWORDS);
-
-  // If the code object expects *args or **kwargs we need to dispatch
-  // through our helper regardless if they are provided to create the *args
-  // tuple and the **kwargs dict and free them on exit.
-  //
-  // Similarly, if the function expects keyword-only args, we dispatch
-  // through the helper to check that they were, in fact, passed via keyword
-  // arguments.
-  //
-  // There's a lot of other things that happen in the helper so there is
-  // potentially a lot of room for optimization here.
-  bool will_check_argcount = !have_varargs && code->co_kwonlyargcount == 0;
-  if (will_check_argcount) {
-    as_->cbz(a64::x3, arg_check);
-  }
-
-  // We don't check the length of the kwnames tuple here, normal callers will
-  // never pass the empty tuple.  It is possible for odd callers to still pass
-  // the empty tuple in which case we'll just go through the slow binding
-  // path.
-  as_->mov(arch::reg_scratch_br, JITRT_CallWithKeywordArgs);
-  as_->blr(arch::reg_scratch_br);
-  generateFunctionExit();
-
-  // Check that we have a valid number of args.
-  if (will_check_argcount) {
-    as_->bind(arg_check);
-    asmjit::BaseNode* arg_check_cursor = as_->cursor();
-    as_->cmp(a64::w2, GetFunction()->numArgs());
-
-    // We don't have the correct number of arguments. Call a helper to either
-    // fix them up with defaults or raise an approprate exception.
-    as_->b_eq(correct_arg_count);
-    as_->mov(a64::x3, GetFunction()->numArgs());
-    if (func_->returnsPrimitiveDouble()) {
-      as_->mov(arch::reg_scratch_br, JITRT_CallWithIncorrectArgcountFPReturn);
-    } else {
-      as_->mov(arch::reg_scratch_br, JITRT_CallWithIncorrectArgcount);
-    }
-    as_->blr(arch::reg_scratch_br);
-    as_->mov(a64::sp, arch::fp);
-    as_->ldp(arch::fp, arch::lr, a64::ptr_post(a64::sp, 16));
-    as_->ret(arch::lr);
-    env_.addAnnotation(
-        "Check if called with correct argcount", arg_check_cursor);
-  }
-#else
-  CINDER_UNSUPPORTED
-#endif
+  emitLIRBlocks(&env_, lir_func_.get(), &code, &metadata_);
 }
 
 // calcMaxInlineDepth must work with nullptr HIR functions because it's valid
@@ -3277,38 +1528,43 @@ int NativeGenerator::calcInlineStackSize(const hir::Function* func) {
   int result = 0;
   for (const auto& block : func->cfg.blocks) {
     for (const auto& instr : block) {
-      if (instr.opcode() != Opcode::kBeginInlinedFunction) {
+      if (instr.opcode() != hir::Opcode::kBeginInlinedFunction) {
         continue;
       }
       auto bif = dynamic_cast<const BeginInlinedFunction*>(&instr);
-#if PY_VERSION_HEX >= 0x030C0000
       int depth = frameHeaderSize(bif->code());
       for (auto frame = bif->callerFrameState(); frame != nullptr;
            frame = frame->parent) {
         depth += frameHeaderSize(frame->code);
       }
-#else
-      int depth = bif->inlineDepth() * kJITShadowFrameSize;
-#endif
       result = std::max(depth, result);
     }
   }
   return result;
 }
 
-NativeGeneratorFactory::NativeGeneratorFactory()
-    : deopt_trampoline_{generateDeoptTrampoline(false)},
-      deopt_trampoline_generators_{generateDeoptTrampoline(true)},
-      failed_deferred_compile_trampoline_{
-          generateFailedDeferredCompileTrampoline()} {}
+NativeGeneratorFactory::NativeGeneratorFactory() {}
 
-std::unique_ptr<NativeGenerator> NativeGeneratorFactory::operator()(
-    const hir::Function* func) const {
-  return std::make_unique<NativeGenerator>(
-      func,
-      deopt_trampoline_,
-      deopt_trampoline_generators_,
-      failed_deferred_compile_trampoline_);
+void* NativeGeneratorFactory::deoptTrampoline() {
+  return getOrCreateTrampoline(
+      deopt_trampoline_, [] { return generateDeoptTrampoline(false); });
 }
 
-} // namespace jit::codegen
+void* NativeGeneratorFactory::deoptTrampolineGenerators() {
+  return getOrCreateTrampoline(deopt_trampoline_generators_, [] {
+    return generateDeoptTrampoline(true);
+  });
+}
+
+void* NativeGeneratorFactory::failedDeferredCompileTrampoline() {
+  return getOrCreateTrampoline(failed_deferred_compile_trampoline_, [] {
+    return generateFailedDeferredCompileTrampoline();
+  });
+}
+
+std::unique_ptr<NativeGenerator> NativeGeneratorFactory::operator()(
+    const hir::Function* func) {
+  return std::make_unique<NativeGenerator>(func, *this);
+}
+
+} // namespace cinderx::jit::codegen

@@ -5,50 +5,13 @@
 #include "cinderx/Jit/lir/arch.h"
 #include "cinderx/Jit/lir/instruction.h"
 
-namespace jit::lir {
+#include <bit>
 
-OperandBase::OperandBase(Instruction* parent) : parent_instr_{parent} {}
-
-OperandBase::OperandBase(const OperandBase& ob)
-    : parent_instr_{ob.parent_instr_}, last_use_{ob.last_use_} {}
-
-size_t OperandBase::sizeInBits() const {
-  return bitSize(dataType());
-}
-
-Instruction* OperandBase::instr() {
-  return parent_instr_;
-}
-
-const Instruction* OperandBase::instr() const {
-  return parent_instr_;
-}
-
-void OperandBase::assignToInstr(Instruction* instr) {
-  parent_instr_ = instr;
-}
-
-void OperandBase::releaseFromInstr() {
-  parent_instr_ = nullptr;
-}
-
-bool OperandBase::isFp() const {
-  return dataType() == kDouble;
-}
-
-bool OperandBase::isVecD() const {
-  return getPhyRegister().is_fp_register();
-}
-
-bool OperandBase::isLastUse() const {
-  return last_use_;
-}
-
-void OperandBase::setLastUse() {
-  last_use_ = true;
-}
+namespace cinderx::jit::lir {
 
 MemoryIndirect::MemoryIndirect(Instruction* parent) : parent_(parent) {}
+
+MemoryIndirect::~MemoryIndirect() = default;
 
 void MemoryIndirect::setMemoryIndirect(Instruction* base, int32_t offset) {
   setMemoryIndirect(base, nullptr /* index */, 0, offset);
@@ -76,15 +39,23 @@ void MemoryIndirect::setMemoryIndirect(
   offset_ = offset;
 }
 
-OperandBase* MemoryIndirect::getBaseRegOperand() const {
+Operand* MemoryIndirect::getBaseRegOperand() const {
   return base_reg_.get();
 }
 
-OperandBase* MemoryIndirect::getIndexRegOperand() const {
+Operand* MemoryIndirect::getIndexRegOperand() const {
   return index_reg_.get();
 }
 
-uint8_t MemoryIndirect::getMultipiler() const {
+std::unique_ptr<Operand> MemoryIndirect::releaseBaseRegOperand() {
+  return std::move(base_reg_);
+}
+
+std::unique_ptr<Operand> MemoryIndirect::releaseIndexRegOperand() {
+  return std::move(index_reg_);
+}
+
+uint8_t MemoryIndirect::getMultiplier() const {
   return multiplier_;
 }
 
@@ -93,28 +64,28 @@ int32_t MemoryIndirect::getOffset() const {
 }
 
 void MemoryIndirect::setBaseIndex(
-    std::unique_ptr<OperandBase>& base_index_opnd,
+    std::unique_ptr<Operand>& base_index_opnd,
     Instruction* base_index) {
   if (base_index != nullptr) {
-    base_index_opnd = std::make_unique<LinkedOperand>(parent_, base_index);
+    base_index_opnd =
+        std::make_unique<Operand>(parent_, base_index, Operand::kLinked);
   } else {
     base_index_opnd.reset();
   }
 }
 void MemoryIndirect::setBaseIndex(
-    std::unique_ptr<OperandBase>& base_index_opnd,
+    std::unique_ptr<Operand>& base_index_opnd,
     PhyLocation base_index) {
   if (base_index != PhyLocation::REG_INVALID) {
-    auto operand = std::make_unique<Operand>(parent_);
-    operand->setPhyRegister(base_index);
-    base_index_opnd = std::move(operand);
+    base_index_opnd = std::make_unique<Operand>(parent_);
+    base_index_opnd->setPhyRegister(base_index);
   } else {
     base_index_opnd.reset();
   }
 }
 
 void MemoryIndirect::setBaseIndex(
-    std::unique_ptr<OperandBase>& base_index_opnd,
+    std::unique_ptr<Operand>& base_index_opnd,
     std::variant<Instruction*, PhyLocation> base_index) {
   if (Instruction** instrp = std::get_if<Instruction*>(&base_index)) {
     setBaseIndex(base_index_opnd, *instrp);
@@ -123,30 +94,82 @@ void MemoryIndirect::setBaseIndex(
   }
 }
 
-Operand::Operand(Instruction* parent) : OperandBase{parent} {}
+Operand::Operand(Instruction* parent) : parent_instr_{parent} {}
 
 // Only copies simple fields (type and data type) from operand.
 // The value_ field is not copied.
 Operand::Operand(Instruction* parent, Operand* operand)
-    : OperandBase(parent),
-      type_(operand->type_),
-      data_type_(operand->data_type_) {}
+    : parent_instr_{parent},
+      type_{operand->type_},
+      data_type_{operand->data_type_} {}
 
 Operand::Operand(
     Instruction* parent,
     DataType data_type,
     Operand::Type type,
     uint64_t data)
-    : OperandBase(parent), type_(type), data_type_(data_type) {
+    : parent_instr_{parent}, type_{type}, data_type_{data_type} {
   value_ = data;
 }
 
 Operand::Operand(Instruction* parent, Operand::Type type, double data)
-    : OperandBase(parent), type_(type), data_type_(kDouble) {
-  value_ = bit_cast<uint64_t>(data);
+    : parent_instr_{parent}, type_{type}, data_type_{kDouble} {
+  value_ = std::bit_cast<uint64_t>(data);
+}
+
+Operand::Operand(Instruction* def_instr, LinkedTag) {
+  if (def_instr != nullptr) {
+    value_ = def_instr->output();
+  }
+}
+
+Operand::Operand(Instruction* parent, Instruction* def_instr, LinkedTag)
+    : parent_instr_{parent} {
+  if (def_instr != nullptr) {
+    value_ = def_instr->output();
+  }
+}
+
+size_t Operand::sizeInBits() const {
+  return bitSize(dataType());
+}
+
+Instruction* Operand::instr() {
+  return parent_instr_;
+}
+
+const Instruction* Operand::instr() const {
+  return parent_instr_;
+}
+
+void Operand::assignToInstr(Instruction* instr) {
+  parent_instr_ = instr;
+}
+
+void Operand::releaseFromInstr() {
+  parent_instr_ = nullptr;
+}
+
+bool Operand::isFp() const {
+  return dataType() == kDouble;
+}
+
+bool Operand::isVecD() const {
+  return getPhyRegister().isFpRegister();
+}
+
+bool Operand::isLastUse() const {
+  return last_use_;
+}
+
+void Operand::setLastUse() {
+  last_use_ = true;
 }
 
 uint64_t Operand::getConstant() const {
+  if (const Operand* def = linkedDef()) {
+    return def->getConstant();
+  }
   return std::get<uint64_t>(value_);
 }
 
@@ -157,17 +180,23 @@ void Operand::setConstant(uint64_t n, DataType data_type) {
 }
 
 double Operand::getFPConstant() const {
-  auto value = std::get<uint64_t>(value_);
-  return bit_cast<double>(value);
+  if (const Operand* def = linkedDef()) {
+    return def->getFPConstant();
+  }
+  uint64_t value = std::get<uint64_t>(value_);
+  return std::bit_cast<double>(value);
 }
 
 void Operand::setFPConstant(double n) {
   type_ = kImm;
   data_type_ = kDouble;
-  value_ = bit_cast<uint64_t>(n);
+  value_ = std::bit_cast<uint64_t>(n);
 }
 
 PhyLocation Operand::getPhyRegister() const {
+  if (const Operand* def = linkedDef()) {
+    return def->getPhyRegister();
+  }
   JIT_CHECK(
       type_ == kReg,
       "Trying to treat operand [type={},val={:#x}] as a physical register",
@@ -182,6 +211,9 @@ void Operand::setPhyRegister(PhyLocation reg) {
 }
 
 PhyLocation Operand::getStackSlot() const {
+  if (const Operand* def = linkedDef()) {
+    return def->getStackSlot();
+  }
   JIT_CHECK(
       type_ == kStack,
       "Trying to treat operand [type={},val={:#x}] as a stack slot",
@@ -196,6 +228,9 @@ void Operand::setStackSlot(PhyLocation slot) {
 }
 
 PhyLocation Operand::getPhyRegOrStackSlot() const {
+  if (const Operand* def = linkedDef()) {
+    return def->getPhyRegOrStackSlot();
+  }
   switch (type_) {
     case kReg:
       return getPhyRegister();
@@ -220,6 +255,9 @@ void Operand::setPhyRegOrStackSlot(PhyLocation loc) {
 }
 
 void* Operand::getMemoryAddress() const {
+  if (const Operand* def = linkedDef()) {
+    return def->getMemoryAddress();
+  }
   JIT_CHECK(
       type_ == kMem,
       "Trying to treat operand [type={},val={:#x}] as a memory address",
@@ -234,6 +272,9 @@ void Operand::setMemoryAddress(void* addr) {
 }
 
 MemoryIndirect* Operand::getMemoryIndirect() const {
+  if (const Operand* def = linkedDef()) {
+    return def->getMemoryIndirect();
+  }
   JIT_CHECK(
       type_ == kInd,
       "Trying to treat operand [type={},val={:#x}] as a memory indirect",
@@ -243,6 +284,9 @@ MemoryIndirect* Operand::getMemoryIndirect() const {
 }
 
 BasicBlock* Operand::getBasicBlock() const {
+  if (const Operand* def = linkedDef()) {
+    return def->getBasicBlock();
+  }
   JIT_CHECK(
       type_ == kLabel,
       "Trying to treat operand [type={},val={:#x}] as a basic block address",
@@ -257,33 +301,72 @@ void Operand::setBasicBlock(BasicBlock* block) {
   value_ = block;
 }
 
+asmjit::Label Operand::getAsmLabel() const {
+  if (const Operand* def = linkedDef()) {
+    return def->getAsmLabel();
+  }
+  JIT_CHECK(
+      type_ == kLabel,
+      "Trying to treat operand [type={}] as an asmjit label",
+      type_);
+  return std::get<asmjit::Label>(value_);
+}
+
+void Operand::setAsmLabel(const asmjit::Label& label) {
+  type_ = kLabel;
+  data_type_ = kObject;
+  value_ = label;
+}
+
+bool Operand::hasAsmLabel() const {
+  if (const Operand* def = linkedDef()) {
+    return def->hasAsmLabel();
+  }
+  return type_ == kLabel && std::holds_alternative<asmjit::Label>(value_);
+}
+
 uint64_t Operand::getConstantOrAddress() const {
-  if (auto v = std::get_if<uint64_t>(&value_)) {
+  if (const Operand* def = linkedDef()) {
+    return def->getConstantOrAddress();
+  }
+  if (const uint64_t* v = std::get_if<uint64_t>(&value_)) {
     return *v;
   }
   return reinterpret_cast<uint64_t>(getMemoryAddress());
 }
 
 const Operand* Operand::getDefine() const {
+  if (const Operand* def = linkedDef()) {
+    return def;
+  }
   return this;
 }
 
 Operand* Operand::getDefine() {
+  if (Operand* def = linkedDef()) {
+    return def;
+  }
   return this;
 }
 
 DataType Operand::dataType() const {
+  if (const Operand* def = linkedDef()) {
+    return def->dataType();
+  }
   return data_type_;
 }
 
 void Operand::setDataType(DataType data_type) {
   data_type_ = data_type;
-  if (auto loc_ptr = std::get_if<PhyLocation>(&value_)) {
+  if (PhyLocation* loc_ptr = std::get_if<PhyLocation>(&value_)) {
     loc_ptr->bitSize = bitSize(data_type);
   }
 }
 
 Operand::Type Operand::type() const {
+  if (const Operand* def = linkedDef()) {
+    return def->type();
+  }
   return type_;
 }
 
@@ -296,110 +379,61 @@ void Operand::setVirtualRegister() {
 }
 
 bool Operand::isLinked() const {
-  return false;
+  return std::holds_alternative<Operand*>(value_);
+}
+
+Operand* Operand::getLinkedOperand() {
+  return std::get<Operand*>(value_);
+}
+
+const Operand* Operand::getLinkedOperand() const {
+  return std::get<Operand*>(value_);
+}
+
+Instruction* Operand::getLinkedInstr() {
+  return std::get<Operand*>(value_)->instr();
+}
+
+const Instruction* Operand::getLinkedInstr() const {
+  return std::get<Operand*>(value_)->instr();
+}
+
+void Operand::setLinkedInstr(Instruction* def) {
+  value_ = def->output();
+}
+
+Operand* Operand::linkedDef() {
+  if (Operand** def = std::get_if<Operand*>(&value_)) {
+    return *def;
+  }
+  return nullptr;
+}
+
+const Operand* Operand::linkedDef() const {
+  if (Operand* const* def = std::get_if<Operand*>(&value_)) {
+    return *def;
+  }
+  return nullptr;
 }
 
 uint64_t Operand::rawValue() const {
-  if (const auto ptr = std::get_if<uint64_t>(&value_)) {
+  if (const uint64_t* ptr = std::get_if<uint64_t>(&value_)) {
     return *ptr;
-  } else if (const auto void_ptr = std::get_if<void*>(&value_)) {
+  } else if (void* const* void_ptr = std::get_if<void*>(&value_)) {
     return reinterpret_cast<uint64_t>(*void_ptr);
-  } else if (const auto bb_ptr = std::get_if<BasicBlock*>(&value_)) {
+  } else if (BasicBlock* const* bb_ptr = std::get_if<BasicBlock*>(&value_)) {
     return reinterpret_cast<uint64_t>(*bb_ptr);
   } else if (
-      const auto mem_ptr =
+      const std::unique_ptr<MemoryIndirect>* mem_ptr =
           std::get_if<std::unique_ptr<MemoryIndirect>>(&value_)) {
     return reinterpret_cast<uint64_t>(mem_ptr->get());
-  } else if (const auto phy_ptr = std::get_if<PhyLocation>(&value_)) {
+  } else if (const PhyLocation* phy_ptr = std::get_if<PhyLocation>(&value_)) {
     return static_cast<uint64_t>(phy_ptr->loc);
+  } else if (Operand* const* def = std::get_if<Operand*>(&value_)) {
+    return reinterpret_cast<uint64_t>(*def);
   }
 
   JIT_ABORT("Unknown operand value type, has index {}", value_.index());
 }
 
-LinkedOperand::LinkedOperand(Instruction* def_instr) {
-  def_opnd_ = def_instr->output();
-}
-
-LinkedOperand::LinkedOperand(Instruction* parent, Instruction* def_instr)
-    : LinkedOperand{def_instr} {
-  assignToInstr(parent);
-}
-
-Operand* LinkedOperand::getLinkedOperand() {
-  return def_opnd_;
-}
-
-const Operand* LinkedOperand::getLinkedOperand() const {
-  return def_opnd_;
-}
-
-Instruction* LinkedOperand::getLinkedInstr() {
-  return def_opnd_->instr();
-}
-
-const Instruction* LinkedOperand::getLinkedInstr() const {
-  return def_opnd_->instr();
-}
-
-void LinkedOperand::setLinkedInstr(Instruction* def) {
-  def_opnd_ = def->output();
-}
-
-uint64_t LinkedOperand::getConstant() const {
-  return def_opnd_->getConstant();
-}
-
-double LinkedOperand::getFPConstant() const {
-  return def_opnd_->getFPConstant();
-}
-
-PhyLocation LinkedOperand::getPhyRegister() const {
-  return def_opnd_->getPhyRegister();
-}
-
-PhyLocation LinkedOperand::getStackSlot() const {
-  return def_opnd_->getStackSlot();
-}
-
-PhyLocation LinkedOperand::getPhyRegOrStackSlot() const {
-  return def_opnd_->getPhyRegOrStackSlot();
-}
-
-void* LinkedOperand::getMemoryAddress() const {
-  return def_opnd_->getMemoryAddress();
-}
-
-MemoryIndirect* LinkedOperand::getMemoryIndirect() const {
-  return def_opnd_->getMemoryIndirect();
-}
-
-BasicBlock* LinkedOperand::getBasicBlock() const {
-  return def_opnd_->getBasicBlock();
-}
-
-uint64_t LinkedOperand::getConstantOrAddress() const {
-  return def_opnd_->getConstantOrAddress();
-}
-
-Operand* LinkedOperand::getDefine() {
-  return def_opnd_;
-}
-
-const Operand* LinkedOperand::getDefine() const {
-  return def_opnd_;
-}
-
-DataType LinkedOperand::dataType() const {
-  return def_opnd_->dataType();
-}
-
-Operand::Type LinkedOperand::type() const {
-  return def_opnd_->type();
-}
-
-bool LinkedOperand::isLinked() const {
-  return true;
-}
-
-} // namespace jit::lir
+} // namespace cinderx::jit::lir

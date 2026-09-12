@@ -7,7 +7,7 @@
 #include <initializer_list>
 #include <vector>
 
-namespace jit {
+namespace cinderx::jit {
 
 template <class T>
 class Stack {
@@ -72,10 +72,6 @@ class Stack {
     return stack_ == other.stack_;
   }
 
-  bool operator!=(const Stack& other) const {
-    return !(*this == other);
-  }
-
   auto begin() {
     return stack_.begin();
   }
@@ -96,4 +92,4 @@ class Stack {
   std::vector<T> stack_;
 };
 
-} // namespace jit
+} // namespace cinderx::jit

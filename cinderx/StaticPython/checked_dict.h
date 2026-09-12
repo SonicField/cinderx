@@ -1,6 +1,5 @@
 /* Copyright (c) Meta Platforms, Inc. and affiliates. */
-#ifndef Ci_CHECKED_DICT_H
-#define Ci_CHECKED_DICT_H
+#pragma once
 
 #include "cinderx/python.h"
 
@@ -25,13 +24,24 @@ int Ci_DictOrChecked_SetItem(PyObject* op, PyObject* key, PyObject* value);
 
 void _PyCheckedDict_ClearCaches();
 
-extern PyTypeObject Ci_CheckedDictItems_Type, Ci_CheckedDictValues_Type,
-    Ci_CheckedDictIterKey_Type, Ci_CheckedDictIterValue_Type,
-    Ci_CheckedDictIterItem_Type, Ci_CheckedDictRevIterKey_Type,
-    Ci_CheckedDictRevIterItem_Type, Ci_CheckedDictRevIterValue_Type,
-    Ci_CheckedDictKeys_Type, Ci_CheckedDictItems_Type,
-    Ci_CheckedDictValues_Type;
+extern PyTypeObject* Ci_CheckedDictItems_Type;
+extern PyTypeObject* Ci_CheckedDictValues_Type;
+extern PyTypeObject* Ci_CheckedDictKeys_Type;
+extern PyType_Spec Ci_CheckedDictItems_Spec;
+extern PyType_Spec Ci_CheckedDictValues_Spec;
+extern PyType_Spec Ci_CheckedDictKeys_Spec;
+extern PyTypeObject* Ci_CheckedDictIterKey_Type;
+extern PyTypeObject* Ci_CheckedDictIterValue_Type;
+extern PyTypeObject* Ci_CheckedDictIterItem_Type;
+extern PyTypeObject* Ci_CheckedDictRevIterKey_Type;
+extern PyTypeObject* Ci_CheckedDictRevIterItem_Type;
+extern PyTypeObject* Ci_CheckedDictRevIterValue_Type;
+extern PyType_Spec Ci_CheckedDictIterKey_Spec;
+extern PyType_Spec Ci_CheckedDictIterValue_Spec;
+extern PyType_Spec Ci_CheckedDictIterItem_Spec;
+extern PyType_Spec Ci_CheckedDictRevIterKey_Spec;
+extern PyType_Spec Ci_CheckedDictRevIterItem_Spec;
+extern PyType_Spec Ci_CheckedDictRevIterValue_Spec;
 #ifdef __cplusplus
 }
 #endif
-#endif /* !Ci_CHECKED_DICT_H */

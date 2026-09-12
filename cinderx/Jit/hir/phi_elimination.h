@@ -4,18 +4,18 @@
 
 #include "cinderx/Jit/hir/pass.h"
 
-namespace jit::hir {
+namespace cinderx::jit::hir {
 
 // Remove Phis that only have one unique input value (other than their output).
-class PhiElimination : public Pass {
+class PhiElimination final : public Pass {
  public:
   PhiElimination() : Pass("PhiElimination") {}
 
-  void Run(Function& irfunc) override;
+  void run(Function& irfunc) override;
 
-  static std::unique_ptr<PhiElimination> Factory() {
+  static std::unique_ptr<PhiElimination> factory() {
     return std::make_unique<PhiElimination>();
   }
 };
 
-} // namespace jit::hir
+} // namespace cinderx::jit::hir

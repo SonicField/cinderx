@@ -2,24 +2,25 @@
 
 #include "cinderx/Jit/hir/instr_effects.h"
 
+#include "cinderx/Common/util.h"
 #include "cinderx/Jit/hir/hir.h"
 
-namespace jit::hir {
+namespace cinderx::jit::hir {
 
 namespace {
 // Instructions that don't produce a borrowed reference or steal any of their
 // inputs.
 MemoryEffects commonEffects(const Instr& inst, AliasClass may_store) {
-  return {false, AEmpty, {inst.NumOperands()}, may_store};
+  return {false, AEmpty, {inst.numOperands()}, may_store};
 }
 
 // Instructions that borrow their output from a specific location.
 MemoryEffects borrowFrom(const Instr& inst, AliasClass borrow_support) {
-  return {true, borrow_support, {inst.NumOperands()}, AEmpty};
+  return {true, borrow_support, {inst.numOperands()}, AEmpty};
 }
 
 util::BitVector stealAllInputs(const Instr& inst) {
-  return {inst.NumOperands(), (uint64_t{1} << inst.NumOperands()) - 1};
+  return {inst.numOperands(), (uint64_t{1} << inst.numOperands()) - 1};
 }
 
 } // namespace
@@ -36,15 +37,16 @@ MemoryEffects memoryEffects(const Instr& inst) {
     case Opcode::kBuildTemplate:
     case Opcode::kCast:
     case Opcode::kCIntToCBool:
+    case Opcode::kCompactLongUnbox:
     case Opcode::kDeopt:
     case Opcode::kDeoptPatchpoint:
     case Opcode::kDoubleBinaryOp:
-    case Opcode::kFloatCompare:
     case Opcode::kGetSecondOutput:
     case Opcode::kHintType:
     case Opcode::kIndexUnbox:
     case Opcode::kIntBinaryOp:
-    case Opcode::kIntConvert:
+    case Opcode::kPrimitiveConvert:
+    case Opcode::kIsCompactLong:
     case Opcode::kIsNegativeAndErrOccurred:
     case Opcode::kLoadEvalBreaker:
     case Opcode::kLoadVarObjectSize:
@@ -59,12 +61,15 @@ MemoryEffects memoryEffects(const Instr& inst) {
     case Opcode::kPrimitiveUnbox:
     case Opcode::kRefineType:
     case Opcode::kSnapshot:
+    case Opcode::kTagIfDeferred:
     case Opcode::kTpAlloc:
     case Opcode::kUnicodeCompare:
     case Opcode::kUnicodeConcat:
+    case Opcode::kUnicodeEqual:
     case Opcode::kUnicodeRepeat:
     case Opcode::kUnicodeSubscr:
     case Opcode::kUnreachable:
+    case Opcode::kUseObj:
     case Opcode::kUseType:
     case Opcode::kWaitHandleLoadCoroOrResult:
     case Opcode::kWaitHandleLoadWaiter:
@@ -72,14 +77,18 @@ MemoryEffects memoryEffects(const Instr& inst) {
 
     // If boxing a bool, we return a borrowed reference to Py_True or Py_False.
     case Opcode::kPrimitiveBoxBool:
+    // UnaryNot likewise returns a borrowed reference to Py_True or Py_False.
+    case Opcode::kUnaryNot:
       return borrowFrom(inst, AEmpty);
 
     case Opcode::kPrimitiveBox:
       return commonEffects(inst, AEmpty);
 
-    // These push/pop shadow frames and should not get DCE'd.
+    // These push/pop frames and should not get DCE'd.
     case Opcode::kBeginInlinedFunction:
     case Opcode::kEndInlinedFunction:
+    // Writes gi_frame_state on the generator.
+    case Opcode::kEndGeneratorFrame:
     // Updates the _PyInterpreterFrame
     case Opcode::kUpdatePrevInstr:
     // Can write to fields of its operands.
@@ -138,13 +147,12 @@ MemoryEffects memoryEffects(const Instr& inst) {
     case Opcode::kInvokeStaticFunction:
     case Opcode::kIsInstance:
     case Opcode::kIsTruthy:
+    case Opcode::kListSubscr:
     case Opcode::kLoadAttr:
-    case Opcode::kLoadAttrCached:
     case Opcode::kLoadAttrSpecial:
     case Opcode::kLoadAttrSuper:
     case Opcode::kLoadGlobal:
     case Opcode::kLoadMethod:
-    case Opcode::kLoadMethodCached:
     case Opcode::kLoadMethodSuper:
     case Opcode::kLoadModuleAttrCached:
     case Opcode::kLoadModuleMethodCached:
@@ -156,17 +164,19 @@ MemoryEffects memoryEffects(const Instr& inst) {
     case Opcode::kSend:
     case Opcode::kUnaryOp:
     case Opcode::kUnpackExToTuple:
+    case Opcode::kReserveStack:
+    case Opcode::kUnpackSequence:
     case Opcode::kVectorCall:
       return commonEffects(inst, AManagedHeapAny);
 
     // Steals the reference to its second input and gives it to the cell
     case Opcode::kSetCellItem:
-      return {true, AEmpty, {inst.NumOperands(), 2}, ACellItem};
+      return {true, AEmpty, {inst.numOperands(), 2}, ACellItem};
 
     // Atomically swaps cell value. Steals operand 1 (new value) and returns
     // owned reference to old value. Used for thread-safe STORE_DEREF.
     case Opcode::kSwapCellItem:
-      return {false, AEmpty, {inst.NumOperands(), 2}, ACellItem};
+      return {false, AEmpty, {inst.numOperands(), 2}, ACellItem};
 
     // Returns a stolen (from the cell), not borrowed, reference.
     case Opcode::kStealCellItem:
@@ -180,7 +190,6 @@ MemoryEffects memoryEffects(const Instr& inst) {
     case Opcode::kSetSetItem:
     case Opcode::kSetUpdate:
     case Opcode::kStoreAttr:
-    case Opcode::kStoreAttrCached:
     case Opcode::kStoreSubscr:
       return {true, AEmpty, {}, AManagedHeapAny};
 
@@ -193,19 +202,22 @@ MemoryEffects memoryEffects(const Instr& inst) {
 
     case Opcode::kListAppend:
     case Opcode::kListExtend:
-      return {true, AEmpty, {inst.NumOperands()}, AListItem};
+      return {true, AEmpty, {inst.numOperands()}, AListItem};
 
     case Opcode::kIncref:
     case Opcode::kXIncref:
-      return {false, AEmpty, {inst.NumOperands()}, AOther};
+      return {false, AEmpty, {inst.numOperands()}, AOther};
+
+    case Opcode::kMaterializeRef:
+      return commonEffects(inst, AOther);
 
     case Opcode::kBatchDecref:
       return {false, AEmpty, {1, 1}, AManagedHeapAny};
 
     case Opcode::kDecref:
     case Opcode::kXDecref: {
-      if (inst.GetOperand(0)->type().runtimePyTypeDestructor().has_value()) {
-        return {false, AEmpty, {inst.NumOperands()}, AOther};
+      if (inst.getOperand(0)->type().runtimePyTypeDestructor().has_value()) {
+        return {false, AEmpty, {inst.numOperands()}, AOther};
       } else {
         return {false, AEmpty, {1, 1}, AManagedHeapAny};
       }
@@ -217,17 +229,26 @@ MemoryEffects memoryEffects(const Instr& inst) {
       return commonEffects(inst, AOther);
 
     case Opcode::kMakeCheckedList:
-    case Opcode::kMakeList: {
-      // Steal all inputs.
-      util::BitVector inputs{inst.NumOperands()};
+    case Opcode::kMakeList:
+    case Opcode::kMakeTuple:
+      return commonEffects(inst, AEmpty);
+
+    case Opcode::kInitListElements: {
+      // Steal all value inputs (not the container at index 0).
+      util::BitVector inputs{inst.numOperands()};
       inputs.fill(true);
+      inputs.setBit(0, false);
       return {false, AEmpty, std::move(inputs), AListItem};
     }
-    case Opcode::kMakeTuple:
-      return commonEffects(inst, ATupleItem);
+    case Opcode::kInitTupleElements: {
+      util::BitVector inputs{inst.numOperands()};
+      inputs.fill(true);
+      inputs.setBit(0, false);
+      return {false, AEmpty, std::move(inputs), ATupleItem};
+    }
 
     case Opcode::kStoreField:
-      JIT_DCHECK(inst.NumOperands() == 3, "Unexpected number of operands");
+      JIT_DCHECK(inst.numOperands() == 3, "Unexpected number of operands");
       return {false, AEmpty, {3, 2}, AInObjectAttr};
 
     case Opcode::kLoadArg:
@@ -239,13 +260,12 @@ MemoryEffects memoryEffects(const Instr& inst) {
       return borrowFrom(inst, AEmpty);
 
     case Opcode::kLoadCellItem:
-#ifdef Py_GIL_DISABLED
-      // In FT-Python, LoadCellItem calls PyCell_GetRef which returns an
-      // owned (new) reference.
-      return commonEffects(inst, AEmpty);
-#else
+      if constexpr (kFreeThreadedBuild) {
+        // In FT-Python, LoadCellItem calls PyCell_GetRef which returns an
+        // owned (new) reference.
+        return commonEffects(inst, AEmpty);
+      }
       return borrowFrom(inst, ACellItem);
-#endif
 
     case Opcode::kLoadField: {
       auto& ldfld = static_cast<const LoadField&>(inst);
@@ -266,12 +286,20 @@ MemoryEffects memoryEffects(const Instr& inst) {
     case Opcode::kLoadTupleItem:
       return borrowFrom(inst, ATupleItem);
 
-    case Opcode::kLoadArrayItem:
-      return borrowFrom(inst, AArrayItem | AListItem);
+    case Opcode::kLoadArrayItem: {
+      auto& load = static_cast<const LoadArrayItem&>(inst);
+      if (load.borrowed()) {
+        return borrowFrom(inst, AArrayItem | AListItem);
+      }
+      // When borrowed=false, the instruction is consuming (stealing) a
+      // reference from the array. Model as a write to AArrayItem to prevent
+      // DCE from removing it, which would leak the stolen reference.
+      return commonEffects(inst, AArrayItem);
+    }
     case Opcode::kStoreArrayItem:
       // we steal a ref to our third operand, the value being stored
       return {
-          false, AEmpty, {inst.NumOperands(), 1 << 2}, AArrayItem | AListItem};
+          false, AEmpty, {inst.numOperands(), 1 << 2}, AArrayItem | AListItem};
     case Opcode::kLoadSplitDictItem:
       return borrowFrom(inst, ADictItem);
     case Opcode::kLoadTypeAttrCacheEntryType:
@@ -291,7 +319,7 @@ MemoryEffects memoryEffects(const Instr& inst) {
       return {false, AEmpty, {1, 1}, AManagedHeapAny};
 
     case Opcode::kSetFunctionAttr: {
-      JIT_DCHECK(inst.NumOperands() == 2, "Unexpected number of operands");
+      JIT_DCHECK(inst.numOperands() == 2, "Unexpected number of operands");
       return {false, AEmpty, {2, 1}, AFuncAttr};
     }
 
@@ -306,28 +334,9 @@ MemoryEffects memoryEffects(const Instr& inst) {
     // _PyJIT_GenSend(), which is borrowed from its caller like all arguments
     // to C functions.
     case Opcode::kInitialYield:
-      return {true, AFuncArgs, {inst.NumOperands()}, AAny};
+      return {true, AFuncArgs, {inst.numOperands()}, AAny};
     case Opcode::kYieldValue:
       return {true, AFuncArgs, {1, 1}, AAny};
-
-    case Opcode::kYieldFrom:
-#if PY_VERSION_HEX >= 0x030C0000
-      // In 3.12+ YieldFrom is actually YieldValue but has an additional arg for
-      // the subiterator for use when querying yield-from.
-      return {true, AFuncArgs, {2, 1}, AAny};
-#else
-      [[fallthrough]];
-#endif
-    case Opcode::kYieldFromHandleStopAsyncIteration: {
-      // In 3.10 YieldFrom's output is either the yielded value from the subiter
-      // or the final result from a StopIteration, and is owned in either case.
-      return commonEffects(inst, AAny);
-    }
-    // YieldAndYieldFrom is equivalent to YieldFrom composed with YieldValue,
-    // and steals the value it yields to the caller.
-    case Opcode::kYieldAndYieldFrom: {
-      return {false, AEmpty, {2, 1}, AAny};
-    }
 
     case Opcode::kCallCFunc:
       return commonEffects(inst, AManagedHeapAny);
@@ -384,13 +393,14 @@ bool hasArbitraryExecution(const Instr& inst) {
     case Opcode::kBuildInterpolation:
     case Opcode::kBuildTemplate:
     case Opcode::kCast:
+    case Opcode::kCompactLongUnbox:
     case Opcode::kCondBranch:
     case Opcode::kCondBranchCheckType:
     case Opcode::kCondBranchIterNotDone:
     case Opcode::kDeoptPatchpoint:
     case Opcode::kDoubleBinaryOp:
+    case Opcode::kEndGeneratorFrame:
     case Opcode::kEndInlinedFunction:
-    case Opcode::kFloatCompare:
     case Opcode::kGetSecondOutput:
     case Opcode::kGuardIs:
     case Opcode::kHintType:
@@ -398,7 +408,8 @@ bool hasArbitraryExecution(const Instr& inst) {
     case Opcode::kIndexUnbox:
     case Opcode::kInitFrameCellVars:
     case Opcode::kIntBinaryOp:
-    case Opcode::kIntConvert:
+    case Opcode::kPrimitiveConvert:
+    case Opcode::kIsCompactLong:
     case Opcode::kIsNegativeAndErrOccurred:
     case Opcode::kListAppend:
     case Opcode::kListExtend:
@@ -421,7 +432,10 @@ bool hasArbitraryExecution(const Instr& inst) {
     case Opcode::kLoadTypeMethodCacheEntryValue:
     case Opcode::kLoadVarObjectSize:
     case Opcode::kLongCompare:
+    case Opcode::kMaterializeRef:
     case Opcode::kMakeCell:
+    case Opcode::kInitListElements:
+    case Opcode::kInitTupleElements:
     case Opcode::kMakeCheckedDict:
     case Opcode::kMakeCheckedList:
     case Opcode::kMakeDict:
@@ -435,10 +449,13 @@ bool hasArbitraryExecution(const Instr& inst) {
     case Opcode::kPrimitiveCompare:
     case Opcode::kPrimitiveUnaryOp:
     case Opcode::kPrimitiveUnbox:
+    case Opcode::kUnaryNot:
     case Opcode::kRefineType:
+    case Opcode::kReserveStack:
     case Opcode::kSetCellItem:
     case Opcode::kSetFunctionAttr:
     case Opcode::kSnapshot:
+    case Opcode::kTagIfDeferred:
     case Opcode::kStealCellItem:
     case Opcode::kSwapCellItem:
     case Opcode::kStoreArrayItem:
@@ -446,10 +463,12 @@ bool hasArbitraryExecution(const Instr& inst) {
     case Opcode::kTpAlloc:
     case Opcode::kUnicodeCompare:
     case Opcode::kUnicodeConcat:
+    case Opcode::kUnicodeEqual:
     case Opcode::kUnicodeRepeat:
     case Opcode::kUnicodeSubscr:
     case Opcode::kUnreachable:
     case Opcode::kUpdatePrevInstr:
+    case Opcode::kUseObj:
     case Opcode::kUseType:
     case Opcode::kWaitHandleLoadCoroOrResult:
     case Opcode::kWaitHandleLoadWaiter:
@@ -497,13 +516,12 @@ bool hasArbitraryExecution(const Instr& inst) {
     case Opcode::kInvokeStaticFunction:
     case Opcode::kIsInstance:
     case Opcode::kIsTruthy:
+    case Opcode::kListSubscr:
     case Opcode::kLoadAttr:
-    case Opcode::kLoadAttrCached:
     case Opcode::kLoadAttrSpecial:
     case Opcode::kLoadAttrSuper:
     case Opcode::kLoadGlobal:
     case Opcode::kLoadMethod:
-    case Opcode::kLoadMethodCached:
     case Opcode::kLoadMethodSuper:
     case Opcode::kLoadModuleAttrCached:
     case Opcode::kLoadModuleMethodCached:
@@ -521,35 +539,23 @@ bool hasArbitraryExecution(const Instr& inst) {
     case Opcode::kSetSetItem:
     case Opcode::kSetUpdate:
     case Opcode::kStoreAttr:
-    case Opcode::kStoreAttrCached:
     case Opcode::kStoreSubscr:
     case Opcode::kUnaryOp:
     case Opcode::kUnpackExToTuple:
+    case Opcode::kUnpackSequence:
     case Opcode::kVectorCall:
     case Opcode::kXDecref:
-    case Opcode::kYieldAndYieldFrom:
-    case Opcode::kYieldFrom:
-    case Opcode::kYieldFromHandleStopAsyncIteration:
     case Opcode::kYieldValue:
       return true;
 
     case Opcode::kCallCFunc:
       switch (static_cast<const CallCFunc&>(inst).func()) {
-#if PY_VERSION_HEX >= 0x030C0000
         case CallCFunc::Func::kJitCoro_GetAwaitableIter:
           return true;
         case CallCFunc::Func::kCix_PyAsyncGenValueWrapperNew:
           return false;
         case CallCFunc::Func::kJitGen_yf:
           return false;
-#else
-        case CallCFunc::Func::kCix_PyCoro_GetAwaitableIter:
-          return true;
-        case CallCFunc::Func::kCix_PyAsyncGenValueWrapperNew:
-          return false;
-        case CallCFunc::Func::kCix_PyGen_yf:
-          return false;
-#endif
       }
       JIT_ABORT(
           "Bad CallCFunc function {}",
@@ -559,4 +565,4 @@ bool hasArbitraryExecution(const Instr& inst) {
   JIT_ABORT("Bad opcode {}", static_cast<int>(inst.opcode()));
 }
 
-} // namespace jit::hir
+} // namespace cinderx::jit::hir

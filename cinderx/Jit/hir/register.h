@@ -7,7 +7,7 @@
 #include <iosfwd>
 #include <string>
 
-namespace jit::hir {
+namespace cinderx::jit::hir {
 
 class Instr;
 
@@ -19,6 +19,9 @@ class Register {
  public:
   explicit Register(int i) : id_(i) {}
 
+  Register(const Register&) = delete;
+  Register& operator=(const Register&) = delete;
+
   // An integer identifier for this register. This is unique per `Function`.
   int id() const {
     return id_;
@@ -28,7 +31,7 @@ class Register {
   Type type() const {
     return type_;
   }
-  void set_type(Type type) {
+  void setType(Type type) {
     type_ = type;
   }
 
@@ -42,21 +45,14 @@ class Register {
   Instr* instr() const {
     return instr_;
   }
-  void set_instr(Instr* instr) {
+  void setInstr(Instr* instr) {
     instr_ = instr;
   }
 
-  // A unique name for this value. This name has no connection to the original
-  // Python program.
-  const std::string& name() const;
-
  private:
-  DISALLOW_COPY_AND_ASSIGN(Register);
-
   Type type_{TTop};
   Instr* instr_{nullptr};
   int id_{-1};
-  mutable std::string name_;
 };
 
 // The refcount semantics of a value held in a Register.
@@ -111,7 +107,7 @@ inline auto format_as(const jit::hir::ValueKind& kind) {
   return fmt::underlying(kind);
 }
 
-} // namespace jit::hir
+} // namespace cinderx::jit::hir
 
 template <>
-struct fmt::formatter<jit::hir::Register> : fmt::ostream_formatter {};
+struct fmt::formatter<cinderx::jit::hir::Register> : fmt::ostream_formatter {};

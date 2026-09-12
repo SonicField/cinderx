@@ -2,17 +2,19 @@
 
 #pragma once
 
+#include "cinderx/Common/hugepages.h"
 #include "cinderx/Common/log.h"
 #include "cinderx/Common/slab.h"
 #include "cinderx/Common/util.h"
 
 #include <cstddef>
 #include <cstdlib>
+#include <memory>
 #include <mutex>
 #include <utility>
 #include <vector>
 
-namespace jit {
+namespace cinderx {
 
 template <class T>
 struct ObjectSizeTrait {
@@ -40,7 +42,6 @@ class SlabArenaIterator {
   }
 
   bool operator==(const SlabArenaIterator& other) const = default;
-  bool operator!=(const SlabArenaIterator& other) const = default;
 
   T& operator*() {
     return *slab_iter_;
@@ -58,7 +59,11 @@ class SlabArenaIterator {
         return *this = SlabArenaIterator{};
       }
       slab_iter_ = currentSlab().begin();
-      JIT_CHECK(slab_iter_ != currentSlab().end(), "Unexpected empty slab");
+      // Only the last slab can be empty: a new slab is appended only when the
+      // previous one is full, and an empty slab accepts the next allocation.
+      if (isSlabEnd()) {
+        return *this = SlabArenaIterator{};
+      }
     }
     return *this;
   }
@@ -90,6 +95,30 @@ class SlabArenaIterator {
   SlabIterator<T> slab_iter_;
 };
 
+std::shared_ptr<HugePageArena> getSharedHugePageArena();
+
+// The mutexes of every live SlabArena, so that pthread_atfork() handlers can
+// quiesce them across a fork().
+//
+// SlabArena is a template with instances scattered across JIT state, so they
+// register themselves here instead of being enumerated by hand.  No SlabArena
+// ever locks another, so the handlers may take them in any order.
+class SlabArenaForkRegistry {
+ public:
+  static SlabArenaForkRegistry& get();
+
+  void add(std::mutex* mutex);
+  void remove(std::mutex* mutex);
+
+  void atForkPrepare();
+  void atForkParent();
+  void atForkChild();
+
+ private:
+  std::mutex lock_;
+  std::vector<std::mutex*> mutexes_;
+};
+
 // SlabArena is a simple arena allocator, using slabs that are multiples of the
 // system's page size. Allocated objects never move after creation, and all
 // objects will be kept alive until the SlabArena they came from is destroyed.
@@ -115,8 +144,20 @@ class SlabArena {
   using iterator = SlabArenaIterator<T, kSlabSize>;
 
   SlabArena() {
-    slabs_.emplace_back(SizeTrait::size());
+    slabs_.emplace_back(SizeTrait::size(), getSharedHugePageArena());
+    // Registered last so a throwing constructor can't leave a dangling pointer
+    // behind, as the destructor won't run for a half-constructed arena.
+    SlabArenaForkRegistry::get().add(&mutex_);
   }
+
+  ~SlabArena() {
+    SlabArenaForkRegistry::get().remove(&mutex_);
+  }
+
+  SlabArena(const SlabArena&) = delete;
+  SlabArena(SlabArena&&) = delete;
+  SlabArena& operator=(const SlabArena&) = delete;
+  SlabArena& operator=(SlabArena&&) = delete;
 
   // Allocate a new instance of T using the given constructor arguments.
   template <typename... Args>
@@ -131,17 +172,19 @@ class SlabArena {
     }
 #endif
 
-    void* mem = slabs_.back().allocate();
-    if (mem == nullptr) {
-      mem = slabs_.emplace_back(SizeTrait::size()).allocate();
-      JIT_CHECK(mem != nullptr, "Empty slab failed to allocate");
+    T* object = slabs_.back().emplace(std::forward<Args>(args)...);
+    if (object == nullptr) {
+      auto& slab =
+          slabs_.emplace_back(SizeTrait::size(), getSharedHugePageArena());
 #ifndef WIN32
       if (mlocked_) {
-        slabs_.back().mlock();
+        slab.mlock();
       }
 #endif
+      object = slab.emplace(std::forward<Args>(args)...);
+      JIT_CHECK(object != nullptr, "Empty slab failed to allocate");
     }
-    return new (mem) T(std::forward<Args>(args)...);
+    return object;
   }
 
 #ifndef WIN32
@@ -178,4 +221,4 @@ class SlabArena {
 #endif
 };
 
-} // namespace jit
+} // namespace cinderx

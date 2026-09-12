@@ -2,16 +2,16 @@
 
 #include "cinderx/Jit/lir/dce.h"
 
+#include "cinderx/Common/containers.h"
 #include "cinderx/Common/util.h"
-#include "cinderx/Jit/containers.h"
 #include "cinderx/Jit/lir/instruction.h"
 #include "cinderx/Jit/lir/operand.h"
 
-namespace jit::lir {
+namespace cinderx::jit::lir {
 
 // For the purposes of dead code elimination, we consider writes to physical
 // registers as affecting memory.
-static inline bool operandAffectsMemory(const OperandBase* operand) {
+static inline bool operandAffectsMemory(const Operand* operand) {
   return (
       operand->isReg() || operand->isStack() || operand->isMem() ||
       operand->isInd());
@@ -21,15 +21,13 @@ static inline bool operandAffectsMemory(const OperandBase* operand) {
 // live set - that is, whether it contains control flow or memory effects which
 // mean that we should unconditionally keep this instruction.
 static bool isUseful(const Instruction* instruction) {
-  const InstrProperty::InstrInfo& properties =
-      InstrProperty::getProperties(instruction);
+  Opcode opcode = instruction->opcode();
   JIT_CHECK(
-      instruction->output() != nullptr || properties.is_essential,
+      instruction->output() != nullptr || isEssential(opcode),
       "Any instruction without an output must be marked as essential.");
   return (
-      instruction->isAnyBranch() || instruction->isTerminator() ||
-      properties.flag_effects != FlagEffects::kNone ||
-      properties.is_essential || operandAffectsMemory(instruction->output()));
+      isAnyBranch(opcode) || isTerminator(opcode) || writesFlags(opcode) ||
+      isEssential(opcode) || operandAffectsMemory(instruction->output()));
 }
 
 void eliminateDeadCode(Function* function) {
@@ -40,22 +38,21 @@ void eliminateDeadCode(Function* function) {
       worklist.push(instruction);
     }
   };
-  for (auto& block : function->basicblocks()) {
+  for (auto& block : function->basicBlocks()) {
     for (auto& instruction : block->instructions()) {
       if (isUseful(instruction.get())) {
         mark_live(instruction.get());
       }
     }
   }
-  auto add_linked_instruction_to_worklist = [&](OperandBase* operand) {
+  auto add_linked_instruction_to_worklist = [&](Operand* operand) {
     if (operand == nullptr || !operand->isLinked()) {
       return;
     }
-    Instruction* linked_instruction =
-        static_cast<LinkedOperand*>(operand)->getLinkedInstr();
+    Instruction* linked_instruction = operand->getLinkedInstr();
     mark_live(linked_instruction);
   };
-  auto add_all_operand_registers_to_worklist = [&](OperandBase* operand) {
+  auto add_all_operand_registers_to_worklist = [&](Operand* operand) {
     if (operand->isInd()) {
       MemoryIndirect* indirect = operand->getMemoryIndirect();
       add_linked_instruction_to_worklist(indirect->getBaseRegOperand());
@@ -77,7 +74,7 @@ void eliminateDeadCode(Function* function) {
     }
   }
   // Filter anything not in the live set out.
-  for (auto& block : function->basicblocks()) {
+  for (auto& block : function->basicBlocks()) {
     for (auto instruction_iterator = block->instructions().begin();
          instruction_iterator != block->instructions().end();) {
       // The LIR APIs for removing instructions takes an iterator. We keep a
@@ -93,4 +90,4 @@ void eliminateDeadCode(Function* function) {
   }
 }
 
-} // namespace jit::lir
+} // namespace cinderx::jit::lir

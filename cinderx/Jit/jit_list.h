@@ -8,7 +8,7 @@
 #include <memory>
 #include <string_view>
 
-namespace jit {
+namespace cinderx::jit {
 
 // The JIT list is a file that specifies which functions should be compiled.
 //
@@ -76,9 +76,6 @@ class JITList : public IJITList {
 
   // Dict of name/qualname -> dict of file basename -> set of line numbers.
   Ref<> name_file_line_no_;
-
-  // Cached string object for the "/" path separator.
-  mutable Ref<> path_sep_;
 };
 
 // A wildcard JIT list allows one to match multiple functions with a single
@@ -126,4 +123,4 @@ class WildcardJITList : public JITList {
   Ref<> wildcard_;
 };
 
-} // namespace jit
+} // namespace cinderx::jit

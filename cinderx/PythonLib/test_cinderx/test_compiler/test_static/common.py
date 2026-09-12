@@ -8,7 +8,6 @@ import ast
 import asyncio
 import builtins
 import gc
-import os
 import re
 import sys
 from contextlib import AbstractContextManager, contextmanager
@@ -48,7 +47,7 @@ from cinderx.static import (
     TYPED_UINT64,
     TYPED_UINT8,
 )
-from cinderx.test_support import compiles_after_one_call
+from cinderx.test_support import compiles_after_one_call, is_jit_compiled_after_call
 
 from ..common import CompilerTest
 
@@ -61,7 +60,6 @@ TEST_OPT_OUT = DepTrackingOptOut("tests")
 # warnings about using Any.
 @final
 class TModule(ModuleType):
-    # pyre-ignore[3]: Have fun trying to type this as non-Any.
     def __getattr__(self, name: str) -> Any: ...
 
 
@@ -110,7 +108,7 @@ def get_child(mod: ModuleTable, name: str) -> Value | None:
     return mod.get_child(name, TEST_OPT_OUT)
 
 
-class TestCompiler(Compiler):
+class CompilerHarness(Compiler):
     def __init__(
         self,
         source_by_name: Mapping[str, str],
@@ -191,13 +189,13 @@ class TestCompiler(Compiler):
 
     def type_error(
         self, name: str, pattern: str, at: str | None = None
-    ) -> TestCompiler:
+    ) -> CompilerHarness:
         source = self.source_by_name[name]
         with self.test_case.type_error_ctx(source, pattern, at):
             self.compile_module(name)
         return self
 
-    def revealed_type(self, name: str, type: str) -> TestCompiler:
+    def revealed_type(self, name: str, type: str) -> CompilerHarness:
         source = self.source_by_name[name]
         with self.test_case.revealed_type_ctx(source, type):
             self.compile_module(name)
@@ -290,10 +288,6 @@ class TestErrors:
 
 
 class StaticTestBase(CompilerTest):
-    _inline_comprehensions: bool = bool(
-        os.getenv("PYTHONINLINECOMPREHENSIONS")
-    ) or sys.version_info >= (3, 12)
-
     @classmethod
     def setUpClass(cls) -> None:
         init_static_python()
@@ -404,9 +398,10 @@ class StaticTestBase(CompilerTest):
         if offset is not None:
             self.assertEqual(exc.offset, offset)
 
-    # pyre-ignore[34]: missing type variable
+    #  typing.Optional[bool])]` isn't present in the function's parameters.
+    #  parameters.
     def revealed_type_ctx(self, code: str, type: str) -> ContextManager[None]:
-        # pyre-ignore[7]: bad return type
+        #  `_GeneratorContextManager[None]`.
         return self.type_error_ctx(
             code, rf"reveal_type\(.+\): '{re.escape(type)}'", at="reveal_type("
         )
@@ -429,14 +424,14 @@ class StaticTestBase(CompilerTest):
     def _clean_sources(self, sources: dict[str, str]) -> dict[str, str]:
         return {name: self.clean_code(code) for name, code in sources.items()}
 
-    def compiler(self, **sources: str) -> TestCompiler:
-        return TestCompiler(self._clean_sources(sources), self)
+    def compiler(self, **sources: str) -> CompilerHarness:
+        return CompilerHarness(self._clean_sources(sources), self)
 
-    def strict_compiler(self, **sources: str) -> TestCompiler:
-        return TestCompiler(self._clean_sources(sources), self, strict_modules=True)
+    def strict_compiler(self, **sources: str) -> CompilerHarness:
+        return CompilerHarness(self._clean_sources(sources), self, strict_modules=True)
 
-    def strict_patch_compiler(self, **sources: str) -> TestCompiler:
-        return TestCompiler(
+    def strict_patch_compiler(self, **sources: str) -> CompilerHarness:
+        return CompilerHarness(
             self._clean_sources(sources),
             self,
             strict_modules=True,
@@ -585,7 +580,6 @@ class StaticTestBase(CompilerTest):
         class C:
             __slots__ = ()
 
-        # pyre-ignore[16]: Pyre is confused and thinks we're accessing attribute `C`
         # from `int`.
         return C().__sizeof__()
 
@@ -616,7 +610,7 @@ __slot_types__ = {slot_types!r}
         if not compiles_after_one_call():
             return
 
-        self.assertTrue(cinderx.jit.is_jit_compiled(func), func.__name__)
+        self.assertTrue(is_jit_compiled_after_call(func), func.__name__)
 
     def assert_not_jitted(self, func: Callable[..., object]) -> None:
         if not cinderx.jit.is_enabled():
@@ -628,17 +622,17 @@ __slot_types__ = {slot_types!r}
         # ensure clean classloader/vtable slate for all tests
         cinderx.clear_classloader_caches()
 
-        # Ensure our async tests don't change the event loop policy.  The default should
-        # currently be None, as this is the setUp() call which runs early in the test
-        # process.  We can't explicitly check though, as asyncio.get_event_loop_policy()
-        # will initialize a proper default policy object. This leads to the test
-        # framework complaining about environment changes.
-        self.addCleanup(lambda: asyncio.set_event_loop_policy(None))
+        # Ensure our async tests don't leave a new event loop registered at the end of
+        # the test, which can lead to the test framework complaining about environment
+        # changes.
+        self.addCleanup(lambda: asyncio.set_event_loop(None))
 
+    # pyrefly: ignore [bad-override]
     def subTest(
         self, msg: str | None = None, **kwargs: object
     ) -> AbstractContextManager[object, bool]:
         cinderx.clear_classloader_caches()
+        # pyrefly: ignore [bad-return]
         return super().subTest(msg=msg, **kwargs)
 
     def make_async_func_hot(self, func: Callable[[], Awaitable[object]]) -> None:

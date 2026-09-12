@@ -5,14 +5,13 @@
 #include "cinderx/Common/py-portability.h"
 #include "cinderx/module_state.h"
 
-namespace jit {
-#if PY_VERSION_HEX >= 0x030C0000
+namespace cinderx::jit {
 GenDataFooter** jitGenDataFooterPtr(PyGenObject* gen, PyCodeObject* gen_code) {
   // TASK(T209501671): This has way too much going on. If we made PyGenObject
   // use PyObject_VAR_HEAD like it probably should this would get simpler. If
   // we expanded the allocation to include the GenDataFooter it'd get simpler
   // still.
-  BorrowedRef<PyTypeObject> gen_type = cinderx::getModuleState()->genType();
+  BorrowedRef<PyTypeObject> gen_type = cinderx::getModuleState()->gen_type;
 
   size_t python_frame_data_bytes =
       _PyFrame_NumSlotsForCodeObject(gen_code) * gen_type->tp_itemsize;
@@ -31,5 +30,4 @@ GenDataFooter** jitGenDataFooterPtr(PyGenObject* gen) {
 GenDataFooter* jitGenDataFooter(PyGenObject* gen) {
   return *jitGenDataFooterPtr(gen);
 }
-#endif
-} // namespace jit
+} // namespace cinderx::jit

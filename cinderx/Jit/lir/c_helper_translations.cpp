@@ -6,17 +6,26 @@
 
 #include <fmt/format.h>
 
-namespace jit::lir {
+namespace cinderx::jit::lir {
 
 const std::string* mapCHelperToLIR(uint64_t addr) {
+  if constexpr (kOS == OS::kMacOS) {
+    // Nothing is inlined on Apple platforms.  The translation below calls
+    // PyErr_Format, which is variadic, passing its arguments in registers.
+    // Apple's ARM64 ABI passes variadic arguments on the stack instead, so
+    // PyErr_Format reads NULL for the '%s' conversions and segfaults.  Leaving
+    // the helpers out-of-line lets the C compiler get the ABI right.
+    return nullptr;
+  }
+
   static const std::unordered_map<uint64_t, std::string> mapping = {
-      {reinterpret_cast<uint64_t>(JITRT_Cast),
+      {reinterpret_cast<uint64_t>(rt::cast),
        fmt::format(
            R"(Function:
 BB %0 - succs: %2 %1
        %5:Object = LoadArg 0(0x0):Object
        %6:Object = LoadArg 1(0x1):Object
-       %7:Object = Move [%5:Object + {0:#x}]:Object
+       %7:Object = Load [%5:Object + {0:#x}]:Object
        %8:Object = Equal %7:Object, %6:Object
                    CondBranch %8:Object
 
@@ -25,14 +34,16 @@ BB %1 - preds: %0 - succs: %2 %3
                    CondBranch %10:Object
 
 BB %2 - preds: %0 %1 - succs: %4
-                   Return %5:Object
+      %17:Object = Move %5:Object
+                   Return
 
 BB %3 - preds: %1 - succs: %4
-      %13:Object = Move [%7:Object + {1:#x}]:Object
-      %14:Object = Move [%6:Object + {1:#x}]:Object
+      %13:Object = Load [%7:Object + {1:#x}]:Object
+      %14:Object = Load [%6:Object + {1:#x}]:Object
                    Call PyErr_Format, PyExc_TypeError, "expected '%s', got '%s'", %14:Object, %13:Object
       %16:Object = Move 0(0x0):Object
-                   Return %16:Object
+      %18:Object = Move %16:Object
+                   Return
 
 BB %4 - preds: %2 %3
 )",
@@ -43,4 +54,4 @@ BB %4 - preds: %2 %3
   return it != mapping.end() ? &it->second : nullptr;
 }
 
-} // namespace jit::lir
+} // namespace cinderx::jit::lir

@@ -40,6 +40,9 @@
 #include "pydtrace.h"
 #include "setobject.h"
 
+
+#include "cinderx/module_c_state.h"
+
 #define USE_COMPUTED_GOTOS 0
 #include "Python/ceval_macros.h"
 
@@ -138,6 +141,13 @@ pop_1_error:
 
   switch (opcode) {
     // BEGIN BYTECODES //
+    override inst(LOAD_COMMON_CONSTANT, ( -- value)) {
+        // Use our own copy of common constants to avoid depending on the
+        // offset of interp->common_consts within PyInterpreterState.
+        assert(oparg < NUM_COMMON_CONSTANTS);
+        value = PyStackRef_FromPyObjectNew(Ci_common_consts[oparg]);
+    }
+
     override op(_PUSH_FRAME, (new_frame--)) {
       // Write it out explicitly because it's subtly different.
       // Eventually this should be the only occurrence of this code.
@@ -180,6 +190,27 @@ pop_1_error:
       PyStackRef_CLOSE(v);
       ERROR_IF(err < 0);
     }
+
+    // Meta Python bumps the type version when shared keys change, so
+    // _GUARD_TYPE_VERSION covers it; upstream Python still needs this check.
+    op(_GUARD_KEYS_VERSION, (keys_version / 2, owner-- owner)) {
+#ifndef META_PYTHON
+      PyTypeObject* owner_cls = Py_TYPE(PyStackRef_AsPyObjectBorrow(owner));
+      PyHeapTypeObject* owner_heap_type = (PyHeapTypeObject*)owner_cls;
+      PyDictKeysObject* keys = owner_heap_type->ht_cached_keys;
+      DEOPT_IF(FT_ATOMIC_LOAD_UINT32_RELAXED(keys->dk_version) != keys_version);
+#else
+      (void)keys_version;
+#endif
+    }
+
+    macro(LOAD_ATTR_METHOD_WITH_VALUES) = unused / 1 + _GUARD_TYPE_VERSION +
+        _GUARD_DORV_VALUES_INST_ATTR_FROM_DICT + _GUARD_KEYS_VERSION +
+        _LOAD_ATTR_METHOD_WITH_VALUES;
+
+    macro(LOAD_ATTR_NONDESCRIPTOR_WITH_VALUES) = unused / 1 +
+        _GUARD_TYPE_VERSION + _GUARD_DORV_VALUES_INST_ATTR_FROM_DICT +
+        _GUARD_KEYS_VERSION + _LOAD_ATTR_NONDESCRIPTOR_WITH_VALUES;
 
     override inst(EXTENDED_OPCODE, (args[oparg >> 2]-- top[oparg & 0x03])) {
       // Decode any extended oparg
@@ -1100,7 +1131,7 @@ pop_1_error:
       assert(!_PyErr_Occurred(tstate));
 #endif
       RELOAD_STACK();
-#if Py_TAIL_CALL_INTERP
+#if _Py_TAIL_CALL_INTERP
       int opcode;
 #endif
       DISPATCH();

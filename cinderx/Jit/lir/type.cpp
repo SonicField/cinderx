@@ -2,9 +2,10 @@
 
 #include "cinderx/Jit/lir/type.h"
 
+#include <bit>
 #include <ostream>
 
-namespace jit::lir {
+namespace cinderx::jit::lir {
 
 size_t bitSize(DataType dt) {
   switch (dt) {
@@ -17,11 +18,16 @@ size_t bitSize(DataType dt) {
     case DataType::k64bit:
     case DataType::kDouble:
     case DataType::kObject:
+    case DataType::kObjectUntagged:
       return 64;
     default:
       break;
   }
   throw std::runtime_error{fmt::format("Unrecognized LIR DataType: {}", dt)};
+}
+
+size_t byteShift(DataType dt) {
+  return std::bit_width(bitSize(dt) / 8) - 1;
 }
 
 std::ostream& operator<<(std::ostream& os, OperandType ty) {
@@ -50,4 +56,4 @@ std::ostream& operator<<(std::ostream& os, DataType dt) {
   return os << "<unknown DataType " << static_cast<uint8_t>(dt) << ">";
 }
 
-} // namespace jit::lir
+} // namespace cinderx::jit::lir

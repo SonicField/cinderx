@@ -9,44 +9,20 @@ def test():
     x = 0
     x = 4
     return x
---- Expected 3.10 ---
-fun jittestmodule:test {
-  bb 0 {
-    v3:Nullptr = LoadConst<Nullptr>
-    Snapshot
-    v6:ImmortalLongExact[4] = LoadConst<ImmortalLongExact[4]>
-    Return v6
-  }
-}
 --- Expected 3.12 ---
 fun jittestmodule:test {
   bb 0 {
-    v7:Nullptr = LoadConst<Nullptr>
+    LoadFrame
+    v5:Nullptr = LoadConst<Nullptr>
     Snapshot
-    v8:CInt32 = LoadEvalBreaker
-    CondBranch<2, 1> v8
-  }
-
-  bb 2 (preds 0) {
-    Snapshot
-    v9:CInt32 = RunPeriodicTasks {
-      FrameState {
-        CurInstrOffset 0
-        Locals<1> v7
-      }
-    }
-    Branch<1>
-  }
-
-  bb 1 (preds 0, 2) {
-    Snapshot
-    v13:ImmortalLongExact[4] = LoadConst<ImmortalLongExact[4]>
-    Return v13
+    v8:ImmortalLongExact[4] = LoadConst<ImmortalLongExact[4]>
+    Return v8
   }
 }
 --- Expected 3.14 ---
 fun jittestmodule:test {
   bb 0 {
+    LoadFrame
     v7:Nullptr = LoadConst<Nullptr>
     Snapshot
     v8:CInt64 = LoadEvalBreaker
@@ -55,7 +31,7 @@ fun jittestmodule:test {
 
   bb 2 (preds 0) {
     Snapshot
-    v9:CInt32 = RunPeriodicTasks {
+    v13:CInt32 = RunPeriodicTasks {
       FrameState {
         CurInstrOffset 0
         Locals<1> v7
@@ -66,16 +42,17 @@ fun jittestmodule:test {
 
   bb 1 (preds 0, 2) {
     Snapshot
-    v11:ImmortalLongExact[0] = LoadConst<ImmortalLongExact[0]>
+    v9:ImmortalLongExact[0] = LoadConst<ImmortalLongExact[0]>
     Snapshot
-    v13:ImmortalLongExact[4] = LoadConst<ImmortalLongExact[4]>
+    v11:ImmortalLongExact[4] = LoadConst<ImmortalLongExact[4]>
     Snapshot
-    Return v13
+    Return v11
   }
 }
 --- Expected 3.15 ---
 fun jittestmodule:test {
   bb 0 {
+    LoadFrame
     v7:Nullptr = LoadConst<Nullptr>
     Snapshot
     v8:CInt64 = LoadEvalBreaker
@@ -84,7 +61,7 @@ fun jittestmodule:test {
 
   bb 2 (preds 0) {
     Snapshot
-    v9:CInt32 = RunPeriodicTasks {
+    v13:CInt32 = RunPeriodicTasks {
       FrameState {
         CurInstrOffset 0
         Locals<1> v7
@@ -95,11 +72,72 @@ fun jittestmodule:test {
 
   bb 1 (preds 0, 2) {
     Snapshot
-    v11:ImmortalLongExact[0] = LoadConst<ImmortalLongExact[0]>
+    v9:ImmortalLongExact[0] = LoadConst<ImmortalLongExact[0]>
     Snapshot
-    v13:ImmortalLongExact[4] = LoadConst<ImmortalLongExact[4]>
+    v11:ImmortalLongExact[4] = LoadConst<ImmortalLongExact[4]>
     Snapshot
-    Return v13
+    Return v11
+  }
+}
+--- Expected 3.16 ---
+fun jittestmodule:test {
+  bb 0 {
+    LoadFrame
+    v7:Nullptr = LoadConst<Nullptr>
+    Snapshot
+    v8:CInt64 = LoadEvalBreaker
+    CondBranch<2, 1> v8
+  }
+
+  bb 2 (preds 0) {
+    Snapshot
+    v13:CInt32 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+        Locals<1> v7
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
+    Snapshot
+    v9:ImmortalLongExact[0] = LoadConst<ImmortalLongExact[0]>
+    Snapshot
+    v11:ImmortalLongExact[4] = LoadConst<ImmortalLongExact[4]>
+    Snapshot
+    Return v11
+  }
+}
+--- Expected 3.14t ---
+fun jittestmodule:test {
+  bb 0 {
+    LoadFrame
+    v7:Nullptr = LoadConst<Nullptr>
+    Snapshot
+    AtQuiescentState
+    v8:CInt64 = LoadEvalBreaker
+    CondBranch<2, 1> v8
+  }
+
+  bb 2 (preds 0) {
+    Snapshot
+    v13:CInt32 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+        Locals<1> v7
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
+    Snapshot
+    v9:ImmortalLongExact[0] = LoadConst<ImmortalLongExact[0]>
+    Snapshot
+    v11:ImmortalLongExact[4] = LoadConst<ImmortalLongExact[4]>
+    Snapshot
+    Return v11
   }
 }
 --- Test Name ---
@@ -111,79 +149,22 @@ def test():
     for i in (0, 1):
         y = i
     return x
---- Expected 3.10 ---
-fun jittestmodule:test {
-  bb 0 {
-    v10:Nullptr = LoadConst<Nullptr>
-    Snapshot
-    v11:ImmortalLongExact[4] = LoadConst<ImmortalLongExact[4]>
-    v13:ImmortalLongExact[0] = LoadConst<ImmortalLongExact[0]>
-    v15:MortalTupleExact[tuple:0xdeadbeef] = LoadConst<MortalTupleExact[tuple:0xdeadbeef]>
-    v16:Object = GetIter v15 {
-      FrameState {
-        CurInstrOffset 10
-        Locals<3> v11 v13 v10
-      }
-    }
-    Branch<4>
-  }
-
-  bb 4 (preds 0, 2) {
-    v21:Object = Phi<0, 2> v13 v28
-    v22:OptObject = Phi<0, 2> v10 v28
-    v18:CInt32 = LoadEvalBreaker
-    CondBranch<5, 1> v18
-  }
-
-  bb 5 (preds 4) {
-    Snapshot
-    v23:CInt32 = RunPeriodicTasks {
-      FrameState {
-        CurInstrOffset 12
-        Locals<3> v11 v21 v22
-        Stack<1> v16
-      }
-    }
-    Branch<1>
-  }
-
-  bb 1 (preds 4, 5) {
-    Snapshot
-    v28:Object = InvokeIterNext v16 {
-      FrameState {
-        CurInstrOffset 12
-        Locals<3> v11 v21 v22
-        Stack<1> v16
-      }
-    }
-    CondBranchIterNotDone<2, 3> v28
-  }
-
-  bb 2 (preds 1) {
-    Snapshot
-    Branch<4>
-  }
-
-  bb 3 (preds 1) {
-    Snapshot
-    Return v11
-  }
-}
 --- Expected 3.12 ---
 fun jittestmodule:test {
   bb 0 {
-    v14:Nullptr = LoadConst<Nullptr>
+    LoadFrame
+    v16:Nullptr = LoadConst<Nullptr>
     Snapshot
-    v15:CInt32 = LoadEvalBreaker
-    CondBranch<6, 5> v15
+    v17:CInt32 = LoadEvalBreaker
+    CondBranch<6, 5> v17
   }
 
   bb 6 (preds 0) {
     Snapshot
-    v16:CInt32 = RunPeriodicTasks {
+    v33:CInt32 = RunPeriodicTasks {
       FrameState {
         CurInstrOffset 0
-        Locals<3> v14 v14 v14
+        Locals<3> v16 v16 v16
       }
     }
     Branch<5>
@@ -191,21 +172,21 @@ fun jittestmodule:test {
 
   bb 5 (preds 0, 6) {
     Snapshot
-    v20:ImmortalLongExact[4] = LoadConst<ImmortalLongExact[4]>
-    v22:ImmortalLongExact[0] = LoadConst<ImmortalLongExact[0]>
-    v24:MortalTupleExact[tuple:0xdeadbeef] = LoadConst<MortalTupleExact[tuple:0xdeadbeef]>
-    v25:Object = GetIter v24 {
+    v18:ImmortalLongExact[4] = LoadConst<ImmortalLongExact[4]>
+    v20:ImmortalLongExact[0] = LoadConst<ImmortalLongExact[0]>
+    v22:MortalTupleExact[tuple:0xdeadbeef] = LoadConst<MortalTupleExact[tuple:0xdeadbeef]>
+    v23:Object = GetIter v22 {
       FrameState {
         CurInstrOffset 12
-        Locals<3> v20 v22 v14
+        Locals<3> v18 v20 v16
       }
     }
     Branch<7>
   }
 
   bb 7 (preds 2, 5) {
-    v30:Object = Phi<2, 5> v37 v22
-    v31:OptObject = Phi<2, 5> v37 v14
+    v25:Object = Phi<2, 5> v28 v20
+    v26:OptObject = Phi<2, 5> v28 v16
     v27:CInt32 = LoadEvalBreaker
     CondBranch<8, 1> v27
   }
@@ -215,8 +196,8 @@ fun jittestmodule:test {
     v32:CInt32 = RunPeriodicTasks {
       FrameState {
         CurInstrOffset 14
-        Locals<3> v20 v30 v31
-        Stack<1> v25
+        Locals<3> v18 v25 v26
+        Stack<1> v23
       }
     }
     Branch<1>
@@ -224,14 +205,14 @@ fun jittestmodule:test {
 
   bb 1 (preds 7, 8) {
     Snapshot
-    v37:Object = InvokeIterNext v25 {
+    v28:Object = InvokeIterNext v23 {
       FrameState {
         CurInstrOffset 14
-        Locals<3> v20 v30 v31
-        Stack<1> v25
+        Locals<3> v18 v25 v26
+        Stack<1> v23
       }
     }
-    CondBranchIterNotDone<2, 4> v37
+    CondBranchIterNotDone<2, 4> v28
   }
 
   bb 2 (preds 1) {
@@ -241,24 +222,103 @@ fun jittestmodule:test {
 
   bb 4 (preds 1) {
     Snapshot
-    Return v20
+    Return v18
   }
 }
 --- Expected 3.14 ---
 fun jittestmodule:test {
   bb 0 {
-    v14:Nullptr = LoadConst<Nullptr>
+    LoadFrame
+    v16:Nullptr = LoadConst<Nullptr>
     Snapshot
-    v15:CInt64 = LoadEvalBreaker
-    CondBranch<6, 5> v15
+    v17:CInt64 = LoadEvalBreaker
+    CondBranch<6, 5> v17
   }
 
   bb 6 (preds 0) {
     Snapshot
-    v16:CInt32 = RunPeriodicTasks {
+    v33:CInt32 = RunPeriodicTasks {
       FrameState {
         CurInstrOffset 0
-        Locals<3> v14 v14 v14
+        Locals<3> v16 v16 v16
+      }
+    }
+    Branch<5>
+  }
+
+  bb 5 (preds 0, 6) {
+    Snapshot
+    v18:ImmortalLongExact[4] = LoadConst<ImmortalLongExact[4]>
+    Snapshot
+    v20:ImmortalLongExact[0] = LoadConst<ImmortalLongExact[0]>
+    Snapshot
+    v22:MortalTupleExact[tuple:0xdeadbeef] = LoadConst<MortalTupleExact[tuple:0xdeadbeef]>
+    v23:Object = GetIter v22 {
+      FrameState {
+        CurInstrOffset 12
+        Locals<3> v18 v20 v16
+      }
+    }
+    Branch<7>
+  }
+
+  bb 7 (preds 2, 5) {
+    v25:Object = Phi<2, 5> v28 v20
+    v26:OptObject = Phi<2, 5> v28 v16
+    v27:CInt64 = LoadEvalBreaker
+    CondBranch<8, 1> v27
+  }
+
+  bb 8 (preds 7) {
+    Snapshot
+    v32:CInt32 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 14
+        Locals<3> v18 v25 v26
+        Stack<1> v23
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 7, 8) {
+    Snapshot
+    v28:Object = InvokeIterNext v23 {
+      FrameState {
+        CurInstrOffset 14
+        Locals<3> v18 v25 v26
+        Stack<1> v23
+      }
+    }
+    CondBranchIterNotDone<2, 4> v28
+  }
+
+  bb 2 (preds 1) {
+    Snapshot
+    Branch<7>
+  }
+
+  bb 4 (preds 1) {
+    Snapshot
+    Return v18
+  }
+}
+--- Expected 3.15 ---
+fun jittestmodule:test {
+  bb 0 {
+    LoadFrame
+    v18:Nullptr = LoadConst<Nullptr>
+    Snapshot
+    v19:CInt64 = LoadEvalBreaker
+    CondBranch<6, 5> v19
+  }
+
+  bb 6 (preds 0) {
+    Snapshot
+    v37:CInt32 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+        Locals<3> v18 v18 v18
       }
     }
     Branch<5>
@@ -273,27 +333,28 @@ fun jittestmodule:test {
     v24:MortalTupleExact[tuple:0xdeadbeef] = LoadConst<MortalTupleExact[tuple:0xdeadbeef]>
     v25:Object = GetIter v24 {
       FrameState {
-        CurInstrOffset 12
-        Locals<3> v20 v22 v14
+        CurInstrOffset 14
+        Locals<3> v20 v22 v18
       }
     }
+    v26:Nullptr = LoadConst<Nullptr>
     Branch<7>
   }
 
   bb 7 (preds 2, 5) {
-    v30:Object = Phi<2, 5> v37 v22
-    v31:OptObject = Phi<2, 5> v37 v14
-    v27:CInt64 = LoadEvalBreaker
-    CondBranch<8, 1> v27
+    v29:Object = Phi<2, 5> v32 v22
+    v30:OptObject = Phi<2, 5> v32 v18
+    v31:CInt64 = LoadEvalBreaker
+    CondBranch<8, 1> v31
   }
 
   bb 8 (preds 7) {
     Snapshot
-    v32:CInt32 = RunPeriodicTasks {
+    v36:CInt32 = RunPeriodicTasks {
       FrameState {
-        CurInstrOffset 14
-        Locals<3> v20 v30 v31
-        Stack<1> v25
+        CurInstrOffset 18
+        Locals<3> v20 v29 v30
+        Stack<2> v25 v26
       }
     }
     Branch<1>
@@ -301,14 +362,14 @@ fun jittestmodule:test {
 
   bb 1 (preds 7, 8) {
     Snapshot
-    v37:Object = InvokeIterNext v25 {
+    v32:Object = InvokeIterNext v25 {
       FrameState {
-        CurInstrOffset 14
-        Locals<3> v20 v30 v31
-        Stack<1> v25
+        CurInstrOffset 18
+        Locals<3> v20 v29 v30
+        Stack<2> v25 v26
       }
     }
-    CondBranchIterNotDone<2, 4> v37
+    CondBranchIterNotDone<2, 4> v32
   }
 
   bb 2 (preds 1) {
@@ -321,21 +382,22 @@ fun jittestmodule:test {
     Return v20
   }
 }
---- Expected 3.15 ---
+--- Expected 3.16 ---
 fun jittestmodule:test {
   bb 0 {
-    v15:Nullptr = LoadConst<Nullptr>
+    LoadFrame
+    v18:Nullptr = LoadConst<Nullptr>
     Snapshot
-    v16:CInt64 = LoadEvalBreaker
-    CondBranch<6, 5> v16
+    v19:CInt64 = LoadEvalBreaker
+    CondBranch<6, 5> v19
   }
 
   bb 6 (preds 0) {
     Snapshot
-    v17:CInt32 = RunPeriodicTasks {
+    v37:CInt32 = RunPeriodicTasks {
       FrameState {
         CurInstrOffset 0
-        Locals<3> v15 v15 v15
+        Locals<3> v18 v18 v18
       }
     }
     Branch<5>
@@ -343,35 +405,35 @@ fun jittestmodule:test {
 
   bb 5 (preds 0, 6) {
     Snapshot
-    v21:ImmortalLongExact[4] = LoadConst<ImmortalLongExact[4]>
+    v20:ImmortalLongExact[4] = LoadConst<ImmortalLongExact[4]>
     Snapshot
-    v23:ImmortalLongExact[0] = LoadConst<ImmortalLongExact[0]>
+    v22:ImmortalLongExact[0] = LoadConst<ImmortalLongExact[0]>
     Snapshot
-    v25:MortalTupleExact[tuple:0xdeadbeef] = LoadConst<MortalTupleExact[tuple:0xdeadbeef]>
-    v26:Object = GetIter v25 {
+    v24:MortalTupleExact[tuple:0xdeadbeef] = LoadConst<MortalTupleExact[tuple:0xdeadbeef]>
+    v25:Object = GetIter v24 {
       FrameState {
-        CurInstrOffset 12
-        Locals<3> v21 v23 v15
+        CurInstrOffset 14
+        Locals<3> v20 v22 v18
       }
     }
-    v27:Nullptr = LoadConst<Nullptr>
+    v26:Nullptr = LoadConst<Nullptr>
     Branch<7>
   }
 
   bb 7 (preds 2, 5) {
-    v34:Object = Phi<2, 5> v42 v23
-    v35:OptObject = Phi<2, 5> v42 v15
-    v30:CInt64 = LoadEvalBreaker
-    CondBranch<8, 1> v30
+    v29:Object = Phi<2, 5> v32 v22
+    v30:OptObject = Phi<2, 5> v32 v18
+    v31:CInt64 = LoadEvalBreaker
+    CondBranch<8, 1> v31
   }
 
   bb 8 (preds 7) {
     Snapshot
     v36:CInt32 = RunPeriodicTasks {
       FrameState {
-        CurInstrOffset 14
-        Locals<3> v21 v34 v35
-        Stack<2> v26 v27
+        CurInstrOffset 18
+        Locals<3> v20 v29 v30
+        Stack<2> v25 v26
       }
     }
     Branch<1>
@@ -379,14 +441,14 @@ fun jittestmodule:test {
 
   bb 1 (preds 7, 8) {
     Snapshot
-    v42:Object = InvokeIterNext v26 {
+    v32:Object = InvokeIterNext v25 {
       FrameState {
-        CurInstrOffset 14
-        Locals<3> v21 v34 v35
-        Stack<2> v26 v27
+        CurInstrOffset 18
+        Locals<3> v20 v29 v30
+        Stack<2> v25 v26
       }
     }
-    CondBranchIterNotDone<2, 4> v42
+    CondBranchIterNotDone<2, 4> v32
   }
 
   bb 2 (preds 1) {
@@ -396,7 +458,87 @@ fun jittestmodule:test {
 
   bb 4 (preds 1) {
     Snapshot
-    Return v21
+    Return v20
+  }
+}
+--- Expected 3.14t ---
+fun jittestmodule:test {
+  bb 0 {
+    LoadFrame
+    v16:Nullptr = LoadConst<Nullptr>
+    Snapshot
+    AtQuiescentState
+    v17:CInt64 = LoadEvalBreaker
+    CondBranch<6, 5> v17
+  }
+
+  bb 6 (preds 0) {
+    Snapshot
+    v33:CInt32 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+        Locals<3> v16 v16 v16
+      }
+    }
+    Branch<5>
+  }
+
+  bb 5 (preds 0, 6) {
+    Snapshot
+    v18:ImmortalLongExact[4] = LoadConst<ImmortalLongExact[4]>
+    Snapshot
+    v20:ImmortalLongExact[0] = LoadConst<ImmortalLongExact[0]>
+    Snapshot
+    v22:ImmortalTupleExact[tuple:0xdeadbeef] = LoadConst<ImmortalTupleExact[tuple:0xdeadbeef]>
+    v23:Object = GetIter v22 {
+      FrameState {
+        CurInstrOffset 12
+        Locals<3> v18 v20 v16
+      }
+    }
+    Branch<7>
+  }
+
+  bb 7 (preds 2, 5) {
+    v25:Object = Phi<2, 5> v28 v20
+    v26:OptObject = Phi<2, 5> v28 v16
+    AtQuiescentState
+    v27:CInt64 = LoadEvalBreaker
+    CondBranch<8, 1> v27
+  }
+
+  bb 8 (preds 7) {
+    Snapshot
+    v32:CInt32 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 14
+        Locals<3> v18 v25 v26
+        Stack<1> v23
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 7, 8) {
+    Snapshot
+    v28:Object = InvokeIterNext v23 {
+      FrameState {
+        CurInstrOffset 14
+        Locals<3> v18 v25 v26
+        Stack<1> v23
+      }
+    }
+    CondBranchIterNotDone<2, 4> v28
+  }
+
+  bb 2 (preds 1) {
+    Snapshot
+    Branch<7>
+  }
+
+  bb 4 (preds 1) {
+    Snapshot
+    Return v18
   }
 }
 --- Test Name ---
@@ -406,34 +548,10 @@ def test():
     def inner():
         x = 4
     inner()
---- Expected 3.10 ---
-fun jittestmodule:test {
-  bb 0 {
-    v6:Nullptr = LoadConst<Nullptr>
-    Snapshot
-    v7:MortalCode["inner"] = LoadConst<MortalCode["inner"]>
-    v8:MortalUnicodeExact["test.<locals>.inner"] = LoadConst<MortalUnicodeExact["test.<locals>.inner"]>
-    v9:MortalFunc = MakeFunction v7 v8 {
-      FrameState {
-        CurInstrOffset 4
-        Locals<1> v6
-      }
-    }
-    Snapshot
-    v12:Object = VectorCall<0> v9 {
-      FrameState {
-        CurInstrOffset 10
-        Locals<1> v9
-      }
-    }
-    Snapshot
-    v13:NoneType = LoadConst<NoneType>
-    Return v13
-  }
-}
 --- Expected 3.12 ---
 fun jittestmodule:test {
   bb 0 {
+    LoadFrame
     v11:Nullptr = LoadConst<Nullptr>
     Snapshot
     v12:CInt32 = LoadEvalBreaker
@@ -442,7 +560,7 @@ fun jittestmodule:test {
 
   bb 2 (preds 0) {
     Snapshot
-    v13:CInt32 = RunPeriodicTasks {
+    v21:CInt32 = RunPeriodicTasks {
       FrameState {
         CurInstrOffset 0
         Locals<1> v11
@@ -453,29 +571,30 @@ fun jittestmodule:test {
 
   bb 1 (preds 0, 2) {
     Snapshot
-    v15:MortalCode["inner"] = LoadConst<MortalCode["inner"]>
-    v16:Nullptr = LoadConst<Nullptr>
-    v17:MortalFunc = MakeFunction v15 v16 {
+    v13:MortalCode["inner"] = LoadConst<MortalCode["inner"]>
+    v14:Nullptr = LoadConst<Nullptr>
+    v15:MortalFunc = MakeFunction v13 v14 {
       FrameState {
         CurInstrOffset 4
         Locals<1> v11
       }
     }
     Snapshot
-    v23:Object = VectorCall<0> v17 {
+    v22:Object = VectorCall<0> v15 {
       FrameState {
         CurInstrOffset 12
-        Locals<1> v17
+        Locals<1> v15
       }
     }
     Snapshot
-    v21:ImmortalNoneType = LoadConst<ImmortalNoneType>
-    Return<ImmortalNoneType> v21
+    v19:ImmortalNoneType = LoadConst<ImmortalNoneType>
+    Return<ImmortalNoneType> v19
   }
 }
 --- Expected 3.14 ---
 fun jittestmodule:test {
   bb 0 {
+    LoadFrame
     v11:Nullptr = LoadConst<Nullptr>
     Snapshot
     v12:CInt64 = LoadEvalBreaker
@@ -484,7 +603,7 @@ fun jittestmodule:test {
 
   bb 2 (preds 0) {
     Snapshot
-    v13:CInt32 = RunPeriodicTasks {
+    v20:CInt32 = RunPeriodicTasks {
       FrameState {
         CurInstrOffset 0
         Locals<1> v11
@@ -495,29 +614,30 @@ fun jittestmodule:test {
 
   bb 1 (preds 0, 2) {
     Snapshot
-    v15:MortalCode["inner"] = LoadConst<MortalCode["inner"]>
-    v16:Nullptr = LoadConst<Nullptr>
-    v17:MortalFunc = MakeFunction v15 v16 {
+    v13:MortalCode["inner"] = LoadConst<MortalCode["inner"]>
+    v14:Nullptr = LoadConst<Nullptr>
+    v15:MortalFunc = MakeFunction v13 v14 {
       FrameState {
         CurInstrOffset 4
         Locals<1> v11
       }
     }
     Snapshot
-    v22:Object = VectorCall<0> v17 {
+    v21:Object = VectorCall<0> v15 {
       FrameState {
         CurInstrOffset 12
-        Locals<1> v17
+        Locals<1> v15
       }
     }
     Snapshot
-    v21:ImmortalNoneType = LoadConst<ImmortalNoneType>
-    Return v21
+    v19:ImmortalNoneType = LoadConst<ImmortalNoneType>
+    Return v19
   }
 }
 --- Expected 3.15 ---
 fun jittestmodule:test {
   bb 0 {
+    LoadFrame
     v11:Nullptr = LoadConst<Nullptr>
     Snapshot
     v12:CInt64 = LoadEvalBreaker
@@ -526,7 +646,7 @@ fun jittestmodule:test {
 
   bb 2 (preds 0) {
     Snapshot
-    v13:CInt32 = RunPeriodicTasks {
+    v20:CInt32 = RunPeriodicTasks {
       FrameState {
         CurInstrOffset 0
         Locals<1> v11
@@ -537,24 +657,113 @@ fun jittestmodule:test {
 
   bb 1 (preds 0, 2) {
     Snapshot
-    v15:MortalCode["inner"] = LoadConst<MortalCode["inner"]>
-    v16:Nullptr = LoadConst<Nullptr>
-    v17:MortalFunc = MakeFunction v15 v16 {
+    v13:MortalCode["inner"] = LoadConst<MortalCode["inner"]>
+    v14:Nullptr = LoadConst<Nullptr>
+    v15:MortalFunc = MakeFunction v13 v14 {
+      FrameState {
+        CurInstrOffset 6
+        Locals<1> v11
+      }
+    }
+    Snapshot
+    v21:Object = VectorCall<0> v15 {
+      FrameState {
+        CurInstrOffset 14
+        Locals<1> v15
+      }
+    }
+    Snapshot
+    v19:ImmortalNoneType = LoadConst<ImmortalNoneType>
+    Snapshot
+    Return v19
+  }
+}
+--- Expected 3.16 ---
+fun jittestmodule:test {
+  bb 0 {
+    LoadFrame
+    v11:Nullptr = LoadConst<Nullptr>
+    Snapshot
+    v12:CInt64 = LoadEvalBreaker
+    CondBranch<2, 1> v12
+  }
+
+  bb 2 (preds 0) {
+    Snapshot
+    v20:CInt32 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+        Locals<1> v11
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
+    Snapshot
+    v13:MortalCode["inner"] = LoadConst<MortalCode["inner"]>
+    v14:Nullptr = LoadConst<Nullptr>
+    v15:MortalFunc = MakeFunction v13 v14 {
+      FrameState {
+        CurInstrOffset 6
+        Locals<1> v11
+      }
+    }
+    Snapshot
+    v21:Object = VectorCall<0> v15 {
+      FrameState {
+        CurInstrOffset 14
+        Locals<1> v15
+      }
+    }
+    Snapshot
+    v19:ImmortalNoneType = LoadConst<ImmortalNoneType>
+    Snapshot
+    Return v19
+  }
+}
+--- Expected 3.14t ---
+fun jittestmodule:test {
+  bb 0 {
+    LoadFrame
+    v11:Nullptr = LoadConst<Nullptr>
+    Snapshot
+    AtQuiescentState
+    v12:CInt64 = LoadEvalBreaker
+    CondBranch<2, 1> v12
+  }
+
+  bb 2 (preds 0) {
+    Snapshot
+    v20:CInt32 = RunPeriodicTasks {
+      FrameState {
+        CurInstrOffset 0
+        Locals<1> v11
+      }
+    }
+    Branch<1>
+  }
+
+  bb 1 (preds 0, 2) {
+    Snapshot
+    v13:MortalCode["inner"] = LoadConst<MortalCode["inner"]>
+    v14:Nullptr = LoadConst<Nullptr>
+    v15:MortalFunc = MakeFunction v13 v14 {
       FrameState {
         CurInstrOffset 4
         Locals<1> v11
       }
     }
     Snapshot
-    v22:Object = VectorCall<0> v17 {
+    v21:Object = VectorCall<0> v15 {
       FrameState {
         CurInstrOffset 12
-        Locals<1> v17
+        Locals<1> v15
       }
     }
     Snapshot
-    v21:ImmortalNoneType = LoadConst<ImmortalNoneType>
-    Return v21
+    v19:ImmortalNoneType = LoadConst<ImmortalNoneType>
+    Return v19
   }
 }
 --- Test Name ---
@@ -568,13 +777,6 @@ fun test {
     Return<CInt32> v0
   }
 }
---- Expected 3.10 ---
-fun test {
-  bb 0 {
-    v0:CInt32 = LoadArg<0, CInt32>
-    Return<CInt32> v0
-  }
-}
 --- Expected 3.12 ---
 fun test {
   bb 0 {
@@ -590,6 +792,20 @@ fun test {
   }
 }
 --- Expected 3.15 ---
+fun test {
+  bb 0 {
+    v0:CInt32 = LoadArg<0, CInt32>
+    Return<CInt32> v0
+  }
+}
+--- Expected 3.16 ---
+fun test {
+  bb 0 {
+    v0:CInt32 = LoadArg<0, CInt32>
+    Return<CInt32> v0
+  }
+}
+--- Expected 3.14t ---
 fun test {
   bb 0 {
     v0:CInt32 = LoadArg<0, CInt32>
